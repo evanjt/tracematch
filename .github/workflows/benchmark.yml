@@ -36,6 +36,14 @@ jobs:
       - name: Install iai-callgrind-runner
         run: cargo binstall --no-confirm iai-callgrind-runner@0.14.2
 
+      - name: Cache iai-callgrind baselines
+        uses: actions/cache@v4
+        with:
+          path: target/iai
+          key: iai-baseline-${{ runner.os }}-${{ hashFiles('benches/iai_benchmarks.rs') }}
+          restore-keys: |
+            iai-baseline-${{ runner.os }}-
+
       - name: Run iai-callgrind benchmarks
         run: cargo bench --bench iai_benchmarks
 
