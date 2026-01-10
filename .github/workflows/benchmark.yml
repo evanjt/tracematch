@@ -30,11 +30,13 @@ jobs:
       - name: Install valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
       - name: Install iai-callgrind-runner
-        run: cargo binstall --no-confirm iai-callgrind-runner@0.14.2
+        run: cargo install iai-callgrind-runner@0.14.2
+
+      - name: Verify iai-callgrind-runner
+        run: |
+          which iai-callgrind-runner || echo "$HOME/.cargo/bin/iai-callgrind-runner"
+          ls -la $HOME/.cargo/bin/ | grep iai || true
 
       - name: Cache iai-callgrind baselines
         uses: actions/cache@v4
@@ -46,6 +48,8 @@ jobs:
 
       - name: Run iai-callgrind benchmarks
         run: cargo bench --bench iai_benchmarks
+        env:
+          IAI_CALLGRIND_RUNNER: /home/runner/.cargo/bin/iai-callgrind-runner
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
