@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  build-android:
+    name: Build Android (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: arm64-v8a
+            rust_target: aarch64-linux-android
+          - arch: armeabi-v7a
+            rust_target: armv7-linux-androideabi
+          - arch: x86_64
+            rust_target: x86_64-linux-android
+          - arch: x86
+            rust_target: i686-linux-android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          prefix-key: android-${{ matrix.arch }}
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+      - name: Build
+        run: cargo ndk -t ${{ matrix.rust_target }} build --release
+      - name: Generate Kotlin bindings
+        if: matrix.arch == 'arm64-v8a'
+        run: |
+          cargo build --release --bin uniffi-bindgen
+          mkdir -p bindings/kotlin
+          ./target/release/uniffi-bindgen generate \
+            --library target/${{ matrix.rust_target }}/release/libroute_matcher.so \
+            --language kotlin \
+            --out-dir bindings/kotlin
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts/jniLibs/${{ matrix.arch }}
+          cp target/${{ matrix.rust_target }}/release/libroute_matcher.so artifacts/jniLibs/${{ matrix.arch }}/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ matrix.arch }}
+          path: artifacts/
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'arm64-v8a'
+        with:
+          name: kotlin-bindings
+          path: bindings/kotlin/
+
+  build-ios:
+    name: Build iOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: swatinem/rust-cache@v2
+        with:
+          prefix-key: ios
+      - name: Build device
+        run: cargo build --release --target aarch64-apple-ios
+      - name: Build simulator (arm64)
+        run: cargo build --release --target aarch64-apple-ios-sim
+      - name: Build simulator (x86_64)
+        run: cargo build --release --target x86_64-apple-ios
+      - name: Generate Swift bindings
+        run: |
+          cargo build --release --bin uniffi-bindgen
+          mkdir -p bindings/swift
+          ./target/release/uniffi-bindgen generate \
+            --library target/aarch64-apple-ios/release/libroute_matcher.a \
+            --language swift \
+            --out-dir bindings/swift
+      - name: Create universal simulator library
+        run: |
+          mkdir -p artifacts/ios/{device,simulator,headers}
+          cp target/aarch64-apple-ios/release/libroute_matcher.a artifacts/ios/device/
+          lipo -create \
+            target/aarch64-apple-ios-sim/release/libroute_matcher.a \
+            target/x86_64-apple-ios/release/libroute_matcher.a \
+            -output artifacts/ios/simulator/libroute_matcher.a
+          cp bindings/swift/route_matcherFFI.h artifacts/ios/headers/
+          cat > artifacts/ios/headers/module.modulemap << 'EOF'
+          module route_matcherFFI {
+              header "route_matcherFFI.h"
+              export *
+          }
+          EOF
+      - name: Create XCFramework
+        run: |
+          xcodebuild -create-xcframework \
+            -library artifacts/ios/device/libroute_matcher.a \
+            -headers artifacts/ios/headers \
+            -library artifacts/ios/simulator/libroute_matcher.a \
+            -headers artifacts/ios/headers \
+            -output artifacts/ios/RouteMatcherFFI.xcframework
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcframework
+          path: artifacts/ios/RouteMatcherFFI.xcframework
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swift-bindings
+          path: bindings/swift/
+
+  create-release:
+    name: Create Release
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package Android
+        run: |
+          mkdir -p release/android/jniLibs
+          for arch in arm64-v8a armeabi-v7a x86_64 x86; do
+            mkdir -p release/android/jniLibs/$arch
+            cp artifacts/android-$arch/jniLibs/$arch/libroute_matcher.so release/android/jniLibs/$arch/
+          done
+          cp -r artifacts/kotlin-bindings release/android/kotlin
+          cd release && zip -r ../route-matcher-android-${{ github.ref_name }}.zip android
+      - name: Package iOS
+        run: |
+          mkdir -p release/ios
+          cp -r artifacts/ios-xcframework release/ios/RouteMatcherFFI.xcframework
+          cp -r artifacts/swift-bindings release/ios/Generated
+          cd release && zip -r ../route-matcher-ios-${{ github.ref_name }}.zip ios
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            route-matcher-android-${{ github.ref_name }}.zip
+            route-matcher-ios-${{ github.ref_name }}.zip
+          generate_release_notes: true

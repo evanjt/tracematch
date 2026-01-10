@@ -968,10 +968,18 @@ mod tests {
 
     #[test]
     fn test_resample_by_distance() {
+        // Need more points than target to trigger resampling
         let points = vec![
             make_point(0.0, 0.0),
             make_point(0.001, 0.0),
             make_point(0.002, 0.0),
+            make_point(0.003, 0.0),
+            make_point(0.004, 0.0),
+            make_point(0.005, 0.0),
+            make_point(0.006, 0.0),
+            make_point(0.007, 0.0),
+            make_point(0.008, 0.0),
+            make_point(0.009, 0.0),
         ];
         let resampled = resample_by_distance(&points, 5);
         assert_eq!(resampled.len(), 5);
