@@ -32,21 +32,12 @@ jobs:
           cargo bench --bench route_benchmarks -- --output-format bencher \
             | tee benchmark-results.txt
 
-      - name: Download previous benchmark data
-        uses: actions/cache@v4
-        with:
-          path: ./cache
-          key: ${{ runner.os }}-benchmark-${{ hashFiles('benches/**') }}
-          restore-keys: |
-            ${{ runner.os }}-benchmark-
-
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: tracematch Performance
           tool: 'cargo'
           output-file-path: benchmark-results.txt
-          external-data-json-path: ./cache/benchmark-data.json
           # Show alert if >15% slower
           alert-threshold: '115%'
           comment-on-alert: true
