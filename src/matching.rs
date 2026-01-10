@@ -49,9 +49,10 @@ pub fn compare_routes(
         return None;
     }
 
-    // Resample both routes to same number of points for fair comparison
-    let resampled1 = resample_route(&sig1.points, config.resample_count as usize);
-    let resampled2 = resample_route(&sig2.points, config.resample_count as usize);
+    // Resample both routes for fair comparison
+    // Use distance-proportional resampling if enabled, otherwise fixed count
+    let resampled1 = resample_for_comparison(&sig1.points, sig1.total_distance, config);
+    let resampled2 = resample_for_comparison(&sig2.points, sig2.total_distance, config);
 
     // Calculate AMD in both directions (AMD is asymmetric)
     let amd_1_to_2 = average_min_distance(&resampled1, &resampled2);
@@ -86,6 +87,35 @@ pub fn compare_routes(
         direction: direction_str,
         amd: avg_amd,
     })
+}
+
+/// Resample a route for comparison using the configured strategy.
+///
+/// If `resample_spacing_meters > 0`, uses distance-proportional resampling
+/// for consistent granularity regardless of route length.
+/// Otherwise, falls back to fixed `resample_count`.
+///
+/// # Arguments
+/// * `points` - The route points to resample
+/// * `total_distance` - Total route distance in meters
+/// * `config` - Match configuration with resampling parameters
+pub fn resample_for_comparison(
+    points: &[GpsPoint],
+    total_distance: f64,
+    config: &MatchConfig,
+) -> Vec<GpsPoint> {
+    let target_count = if config.resample_spacing_meters > 0.0 {
+        // Distance-proportional: aim for one point per spacing_meters
+        let count_from_distance = (total_distance / config.resample_spacing_meters).ceil() as u32;
+
+        // Clamp to min/max bounds
+        count_from_distance.clamp(config.min_resample_points, config.max_resample_points) as usize
+    } else {
+        // Legacy: fixed count
+        config.resample_count as usize
+    };
+
+    resample_route(points, target_count)
 }
 
 /// Calculate Average Minimum Distance from route1 to route2.
@@ -232,6 +262,19 @@ mod tests {
         ]
     }
 
+    /// Generate a route with approximately the given distance in meters
+    fn generate_route_with_distance(distance_m: f64) -> Vec<GpsPoint> {
+        // ~111km per degree latitude
+        let total_degrees = distance_m / 111_000.0;
+        let points = 100;
+        (0..points)
+            .map(|i| {
+                let progress = i as f64 / points as f64;
+                GpsPoint::new(51.5074 + progress * total_degrees, -0.1278)
+            })
+            .collect()
+    }
+
     #[test]
     fn test_amd_to_percentage() {
         // Below perfect threshold = 100%
@@ -282,5 +325,109 @@ mod tests {
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.match_percentage > 95.0);
+    }
+
+    // ========================================================================
+    // Distance-Proportional Resampling Tests
+    // ========================================================================
+
+    #[test]
+    fn test_resample_for_comparison_short_route() {
+        // 1km route with 50m spacing -> 20 points (clamped to min)
+        let points = generate_route_with_distance(1000.0);
+        let config = MatchConfig::default();
+
+        let resampled = resample_for_comparison(&points, 1000.0, &config);
+
+        // 1000m / 50m = 20 points (at minimum)
+        assert_eq!(resampled.len(), 20);
+    }
+
+    #[test]
+    fn test_resample_for_comparison_medium_route() {
+        // 5km route with 50m spacing -> 100 points
+        let points = generate_route_with_distance(5000.0);
+        let config = MatchConfig::default();
+
+        let resampled = resample_for_comparison(&points, 5000.0, &config);
+
+        // 5000m / 50m = 100 points
+        assert_eq!(resampled.len(), 100);
+    }
+
+    #[test]
+    fn test_resample_for_comparison_long_route() {
+        // 50km route with 50m spacing -> 200 points (clamped to max)
+        let points = generate_route_with_distance(50000.0);
+        let config = MatchConfig::default();
+
+        let resampled = resample_for_comparison(&points, 50000.0, &config);
+
+        // 50000m / 50m = 1000, but clamped to max 200
+        assert_eq!(resampled.len(), 200);
+    }
+
+    #[test]
+    fn test_resample_for_comparison_consistent_spacing() {
+        // Two routes of different lengths should have consistent point spacing
+        let short_route = generate_route_with_distance(2000.0); // 2km
+        let long_route = generate_route_with_distance(8000.0);  // 8km
+        let config = MatchConfig::default();
+
+        let resampled_short = resample_for_comparison(&short_route, 2000.0, &config);
+        let resampled_long = resample_for_comparison(&long_route, 8000.0, &config);
+
+        // Short: 2000/50 = 40 points
+        // Long: 8000/50 = 160 points
+        assert_eq!(resampled_short.len(), 40);
+        assert_eq!(resampled_long.len(), 160);
+
+        // Both should have ~50m spacing between points
+        let spacing_short = 2000.0 / (resampled_short.len() - 1) as f64;
+        let spacing_long = 8000.0 / (resampled_long.len() - 1) as f64;
+
+        assert!((spacing_short - 50.0).abs() < 5.0, "Short route spacing: {}", spacing_short);
+        assert!((spacing_long - 50.0).abs() < 5.0, "Long route spacing: {}", spacing_long);
+    }
+
+    #[test]
+    fn test_resample_for_comparison_legacy_mode() {
+        // When resample_spacing_meters is 0, use legacy fixed count
+        let points = generate_route_with_distance(5000.0);
+        let mut config = MatchConfig::default();
+        config.resample_spacing_meters = 0.0;
+        config.resample_count = 75;
+
+        let resampled = resample_for_comparison(&points, 5000.0, &config);
+
+        assert_eq!(resampled.len(), 75);
+    }
+
+    #[test]
+    fn test_resample_for_comparison_custom_spacing() {
+        // Custom 100m spacing
+        let points = generate_route_with_distance(5000.0);
+        let mut config = MatchConfig::default();
+        config.resample_spacing_meters = 100.0;
+
+        let resampled = resample_for_comparison(&points, 5000.0, &config);
+
+        // 5000m / 100m = 50 points
+        assert_eq!(resampled.len(), 50);
+    }
+
+    #[test]
+    fn test_compare_routes_different_lengths() {
+        // Test that routes of different lengths can still match
+        // when they represent the same path
+        let short_points = generate_route_with_distance(5000.0);
+        let long_points = generate_route_with_distance(5000.0);
+
+        let sig1 = RouteSignature::from_points("short", &short_points, &MatchConfig::default()).unwrap();
+        let sig2 = RouteSignature::from_points("long", &long_points, &MatchConfig::default()).unwrap();
+
+        let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
+        assert!(result.is_some());
+        assert!(result.unwrap().match_percentage > 95.0);
     }
 }

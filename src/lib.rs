@@ -72,9 +72,17 @@ pub mod algorithms;
 // LRU cache for efficient memory management
 pub mod lru_cache;
 
-// Stateful route engine (singleton with all route state)
+// Legacy stateful route engine (singleton with all route state)
+// TODO: Migrate to modular engine components in `engine_modular`
+pub mod engine_legacy;
+pub use engine_legacy::{with_engine, EngineStats, RouteEngine, ENGINE};
+
+// Modular route engine with extracted components
 pub mod engine;
-pub use engine::{with_engine, EngineStats, RouteEngine, ENGINE};
+pub use engine::{
+    ActivityData, ActivityStore, ModularEngineStats, ModularRouteEngine, RouteGrouper,
+    SignatureCache, SpatialIndex,
+};
 
 // Persistent route engine with tiered storage
 #[cfg(feature = "persistence")]
@@ -405,9 +413,25 @@ pub struct MatchConfig {
     /// Default: 200.0 meters
     pub endpoint_threshold: f64,
 
-    /// Number of points to resample routes to for comparison.
+    /// Fixed number of points for resampling (legacy mode).
+    /// If resample_spacing_meters > 0, this is ignored in favor of distance-proportional resampling.
     /// Default: 50
     pub resample_count: u32,
+
+    /// Target spacing between resampled points in meters.
+    /// When > 0, enables distance-proportional resampling for consistent granularity.
+    /// Set to 0 to use fixed resample_count instead.
+    /// Default: 50.0 meters
+    pub resample_spacing_meters: f64,
+
+    /// Minimum number of resampled points (only used with distance-proportional resampling).
+    /// Default: 20
+    pub min_resample_points: u32,
+
+    /// Maximum number of resampled points (only used with distance-proportional resampling).
+    /// Caps comparison complexity for very long routes.
+    /// Default: 200
+    pub max_resample_points: u32,
 
     /// Tolerance for Douglas-Peucker simplification (in degrees).
     /// Smaller values preserve more detail. Default: 0.0001 (~11 meters)
@@ -428,6 +452,9 @@ impl Default for MatchConfig {
             max_distance_diff_ratio: 0.20,
             endpoint_threshold: 200.0,
             resample_count: 50,
+            resample_spacing_meters: 50.0,
+            min_resample_points: 20,
+            max_resample_points: 200,
             simplification_tolerance: 0.0001,
             max_simplified_points: 100,
         }

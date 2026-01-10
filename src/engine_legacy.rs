@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use log::warn;
 use once_cell::sync::Lazy;
 use rstar::{RTree, RTreeObject, AABB};
 
@@ -334,7 +335,13 @@ impl RouteEngine {
     /// Returns empty string if activity not found.
     pub fn get_signature_points_json(&mut self, id: &str) -> String {
         if let Some(sig) = self.get_signature(id) {
-            serde_json::to_string(&sig.points).unwrap_or_else(|_| "[]".to_string())
+            serde_json::to_string(&sig.points).unwrap_or_else(|e| {
+                warn!(
+                    "Failed to serialize signature points for activity '{}': {}",
+                    id, e
+                );
+                "[]".to_string()
+            })
         } else {
             "[]".to_string()
         }
@@ -362,7 +369,13 @@ impl RouteEngine {
             }
         }
 
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&result).unwrap_or_else(|e| {
+            warn!(
+                "Failed to serialize signatures for group '{}': {}",
+                group_id, e
+            );
+            "{}".to_string()
+        })
     }
 
     // ========================================================================
@@ -487,7 +500,10 @@ impl RouteEngine {
     /// Get groups as JSON string (for efficient FFI).
     pub fn get_groups_json(&mut self) -> String {
         self.ensure_groups();
-        serde_json::to_string(&self.groups).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.groups).unwrap_or_else(|e| {
+            warn!("Failed to serialize route groups: {}", e);
+            "[]".to_string()
+        })
     }
 
     // ========================================================================
@@ -544,7 +560,10 @@ impl RouteEngine {
     /// Get sections as JSON string (for efficient FFI).
     pub fn get_sections_json(&mut self) -> String {
         self.ensure_sections();
-        serde_json::to_string(&self.sections).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.sections).unwrap_or_else(|e| {
+            warn!("Failed to serialize sections: {}", e);
+            "[]".to_string()
+        })
     }
 
     // ========================================================================
@@ -779,7 +798,10 @@ impl RouteEngine {
     /// Get all activity bounds as JSON.
     pub fn get_all_activity_bounds_json(&self) -> String {
         let info = self.get_all_activity_bounds_info();
-        serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&info).unwrap_or_else(|e| {
+            warn!("Failed to serialize activity bounds: {}", e);
+            "[]".to_string()
+        })
     }
 
     /// Get all signatures info for trace rendering.
@@ -803,7 +825,10 @@ impl RouteEngine {
     /// Get all signatures as JSON.
     pub fn get_all_signatures_json(&mut self) -> String {
         let info = self.get_all_signatures_info();
-        serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&info).unwrap_or_else(|e| {
+            warn!("Failed to serialize all signatures: {}", e);
+            "{}".to_string()
+        })
     }
 
     /// Compute total distance of a GPS track in meters.
@@ -950,7 +975,13 @@ impl RouteEngine {
         current_activity_id: Option<&str>,
     ) -> String {
         let result = self.get_route_performances(route_group_id, current_activity_id);
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&result).unwrap_or_else(|e| {
+            warn!(
+                "Failed to serialize route performances for group '{}': {}",
+                route_group_id, e
+            );
+            "{}".to_string()
+        })
     }
 
     // ========================================================================
@@ -1094,7 +1125,13 @@ impl RouteEngine {
     /// Get section performances as JSON string.
     pub fn get_section_performances_json(&mut self, section_id: &str) -> String {
         let result = self.get_section_performances(section_id);
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&result).unwrap_or_else(|e| {
+            warn!(
+                "Failed to serialize section performances for section '{}': {}",
+                section_id, e
+            );
+            "{}".to_string()
+        })
     }
 }
 

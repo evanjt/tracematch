@@ -348,24 +348,25 @@ fn compute_best_pace(cumulative_distances: &[f32], target_distance: f32) -> f32 
     let mut start_idx = 0;
 
     for end_idx in 1..cumulative_distances.len() {
-        let dist_covered = cumulative_distances[end_idx] - cumulative_distances[start_idx];
-
-        // Expand window until we have enough distance
-        while dist_covered > target_distance && start_idx < end_idx {
+        // Shrink window from the left while distance is greater than target
+        // Note: We must recalculate the distance inside the loop since start_idx changes
+        while start_idx < end_idx {
+            let dist_covered =
+                cumulative_distances[end_idx] - cumulative_distances[start_idx];
+            if dist_covered <= target_distance {
+                break;
+            }
             start_idx += 1;
         }
 
         // Check if this window gives us approximately the target distance
-        let actual_dist =
-            cumulative_distances[end_idx] - cumulative_distances.get(start_idx).unwrap_or(&0.0);
+        let actual_dist = cumulative_distances[end_idx] - cumulative_distances[start_idx];
 
         if actual_dist >= target_distance * 0.95 && actual_dist <= target_distance * 1.05 {
             let time_seconds = (end_idx - start_idx) as f32;
             if time_seconds > 0.0 {
                 let pace = actual_dist / time_seconds;
-                if pace > best_pace {
-                    best_pace = pace;
-                }
+                best_pace = best_pace.max(pace);
             }
         }
     }
@@ -555,5 +556,42 @@ mod tests {
 
         assert_eq!(curve.activities_analyzed, 0);
         assert_eq!(curve.get_pace_at(100.0), Some(0.0));
+    }
+
+    #[test]
+    fn test_compute_best_pace_sliding_window() {
+        // Create cumulative distances: each second covers 100m
+        // Total: 0, 100, 200, 300, 400, 500 (500m in 5 seconds)
+        let distances: Vec<f32> = (0..=5).map(|i| i as f32 * 100.0).collect();
+
+        // Target 200m - best pace should be 100 m/s (200m in 2s)
+        let pace = compute_best_pace(&distances, 200.0);
+        assert!(pace > 0.0, "Should find valid pace for 200m target");
+        // Each segment is 100m/1s, so 200m in 2s = 100 m/s
+        assert!(
+            (pace - 100.0).abs() < 1.0,
+            "Expected ~100 m/s, got {}",
+            pace
+        );
+
+        // Test with target too long - should return 0
+        let pace_too_long = compute_best_pace(&distances, 1000.0);
+        assert_eq!(pace_too_long, 0.0, "Should return 0 for target longer than activity");
+    }
+
+    #[test]
+    fn test_compute_best_pace_varying_speeds() {
+        // Simulate varying pace: slower at start, faster in middle
+        // Cumulative distances: 0, 50, 100, 200, 350, 550 (accelerating)
+        let distances: Vec<f32> = vec![0.0, 50.0, 100.0, 200.0, 350.0, 550.0];
+
+        // Target 200m - best segment should be from 200m to 400m (indices 3-4)
+        // That's 150m in 1s = 150 m/s, but we need ~200m window
+        // Actually indices 2-4 cover 200m-350m difference = 250m, indices 1-3 = 150m
+        // Let's find the actual best 200m segment
+        let pace = compute_best_pace(&distances, 200.0);
+
+        // Should find a valid pace since total is 550m
+        assert!(pace > 0.0, "Should find valid pace for 200m target in 550m activity");
     }
 }
