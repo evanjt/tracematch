@@ -49,12 +49,12 @@ fn extract_activity_trace(
         if is_near {
             // Point is near section - reset gap counter
             gap_count = 0;
-            current_sequence.push(point.clone());
+            current_sequence.push(*point);
         } else {
             gap_count += 1;
             // Allow small gaps but still add the point if we're in a sequence
             if gap_count <= MAX_GAP && !current_sequence.is_empty() {
-                current_sequence.push(point.clone());
+                current_sequence.push(*point);
             } else if gap_count > MAX_GAP {
                 // End current sequence if valid
                 if current_sequence.len() >= MIN_TRACE_POINTS {

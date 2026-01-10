@@ -220,17 +220,17 @@ pub fn resample_track(points: &[crate::GpsPoint], count: usize) -> Vec<crate::Gp
         return vec![];
     }
     if points.len() == 1 || count == 1 {
-        return vec![points[0].clone()];
+        return vec![points[0]];
     }
 
     let total_length = polyline_length(points);
     if total_length == 0.0 {
-        return vec![points[0].clone(); count];
+        return vec![points[0]; count];
     }
 
     let segment_length = total_length / (count - 1) as f64;
     let mut result = Vec::with_capacity(count);
-    result.push(points[0].clone());
+    result.push(points[0]);
 
     let mut current_distance = 0.0;
     let mut target_distance = segment_length;
@@ -255,7 +255,7 @@ pub fn resample_track(points: &[crate::GpsPoint], count: usize) -> Vec<crate::Gp
 
     // Ensure we end with the last point
     if result.len() < count {
-        result.push(points.last().unwrap().clone());
+        result.push(*points.last().unwrap());
     }
 
     result

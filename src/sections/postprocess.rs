@@ -74,10 +74,7 @@ fn compute_fold_ratio(polyline: &[GpsPoint], threshold: f64) -> f64 {
     // Compare first third to last third (reversed)
     let third = polyline.len() / 3;
     let first_third = &polyline[..third];
-    let last_third: Vec<GpsPoint> = polyline[(polyline.len() - third)..]
-        .iter()
-        .cloned()
-        .collect();
+    let last_third: Vec<GpsPoint> = polyline[(polyline.len() - third)..].to_vec();
 
     // Build tree from first third
     let first_tree = build_rtree(first_third);
@@ -196,7 +193,7 @@ pub fn merge_nearby_sections(
 
             // Skip if sections are very different lengths (>3x difference)
             let length_ratio = section_i.distance_meters / section_j.distance_meters.max(1.0);
-            if length_ratio > 3.0 || length_ratio < 0.33 {
+            if !(0.33..=3.0).contains(&length_ratio) {
                 continue;
             }
 
@@ -530,7 +527,7 @@ fn split_section_by_density(
                     let query = [point.latitude, point.longitude];
                     if let Some(nearest) = split_tree.nearest_neighbor(&query) {
                         if nearest.distance_2(&query) <= threshold_deg_sq {
-                            overlap_points.push(point.clone());
+                            overlap_points.push(*point);
                         }
                     }
                 }

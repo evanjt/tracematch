@@ -793,7 +793,7 @@ impl RouteEngine {
                     id.clone(),
                     SignatureInfo {
                         points: sig.points.clone(),
-                        center: sig.center.clone(),
+                        center: sig.center,
                     },
                 )
             })

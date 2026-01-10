@@ -54,6 +54,7 @@ impl PowerZoneConfig {
     }
 
     /// Get absolute power threshold for a zone
+    #[allow(dead_code)]
     fn get_zone_max(&self, zone: usize) -> u16 {
         if zone >= self.zone_thresholds.len() {
             return u16::MAX;
@@ -155,7 +156,7 @@ pub struct PowerZoneDistribution {
 impl PowerZoneDistribution {
     /// Get percentage for a specific zone (1-7)
     pub fn get_zone_percent(&self, zone: u8) -> f32 {
-        if zone >= 1 && zone <= 7 {
+        if (1..=7).contains(&zone) {
             self.zone_percentages[(zone - 1) as usize]
         } else {
             0.0
@@ -181,7 +182,7 @@ pub struct HRZoneDistribution {
 impl HRZoneDistribution {
     /// Get percentage for a specific zone (1-5)
     pub fn get_zone_percent(&self, zone: u8) -> f32 {
-        if zone >= 1 && zone <= 5 {
+        if (1..=5).contains(&zone) {
             self.zone_percentages[(zone - 1) as usize]
         } else {
             0.0

@@ -413,7 +413,7 @@ impl PersistentRouteEngine {
         for (route_id, match_info) in matches {
             self.activity_matches
                 .entry(route_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(match_info);
         }
 
@@ -445,10 +445,8 @@ impl PersistentRouteEngine {
             })
         })?;
 
-        for metrics in metrics_iter {
-            if let Ok(m) = metrics {
-                self.activity_metrics.insert(m.activity_id.clone(), m);
-            }
+        for m in metrics_iter.flatten() {
+            self.activity_metrics.insert(m.activity_id.clone(), m);
         }
 
         Ok(())
@@ -640,7 +638,7 @@ impl PersistentRouteEngine {
     /// # Example
     /// ```no_run
     /// # use route_matcher::persistence::PersistentRouteEngine;
-    /// # let mut engine = unsafe { std::mem::zeroed() };
+    /// # let mut engine: PersistentRouteEngine = unsafe { std::mem::zeroed() };
     /// // Delete activities older than 90 days
     /// let deleted = engine.cleanup_old_activities(90).unwrap();
     /// println!("Deleted {} old activities", deleted);
@@ -697,7 +695,7 @@ impl PersistentRouteEngine {
     /// # Example
     /// ```no_run
     /// # use route_matcher::persistence::PersistentRouteEngine;
-    /// # let mut engine = unsafe { std::mem::zeroed() };
+    /// # let mut engine: PersistentRouteEngine = unsafe { std::mem::zeroed() };
     /// // User expanded cache from 90 days to 1 year
     /// engine.mark_for_recomputation();
     /// // Next access to groups/sections will re-compute with improved data

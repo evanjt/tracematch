@@ -108,7 +108,7 @@ pub fn compute_consensus_polyline(
             }
         } else {
             // No nearby points - keep reference point
-            consensus_points.push(ref_point.clone());
+            consensus_points.push(*ref_point);
         }
     }
 
@@ -124,7 +124,7 @@ pub fn compute_consensus_polyline(
     // More observations + tighter spread = higher confidence
     let obs_factor = (observation_count as f64).min(10.0) / 10.0; // Saturates at 10 observations
     let spread_factor = 1.0 - (average_spread / proximity_threshold).min(1.0); // Lower spread = higher factor
-    let confidence = (obs_factor * 0.5 + spread_factor * 0.5).min(1.0).max(0.0);
+    let confidence = (obs_factor * 0.5 + spread_factor * 0.5).clamp(0.0, 1.0);
 
     ConsensusResult {
         polyline: consensus_points,

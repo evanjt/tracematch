@@ -16,14 +16,14 @@ use std::hash::Hash;
 /// ```
 /// use route_matcher::union_find::UnionFind;
 ///
-/// let mut uf = UnionFind::new();
-/// uf.make_set("a");
-/// uf.make_set("b");
-/// uf.make_set("c");
+/// let mut uf: UnionFind<i32> = UnionFind::new();
+/// uf.make_set(1);
+/// uf.make_set(2);
+/// uf.make_set(3);
 ///
-/// uf.union("a", "b");
-/// assert_eq!(uf.find("a"), uf.find("b"));
-/// assert_ne!(uf.find("a"), uf.find("c"));
+/// uf.union(&1, &2);
+/// assert_eq!(uf.find(&1), uf.find(&2));
+/// assert_ne!(uf.find(&1), uf.find(&3));
 /// ```
 #[derive(Debug, Clone)]
 pub struct UnionFind<T: Eq + Hash + Clone> {

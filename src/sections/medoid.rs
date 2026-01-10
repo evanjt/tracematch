@@ -145,14 +145,11 @@ pub fn resample_by_distance(points: &[GpsPoint], n: usize) -> Vec<GpsPoint> {
         let target_dist = (i as f64 / (n - 1) as f64) * total_length;
 
         // Find segment containing target distance
-        let mut seg_idx = 0;
-        for j in 1..cumulative.len() {
-            if cumulative[j] >= target_dist {
-                seg_idx = j - 1;
-                break;
-            }
-            seg_idx = j - 1;
-        }
+        let seg_idx = cumulative
+            .iter()
+            .skip(1)
+            .position(|&d| d >= target_dist)
+            .unwrap_or(cumulative.len() - 2);
 
         // Interpolate within segment
         let seg_start = cumulative[seg_idx];
