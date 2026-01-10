@@ -27,12 +27,15 @@ jobs:
         with:
           prefix-key: bench
 
-      - name: Run benchmarks
-        run: cargo bench --bench route_benchmarks -- --noplot
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Run iai-callgrind benchmarks
+        run: cargo bench --bench iai_benchmarks
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
-          path: target/criterion/
+          name: iai-benchmark-results
+          path: target/iai/
           retention-days: 30
