@@ -30,6 +30,12 @@ jobs:
       - name: Install valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install iai-callgrind-runner
+        run: cargo binstall --no-confirm iai-callgrind-runner@0.14.2
+
       - name: Run iai-callgrind benchmarks
         run: cargo bench --bench iai_benchmarks
 
