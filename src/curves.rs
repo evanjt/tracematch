@@ -11,7 +11,7 @@
 //!
 //! ## Example
 //! ```rust
-//! use route_matcher::curves::{compute_power_curve, PowerCurve};
+//! use tracematch::curves::{compute_power_curve, PowerCurve};
 //!
 //! let power_data = vec![200, 250, 300, 280, 260, 240, 220, 200, 190, 180];
 //! let durations = vec![1, 5, 10]; // seconds

@@ -11,7 +11,7 @@
 //!
 //! ## Example
 //! ```rust
-//! use route_matcher::zones::{calculate_power_zones, PowerZoneConfig};
+//! use tracematch::zones::{calculate_power_zones, PowerZoneConfig};
 //!
 //! let power_data = vec![150, 200, 250, 300, 280, 220, 180];
 //! let config = PowerZoneConfig::from_ftp(250);

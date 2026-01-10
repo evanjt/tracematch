@@ -19,7 +19,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use route_matcher::{GpsPoint, geo_utils};
+//! use tracematch::{GpsPoint, geo_utils};
 //!
 //! let track = vec![
 //!     GpsPoint::new(51.5074, -0.1278),  // London
@@ -79,7 +79,7 @@ use geo::{Distance, Haversine, Point};
 /// # Example
 ///
 /// ```rust
-/// use route_matcher::{GpsPoint, geo_utils};
+/// use tracematch::{GpsPoint, geo_utils};
 ///
 /// let london = GpsPoint::new(51.5074, -0.1278);
 /// let paris = GpsPoint::new(48.8566, 2.3522);
@@ -116,7 +116,7 @@ pub fn haversine_distance(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
 /// # Example
 ///
 /// ```rust
-/// use route_matcher::{GpsPoint, geo_utils};
+/// use tracematch::{GpsPoint, geo_utils};
 ///
 /// let track = vec![
 ///     GpsPoint::new(51.5074, -0.1278),
@@ -191,7 +191,7 @@ pub fn meters_to_degrees(meters: f64, latitude: f64) -> f64 {
 /// # Example
 ///
 /// ```rust
-/// use route_matcher::{GpsPoint, geo_utils};
+/// use tracematch::{GpsPoint, geo_utils};
 ///
 /// let track = vec![
 ///     GpsPoint::new(51.5000, -0.1300),
@@ -268,7 +268,7 @@ pub fn compute_bounds_tuple(points: &[GpsPoint]) -> (f64, f64, f64, f64) {
 /// # Example
 ///
 /// ```rust
-/// use route_matcher::{Bounds, geo_utils};
+/// use tracematch::{Bounds, geo_utils};
 ///
 /// let bounds_a = Bounds {
 ///     min_lat: 51.50, max_lat: 51.51,
@@ -321,7 +321,7 @@ pub fn bounds_overlap(a: &Bounds, b: &Bounds, buffer_meters: f64, reference_lat:
 /// # Example
 ///
 /// ```rust
-/// use route_matcher::{GpsPoint, geo_utils};
+/// use tracematch::{GpsPoint, geo_utils};
 ///
 /// let track = vec![
 ///     GpsPoint::new(51.50, -0.10),

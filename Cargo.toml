@@ -1,5 +1,5 @@
 [package]
-name = "route-matcher"
+name = "tracematch"
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ categories = ["algorithms", "science::geo"]
 publish = true
 
 [lib]
-name = "route_matcher"
+name = "tracematch"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Build route-matcher for iOS
+# Build tracematch for iOS
 # Prerequisites:
 #   - Rust with iOS targets: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 #   - Xcode command line tools
@@ -16,25 +16,25 @@ cd "$PROJECT_DIR"
 
 # Check if libraries are already built (from cache)
 LIBS_EXIST=1
-[ -f "target/aarch64-apple-ios/release/libroute_matcher.a" ] || LIBS_EXIST=0
-[ -f "target/aarch64-apple-ios-sim/release/libroute_matcher.a" ] || LIBS_EXIST=0
-[ -f "target/x86_64-apple-ios/release/libroute_matcher.a" ] || LIBS_EXIST=0
+[ -f "target/aarch64-apple-ios/release/libtracematch.a" ] || LIBS_EXIST=0
+[ -f "target/aarch64-apple-ios-sim/release/libtracematch.a" ] || LIBS_EXIST=0
+[ -f "target/x86_64-apple-ios/release/libtracematch.a" ] || LIBS_EXIST=0
 
 # Check if Swift bindings and XCFramework already exist
 XCFRAMEWORK_EXISTS=0
 [ -d "$OUTPUT_DIR/RouteMatcherFFI.xcframework" ] && XCFRAMEWORK_EXISTS=1
 SWIFT_BINDINGS_EXIST=0
-[ -f "$SWIFT_DIR/route_matcher.swift" ] && SWIFT_BINDINGS_EXISTS=1
-[ -f "$SWIFT_DIR/route_matcherFFI.h" ] && SWIFT_BINDINGS_EXISTS=1
+[ -f "$SWIFT_DIR/tracematch.swift" ] && SWIFT_BINDINGS_EXISTS=1
+[ -f "$SWIFT_DIR/tracematchFFI.h" ] && SWIFT_BINDINGS_EXISTS=1
 
 if [ "$LIBS_EXIST" -eq 1 ] && [ "$XCFRAMEWORK_EXISTS" -eq 1 ] && [ "$SWIFT_BINDINGS_EXISTS" -eq 1 ]; then
   echo "✅ iOS libraries and bindings already built (from cache), skipping build"
   mkdir -p "$OUTPUT_DIR/device" "$OUTPUT_DIR/simulator"
-  cp target/aarch64-apple-ios/release/libroute_matcher.a "$OUTPUT_DIR/device/libroute_matcher.a"
+  cp target/aarch64-apple-ios/release/libtracematch.a "$OUTPUT_DIR/device/libtracematch.a"
   lipo -create \
-    target/aarch64-apple-ios-sim/release/libroute_matcher.a \
-    target/x86_64-apple-ios/release/libroute_matcher.a \
-    -output "$OUTPUT_DIR/simulator/libroute_matcher.a" 2>/dev/null || true
+    target/aarch64-apple-ios-sim/release/libtracematch.a \
+    target/x86_64-apple-ios/release/libtracematch.a \
+    -output "$OUTPUT_DIR/simulator/libtracematch.a" 2>/dev/null || true
   exit 0
 fi
 
@@ -44,7 +44,7 @@ if [ "$LIBS_EXIST" -eq 1 ]; then
 else
 
 echo "============================================"
-echo "Building route-matcher for iOS"
+echo "Building tracematch for iOS"
 echo "============================================"
 echo ""
 
@@ -101,12 +101,12 @@ mkdir -p "$SIM_LIB_DIR"
 echo ""
 echo "Creating universal simulator library..."
 lipo -create \
-    target/aarch64-apple-ios-sim/release/libroute_matcher.a \
-    target/x86_64-apple-ios/release/libroute_matcher.a \
-    -output "$SIM_LIB_DIR/libroute_matcher.a"
+    target/aarch64-apple-ios-sim/release/libtracematch.a \
+    target/x86_64-apple-ios/release/libtracematch.a \
+    -output "$SIM_LIB_DIR/libtracematch.a"
 
 # Copy device library (same name as simulator for XCFramework compatibility)
-cp target/aarch64-apple-ios/release/libroute_matcher.a "$DEVICE_LIB_DIR/libroute_matcher.a"
+cp target/aarch64-apple-ios/release/libtracematch.a "$DEVICE_LIB_DIR/libtracematch.a"
 
 # Generate Swift bindings using the embedded uniffi-bindgen
 echo ""
@@ -123,7 +123,7 @@ fi
 BINDGEN_SUCCESS=false
 
 if cargo run --release --features ffi --bin uniffi-bindgen generate \
-    --library target/aarch64-apple-ios/release/libroute_matcher.a \
+    --library target/aarch64-apple-ios/release/libtracematch.a \
     --language swift \
     --out-dir "$SWIFT_DIR"; then
     BINDGEN_SUCCESS=true
@@ -133,7 +133,7 @@ else
     if command -v uniffi-bindgen &> /dev/null; then
         echo "Falling back to system uniffi-bindgen..."
         if uniffi-bindgen generate \
-            --library target/aarch64-apple-ios/release/libroute_matcher.a \
+            --library target/aarch64-apple-ios/release/libtracematch.a \
             --language swift \
             --out-dir "$SWIFT_DIR"; then
             BINDGEN_SUCCESS=true
@@ -156,32 +156,32 @@ fi
 # Validate generated files
 echo ""
 echo "Validating generated bindings..."
-if [ ! -f "$SWIFT_DIR/route_matcher.swift" ]; then
-    echo "ERROR: route_matcher.swift not generated"
+if [ ! -f "$SWIFT_DIR/tracematch.swift" ]; then
+    echo "ERROR: tracematch.swift not generated"
     exit 1
 fi
-if [ ! -f "$SWIFT_DIR/route_matcherFFI.h" ]; then
-    echo "ERROR: route_matcherFFI.h not generated"
+if [ ! -f "$SWIFT_DIR/tracematchFFI.h" ]; then
+    echo "ERROR: tracematchFFI.h not generated"
     exit 1
 fi
-echo "  ✓ route_matcher.swift"
-echo "  ✓ route_matcherFFI.h"
+echo "  ✓ tracematch.swift"
+echo "  ✓ tracematchFFI.h"
 
 # Generate TypeScript bindings
 echo ""
 echo "🔧 Generating TypeScript bindings..."
-TS_OUTPUT_DIR="../modules/route-matcher-native/src/generated"
+TS_OUTPUT_DIR="../modules/tracematch-native/src/generated"
 mkdir -p "$TS_OUTPUT_DIR"
 
 if cargo run --release --features ffi --bin uniffi-bindgen generate \
-    --library target/aarch64-apple-ios/release/libroute_matcher.a \
+    --library target/aarch64-apple-ios/release/libtracematch.a \
     --language typescript \
     --out-dir "$TS_OUTPUT_DIR" 2>/dev/null; then
     echo "TypeScript bindings generated successfully ✓"
 elif command -v uniffi-bindgen &> /dev/null; then
     echo "Falling back to system uniffi-bindgen..."
     if uniffi-bindgen generate \
-        --library target/aarch64-apple-ios/release/libroute_matcher.a \
+        --library target/aarch64-apple-ios/release/libtracematch.a \
         --language typescript \
         --out-dir "$TS_OUTPUT_DIR" 2>/dev/null; then
         echo "TypeScript bindings generated successfully ✓"
@@ -203,17 +203,17 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     mkdir -p "$HEADERS_DIR"
 
     # Copy the generated header if it exists
-    if [ -f "$SWIFT_DIR/route_matcherFFI.h" ]; then
-        cp "$SWIFT_DIR/route_matcherFFI.h" "$HEADERS_DIR/"
+    if [ -f "$SWIFT_DIR/tracematchFFI.h" ]; then
+        cp "$SWIFT_DIR/tracematchFFI.h" "$HEADERS_DIR/"
 
         # Create module.modulemap
-        # IMPORTANT: The module name must be "route_matcherFFI" (lowercase with underscore)
+        # IMPORTANT: The module name must be "tracematchFFI" (lowercase with underscore)
         # to match what UniFFI generates in the Swift bindings:
-        #   #if canImport(route_matcherFFI)
-        #   import route_matcherFFI
+        #   #if canImport(tracematchFFI)
+        #   import tracematchFFI
         cat > "$HEADERS_DIR/module.modulemap" << 'EOF'
-module route_matcherFFI {
-    header "route_matcherFFI.h"
+module tracematchFFI {
+    header "tracematchFFI.h"
     export *
 }
 EOF
@@ -222,29 +222,29 @@ EOF
     rm -rf "$OUTPUT_DIR/RouteMatcherFFI.xcframework"
 
     # Create XCFramework with headers
-    # Use libraries from subdirectories so they have the same name (libroute_matcher.a)
+    # Use libraries from subdirectories so they have the same name (libtracematch.a)
     # This is required by CocoaPods for vendored XCFrameworks
-    if [ -d "$HEADERS_DIR" ] && [ -f "$HEADERS_DIR/route_matcherFFI.h" ]; then
+    if [ -d "$HEADERS_DIR" ] && [ -f "$HEADERS_DIR/tracematchFFI.h" ]; then
         xcodebuild -create-xcframework \
-            -library "$DEVICE_LIB_DIR/libroute_matcher.a" \
+            -library "$DEVICE_LIB_DIR/libtracematch.a" \
             -headers "$HEADERS_DIR" \
-            -library "$SIM_LIB_DIR/libroute_matcher.a" \
+            -library "$SIM_LIB_DIR/libtracematch.a" \
             -headers "$HEADERS_DIR" \
             -output "$OUTPUT_DIR/RouteMatcherFFI.xcframework"
         echo "XCFramework created successfully ✓"
     else
         # Create without headers
         xcodebuild -create-xcframework \
-            -library "$DEVICE_LIB_DIR/libroute_matcher.a" \
-            -library "$SIM_LIB_DIR/libroute_matcher.a" \
+            -library "$DEVICE_LIB_DIR/libtracematch.a" \
+            -library "$SIM_LIB_DIR/libtracematch.a" \
             -output "$OUTPUT_DIR/RouteMatcherFFI.xcframework"
         echo "XCFramework created (without headers) ✓"
     fi
 else
     echo "Skipping XCFramework creation (requires macOS)"
     echo "The static libraries are available at:"
-    echo "  - $DEVICE_LIB_DIR/libroute_matcher.a (device)"
-    echo "  - $SIM_LIB_DIR/libroute_matcher.a (simulator)"
+    echo "  - $DEVICE_LIB_DIR/libtracematch.a (device)"
+    echo "  - $SIM_LIB_DIR/libtracematch.a (simulator)"
 fi
 
 echo ""

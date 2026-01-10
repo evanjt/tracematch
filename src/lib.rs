@@ -17,7 +17,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use route_matcher::{GpsPoint, RouteSignature, MatchConfig, compare_routes};
+//! use tracematch::{GpsPoint, RouteSignature, MatchConfig, compare_routes};
 //!
 //! // Create route signatures from GPS points
 //! let route1 = vec![
@@ -66,7 +66,7 @@ pub use grouping::{group_signatures, group_signatures_with_matches, should_group
 pub mod geo_utils;
 
 // Algorithm toolbox - modular access to all algorithms
-// Use route_matcher::algorithms::{...} for standalone algorithm access
+// Use tracematch::algorithms::{...} for standalone algorithm access
 pub mod algorithms;
 
 // LRU cache for efficient memory management
@@ -164,7 +164,7 @@ pub(crate) fn init_logging() {
 ///
 /// # Example
 /// ```
-/// use route_matcher::GpsPoint;
+/// use tracematch::GpsPoint;
 /// let point = GpsPoint::new(51.5074, -0.1278); // London
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -272,7 +272,7 @@ impl RouteSignature {
     ///
     /// # Example
     /// ```
-    /// use route_matcher::{GpsPoint, RouteSignature, MatchConfig};
+    /// use tracematch::{GpsPoint, RouteSignature, MatchConfig};
     ///
     /// let points = vec![
     ///     GpsPoint::new(51.5074, -0.1278),

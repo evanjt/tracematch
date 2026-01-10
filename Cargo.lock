@@ -1208,27 +1208,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
 
 [[package]]
-name = "route-matcher"
-version = "0.0.1"
-dependencies = [
- "android_logger",
- "base64",
- "futures",
- "geo",
- "log",
- "once_cell",
- "rayon",
- "reqwest",
- "rmp-serde",
- "rstar",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "uniffi",
-]
-
-[[package]]
 name = "rstar"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1693,6 +1672,27 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "tracematch"
+version = "0.0.1"
+dependencies = [
+ "android_logger",
+ "base64",
+ "futures",
+ "geo",
+ "log",
+ "once_cell",
+ "rayon",
+ "reqwest",
+ "rmp-serde",
+ "rstar",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uniffi",
+]
 
 [[package]]
 name = "tracing"

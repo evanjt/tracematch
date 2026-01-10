@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Build route-matcher for Android (PARALLEL - ALWAYS)
+# Build tracematch for Android (PARALLEL - ALWAYS)
 # Builds all architectures in parallel for 2-3x faster builds
 # Build once, use for both preview and release deployments
 
@@ -13,22 +13,22 @@ cd "$PROJECT_DIR"
 
 # Check if libraries are already built (from cache)
 LIBS_EXIST=1
-[ -f "target/aarch64-linux-android/release/libroute_matcher.so" ] || LIBS_EXIST=0
-[ -f "target/armv7-linux-androideabi/release/libroute_matcher.so" ] || LIBS_EXIST=0
-[ -f "target/x86_64-linux-android/release/libroute_matcher.so" ] || LIBS_EXIST=0
-[ -f "target/i686-linux-android/release/libroute_matcher.so" ] || LIBS_EXIST=0
+[ -f "target/aarch64-linux-android/release/libtracematch.so" ] || LIBS_EXIST=0
+[ -f "target/armv7-linux-androideabi/release/libtracematch.so" ] || LIBS_EXIST=0
+[ -f "target/x86_64-linux-android/release/libtracematch.so" ] || LIBS_EXIST=0
+[ -f "target/i686-linux-android/release/libtracematch.so" ] || LIBS_EXIST=0
 
 if [ "$LIBS_EXIST" -eq 1 ]; then
   echo "✅ Rust libraries already built (from cache), skipping build"
   mkdir -p "$OUTPUT_DIR/jniLibs"/{arm64-v8a,armeabi-v7a,x86_64,x86}
-  cp target/aarch64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
-  cp target/armv7-linux-androideabi/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/armeabi-v7a/"
-  cp target/x86_64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/x86_64/"
-  cp target/i686-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/x86/"
+  cp target/aarch64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
+  cp target/armv7-linux-androideabi/release/libtracematch.so "$OUTPUT_DIR/jniLibs/armeabi-v7a/"
+  cp target/x86_64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86_64/"
+  cp target/i686-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86/"
   exit 0
 fi
 
-echo "🚀 Building route-matcher for Android (ALL architectures in parallel)..."
+echo "🚀 Building tracematch for Android (ALL architectures in parallel)..."
 
 # Check for cargo-ndk
 if ! command -v cargo-ndk &> /dev/null; then
@@ -77,10 +77,10 @@ echo "✅ All architectures built successfully!"
 
 # Copy libraries
 echo "📦 Copying libraries..."
-cp target/aarch64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
-cp target/armv7-linux-androideabi/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/armeabi-v7a/"
-cp target/x86_64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/x86_64/"
-cp target/i686-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/x86/"
+cp target/aarch64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
+cp target/armv7-linux-androideabi/release/libtracematch.so "$OUTPUT_DIR/jniLibs/armeabi-v7a/"
+cp target/x86_64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86_64/"
+cp target/i686-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86/"
 
 # Generate Kotlin bindings
 echo "🔧 Generating Kotlin bindings..."
@@ -89,7 +89,7 @@ mkdir -p "$OUTPUT_DIR/kotlin"
 # Use cargo run to execute the uniffi-bindgen binary from this project
 # (more reliable than trying to install a global CLI tool)
 cargo run --features ffi --bin uniffi-bindgen generate \
-    --library target/aarch64-linux-android/release/libroute_matcher.so \
+    --library target/aarch64-linux-android/release/libtracematch.so \
     --language kotlin \
     --out-dir "$OUTPUT_DIR/kotlin"
 

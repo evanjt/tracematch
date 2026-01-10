@@ -52,13 +52,13 @@ jobs:
           cargo build --release --bin uniffi-bindgen
           mkdir -p bindings/kotlin
           ./target/release/uniffi-bindgen generate \
-            --library target/${{ matrix.rust_target }}/release/libroute_matcher.so \
+            --library target/${{ matrix.rust_target }}/release/libtracematch.so \
             --language kotlin \
             --out-dir bindings/kotlin
       - name: Package artifacts
         run: |
           mkdir -p artifacts/jniLibs/${{ matrix.arch }}
-          cp target/${{ matrix.rust_target }}/release/libroute_matcher.so artifacts/jniLibs/${{ matrix.arch }}/
+          cp target/${{ matrix.rust_target }}/release/libtracematch.so artifacts/jniLibs/${{ matrix.arch }}/
       - uses: actions/upload-artifact@v4
         with:
           name: android-${{ matrix.arch }}
@@ -91,30 +91,30 @@ jobs:
           cargo build --release --bin uniffi-bindgen
           mkdir -p bindings/swift
           ./target/release/uniffi-bindgen generate \
-            --library target/aarch64-apple-ios/release/libroute_matcher.a \
+            --library target/aarch64-apple-ios/release/libtracematch.a \
             --language swift \
             --out-dir bindings/swift
       - name: Create universal simulator library
         run: |
           mkdir -p artifacts/ios/{device,simulator,headers}
-          cp target/aarch64-apple-ios/release/libroute_matcher.a artifacts/ios/device/
+          cp target/aarch64-apple-ios/release/libtracematch.a artifacts/ios/device/
           lipo -create \
-            target/aarch64-apple-ios-sim/release/libroute_matcher.a \
-            target/x86_64-apple-ios/release/libroute_matcher.a \
-            -output artifacts/ios/simulator/libroute_matcher.a
-          cp bindings/swift/route_matcherFFI.h artifacts/ios/headers/
+            target/aarch64-apple-ios-sim/release/libtracematch.a \
+            target/x86_64-apple-ios/release/libtracematch.a \
+            -output artifacts/ios/simulator/libtracematch.a
+          cp bindings/swift/tracematchFFI.h artifacts/ios/headers/
           cat > artifacts/ios/headers/module.modulemap << 'EOF'
-          module route_matcherFFI {
-              header "route_matcherFFI.h"
+          module tracematchFFI {
+              header "tracematchFFI.h"
               export *
           }
           EOF
       - name: Create XCFramework
         run: |
           xcodebuild -create-xcframework \
-            -library artifacts/ios/device/libroute_matcher.a \
+            -library artifacts/ios/device/libtracematch.a \
             -headers artifacts/ios/headers \
-            -library artifacts/ios/simulator/libroute_matcher.a \
+            -library artifacts/ios/simulator/libtracematch.a \
             -headers artifacts/ios/headers \
             -output artifacts/ios/RouteMatcherFFI.xcframework
       - uses: actions/upload-artifact@v4
@@ -141,20 +141,20 @@ jobs:
           mkdir -p release/android/jniLibs
           for arch in arm64-v8a armeabi-v7a x86_64 x86; do
             mkdir -p release/android/jniLibs/$arch
-            cp artifacts/android-$arch/jniLibs/$arch/libroute_matcher.so release/android/jniLibs/$arch/
+            cp artifacts/android-$arch/jniLibs/$arch/libtracematch.so release/android/jniLibs/$arch/
           done
           cp -r artifacts/kotlin-bindings release/android/kotlin
-          cd release && zip -r ../route-matcher-android-${{ github.ref_name }}.zip android
+          cd release && zip -r ../tracematch-android-${{ github.ref_name }}.zip android
       - name: Package iOS
         run: |
           mkdir -p release/ios
           cp -r artifacts/ios-xcframework release/ios/RouteMatcherFFI.xcframework
           cp -r artifacts/swift-bindings release/ios/Generated
-          cd release && zip -r ../route-matcher-ios-${{ github.ref_name }}.zip ios
+          cd release && zip -r ../tracematch-ios-${{ github.ref_name }}.zip ios
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            route-matcher-android-${{ github.ref_name }}.zip
-            route-matcher-ios-${{ github.ref_name }}.zip
+            tracematch-android-${{ github.ref_name }}.zip
+            tracematch-ios-${{ github.ref_name }}.zip
           generate_release_notes: true

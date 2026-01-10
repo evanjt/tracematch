@@ -637,7 +637,7 @@ impl PersistentRouteEngine {
     ///
     /// # Example
     /// ```no_run
-    /// # use route_matcher::persistence::PersistentRouteEngine;
+    /// # use tracematch::persistence::PersistentRouteEngine;
     /// # let mut engine: PersistentRouteEngine = unsafe { std::mem::zeroed() };
     /// // Delete activities older than 90 days
     /// let deleted = engine.cleanup_old_activities(90).unwrap();
@@ -694,7 +694,7 @@ impl PersistentRouteEngine {
     ///
     /// # Example
     /// ```no_run
-    /// # use route_matcher::persistence::PersistentRouteEngine;
+    /// # use tracematch::persistence::PersistentRouteEngine;
     /// # let mut engine: PersistentRouteEngine = unsafe { std::mem::zeroed() };
     /// // User expanded cache from 90 days to 1 year
     /// engine.mark_for_recomputation();
