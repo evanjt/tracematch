@@ -27,10 +27,13 @@ jobs:
         with:
           prefix-key: bench
 
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion
+
       - name: Run benchmarks
         run: |
-          cargo bench --bench route_benchmarks -- --output-format bencher \
-            | tee benchmark-results.txt
+          cargo criterion --bench route_benchmarks --output-format bencher \
+            2>/dev/null | tee benchmark-results.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
