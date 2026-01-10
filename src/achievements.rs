@@ -241,7 +241,8 @@ fn detect_power_prs(
 
         if is_pr {
             let previous = historical_bests.get(&point.duration).copied();
-            let improvement = previous.map(|p| ((point.power as f32 - p as f32) / p as f32) * 100.0);
+            let improvement =
+                previous.map(|p| ((point.power as f32 - p as f32) / p as f32) * 100.0);
 
             let duration_label = format_duration(point.duration);
             let importance = calculate_power_pr_importance(point.duration, improvement);
@@ -268,10 +269,7 @@ fn detect_power_prs(
 }
 
 /// Detect pace personal records
-fn detect_pace_prs(
-    new_activity: &ActivityRecord,
-    history: &[&ActivityRecord],
-) -> Vec<Achievement> {
+fn detect_pace_prs(new_activity: &ActivityRecord, history: &[&ActivityRecord]) -> Vec<Achievement> {
     let mut achievements = Vec::new();
 
     if new_activity.pace_curve.is_empty() {
@@ -396,7 +394,11 @@ fn detect_duration_records(
         .filter(|a| get_year_from_timestamp(a.timestamp) == current_year)
         .collect();
 
-    let year_max_duration = year_activities.iter().map(|a| a.duration).max().unwrap_or(0);
+    let year_max_duration = year_activities
+        .iter()
+        .map(|a| a.duration)
+        .max()
+        .unwrap_or(0);
 
     if new_activity.duration > year_max_duration && new_activity.duration > 3600 {
         // > 1hr threshold
@@ -497,7 +499,8 @@ fn detect_milestones(
     }
 
     // Total distance milestones (in km)
-    let total_distance: f32 = history.iter().map(|a| a.distance).sum::<f32>() + new_activity.distance;
+    let total_distance: f32 =
+        history.iter().map(|a| a.distance).sum::<f32>() + new_activity.distance;
     let distance_km = total_distance / 1000.0;
     let distance_milestones = [100.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0];
 
@@ -507,10 +510,7 @@ fn detect_milestones(
             achievements.push(Achievement {
                 achievement_type: AchievementType::Milestone,
                 title: format!("{}km Total!", milestone as i32),
-                description: format!(
-                    "You've covered {} kilometers in total!",
-                    milestone as i32
-                ),
+                description: format!("You've covered {} kilometers in total!", milestone as i32),
                 value: format!("{}km", milestone as i32),
                 previous_best: None,
                 improvement_percent: None,
@@ -573,13 +573,13 @@ fn get_year_from_timestamp(timestamp: i64) -> i32 {
 fn calculate_power_pr_importance(duration: u32, improvement: Option<f32>) -> u8 {
     // Base importance by duration
     let base = match duration {
-        1 => 50,       // 1s is less significant
-        5 => 60,       // 5s
-        30 => 70,      // 30s
-        60 => 80,      // 1min
-        300 => 90,     // 5min - very important
-        1200 => 95,    // 20min - FTP proxy
-        3600 => 85,    // 1hr
+        1 => 50,    // 1s is less significant
+        5 => 60,    // 5s
+        30 => 70,   // 30s
+        60 => 80,   // 1min
+        300 => 90,  // 5min - very important
+        1200 => 95, // 20min - FTP proxy
+        3600 => 85, // 1hr
         _ => 50,
     };
 
