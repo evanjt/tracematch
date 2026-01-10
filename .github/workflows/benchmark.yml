@@ -1,0 +1,67 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Performance Regression Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          prefix-key: bench
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --bench route_benchmarks -- --output-format bencher \
+            | tee benchmark-results.txt
+
+      - name: Download previous benchmark data
+        uses: actions/cache@v4
+        with:
+          path: ./cache
+          key: ${{ runner.os }}-benchmark-${{ hashFiles('benches/**') }}
+          restore-keys: |
+            ${{ runner.os }}-benchmark-
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: tracematch Performance
+          tool: 'cargo'
+          output-file-path: benchmark-results.txt
+          external-data-json-path: ./cache/benchmark-data.json
+          # Show alert if >15% slower
+          alert-threshold: '115%'
+          comment-on-alert: true
+          # Fail PR if >50% slower
+          fail-on-alert: true
+          fail-threshold: '150%'
+          # Push results to gh-pages only from main
+          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Comment on PR with results
+          comment-always: ${{ github.event_name == 'pull_request' }}
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+          retention-days: 30
