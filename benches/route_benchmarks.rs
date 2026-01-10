@@ -45,8 +45,14 @@ fn generate_synthetic_route(
 
             // Move along bearing with some wobble
             let noise_deg = noise_meters / 111_000.0;
-            let wobble_lat = rng.gen_range(-noise_deg..noise_deg);
-            let wobble_lng = rng.gen_range(-noise_deg..noise_deg);
+            let (wobble_lat, wobble_lng) = if noise_deg > 0.0 {
+                (
+                    rng.gen_range(-noise_deg..noise_deg),
+                    rng.gen_range(-noise_deg..noise_deg),
+                )
+            } else {
+                (0.0, 0.0)
+            };
 
             let lat = start_lat + (distance_m / 111_000.0) * bearing.cos() + wobble_lat;
             let lng = start_lng
@@ -106,6 +112,10 @@ fn generate_route_set(count: usize, similar_percent: f64) -> Vec<(String, Vec<Gp
 fn add_gps_noise(points: &[GpsPoint], noise_meters: f64) -> Vec<GpsPoint> {
     let mut rng = rand::thread_rng();
     let noise_deg = noise_meters / 111_000.0;
+
+    if noise_deg <= 0.0 {
+        return points.to_vec();
+    }
 
     points
         .iter()

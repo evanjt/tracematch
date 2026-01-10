@@ -27,20 +27,15 @@ jobs:
         with:
           prefix-key: bench
 
-      - name: Install cargo-criterion
-        run: cargo install cargo-criterion
-
       - name: Run benchmarks
-        run: |
-          cargo criterion --bench route_benchmarks --output-format bencher \
-            2>/dev/null | tee benchmark-results.txt
+        run: cargo bench --bench route_benchmarks -- --noplot
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: tracematch Performance
-          tool: 'cargo'
-          output-file-path: benchmark-results.txt
+          tool: 'criterionrs'
+          output-file-path: target/criterion/
           # Show alert if >15% slower
           alert-threshold: '115%'
           comment-on-alert: true
