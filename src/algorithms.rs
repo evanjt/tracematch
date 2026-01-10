@@ -21,7 +21,7 @@
 //! # Example
 //!
 //! ```rust
-//! use route_matcher::algorithms::{
+//! use tracematch::algorithms::{
 //!     haversine_distance,
 //!     compare_routes,
 //!     group_signatures,
@@ -158,7 +158,7 @@ pub use crate::heatmap::RouteRef;
 ///
 /// # Example
 /// ```rust
-/// use route_matcher::algorithms::{douglas_peucker, GpsPoint};
+/// use tracematch::algorithms::{douglas_peucker, GpsPoint};
 ///
 /// let track = vec![
 ///     GpsPoint::new(51.5074, -0.1278),
@@ -205,7 +205,7 @@ pub fn douglas_peucker(points: &[crate::GpsPoint], tolerance: f64) -> Vec<crate:
 ///
 /// # Example
 /// ```rust
-/// use route_matcher::algorithms::{resample_track, GpsPoint};
+/// use tracematch::algorithms::{resample_track, GpsPoint};
 ///
 /// let track = vec![
 ///     GpsPoint::new(51.5074, -0.1278),

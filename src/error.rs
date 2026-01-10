@@ -1,11 +1,11 @@
-//! Unified error handling for the route-matcher library.
+//! Unified error handling for the tracematch library.
 //!
-//! This module provides a consistent error type for all route-matcher operations,
+//! This module provides a consistent error type for all tracematch operations,
 //! replacing mixed error handling patterns (Option, panic, silent failures).
 
 use std::fmt;
 
-/// Unified error type for route-matcher operations.
+/// Unified error type for tracematch operations.
 #[derive(Debug, Clone)]
 pub enum RouteMatchError {
     /// Route has insufficient points for processing
@@ -113,7 +113,7 @@ impl fmt::Display for RouteMatchError {
 
 impl std::error::Error for RouteMatchError {}
 
-/// Result type alias for route-matcher operations.
+/// Result type alias for tracematch operations.
 pub type Result<T> = std::result::Result<T, RouteMatchError>;
 
 /// Extension trait for converting Option to RouteMatchError.

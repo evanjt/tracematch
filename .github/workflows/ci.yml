@@ -56,13 +56,13 @@ jobs:
           cargo build --release --bin uniffi-bindgen
           mkdir -p bindings/kotlin
           ./target/release/uniffi-bindgen generate \
-            --library target/${{ matrix.rust_target }}/release/libroute_matcher.so \
+            --library target/${{ matrix.rust_target }}/release/libtracematch.so \
             --language kotlin \
             --out-dir bindings/kotlin
       - name: Package artifacts
         run: |
           mkdir -p artifacts/jniLibs/${{ matrix.arch }}
-          cp target/${{ matrix.rust_target }}/release/libroute_matcher.so artifacts/jniLibs/${{ matrix.arch }}/
+          cp target/${{ matrix.rust_target }}/release/libtracematch.so artifacts/jniLibs/${{ matrix.arch }}/
       - uses: actions/upload-artifact@v4
         with:
           name: android-${{ matrix.arch }}
@@ -95,30 +95,30 @@ jobs:
           cargo build --release --bin uniffi-bindgen
           mkdir -p bindings/swift
           ./target/release/uniffi-bindgen generate \
-            --library target/aarch64-apple-ios/release/libroute_matcher.a \
+            --library target/aarch64-apple-ios/release/libtracematch.a \
             --language swift \
             --out-dir bindings/swift
       - name: Create universal simulator library
         run: |
           mkdir -p artifacts/ios/{device,simulator,headers}
-          cp target/aarch64-apple-ios/release/libroute_matcher.a artifacts/ios/device/
+          cp target/aarch64-apple-ios/release/libtracematch.a artifacts/ios/device/
           lipo -create \
-            target/aarch64-apple-ios-sim/release/libroute_matcher.a \
-            target/x86_64-apple-ios/release/libroute_matcher.a \
-            -output artifacts/ios/simulator/libroute_matcher.a
-          cp bindings/swift/route_matcherFFI.h artifacts/ios/headers/
+            target/aarch64-apple-ios-sim/release/libtracematch.a \
+            target/x86_64-apple-ios/release/libtracematch.a \
+            -output artifacts/ios/simulator/libtracematch.a
+          cp bindings/swift/tracematchFFI.h artifacts/ios/headers/
           cat > artifacts/ios/headers/module.modulemap << 'EOF'
-          module route_matcherFFI {
-              header "route_matcherFFI.h"
+          module tracematchFFI {
+              header "tracematchFFI.h"
               export *
           }
           EOF
       - name: Create XCFramework
         run: |
           xcodebuild -create-xcframework \
-            -library artifacts/ios/device/libroute_matcher.a \
+            -library artifacts/ios/device/libtracematch.a \
             -headers artifacts/ios/headers \
-            -library artifacts/ios/simulator/libroute_matcher.a \
+            -library artifacts/ios/simulator/libtracematch.a \
             -headers artifacts/ios/headers \
             -output artifacts/ios/RouteMatcherFFI.xcframework
       - uses: actions/upload-artifact@v4

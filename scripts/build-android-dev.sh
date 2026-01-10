@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${PROJECT_DIR}/target/android"
-MODULE_DIR="${PROJECT_DIR}/../../modules/route-matcher-native/android/src/main"
+MODULE_DIR="${PROJECT_DIR}/../../modules/tracematch-native/android/src/main"
 
 cd "$PROJECT_DIR"
 
@@ -29,14 +29,14 @@ build_arm64() {
     echo "🦀 Building for arm64-v8a (physical devices)..."
     cargo ndk -t arm64-v8a build --release --features full
     mkdir -p "$OUTPUT_DIR/jniLibs/arm64-v8a"
-    cp target/aarch64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
+    cp target/aarch64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
 }
 
 build_x86_64() {
     echo "🦀 Building for x86_64 (emulators)..."
     cargo ndk -t x86_64 build --release --features full
     mkdir -p "$OUTPUT_DIR/jniLibs/x86_64"
-    cp target/x86_64-linux-android/release/libroute_matcher.so "$OUTPUT_DIR/jniLibs/x86_64/"
+    cp target/x86_64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86_64/"
 }
 
 case "$ARCH" in
@@ -62,17 +62,17 @@ echo "📦 Installing to native module..."
 mkdir -p "$MODULE_DIR/jniLibs/arm64-v8a"
 mkdir -p "$MODULE_DIR/jniLibs/x86_64"
 
-[ -f "$OUTPUT_DIR/jniLibs/arm64-v8a/libroute_matcher.so" ] && \
-    cp -v "$OUTPUT_DIR/jniLibs/arm64-v8a/libroute_matcher.so" "$MODULE_DIR/jniLibs/arm64-v8a/"
-[ -f "$OUTPUT_DIR/jniLibs/x86_64/libroute_matcher.so" ] && \
-    cp -v "$OUTPUT_DIR/jniLibs/x86_64/libroute_matcher.so" "$MODULE_DIR/jniLibs/x86_64/"
+[ -f "$OUTPUT_DIR/jniLibs/arm64-v8a/libtracematch.so" ] && \
+    cp -v "$OUTPUT_DIR/jniLibs/arm64-v8a/libtracematch.so" "$MODULE_DIR/jniLibs/arm64-v8a/"
+[ -f "$OUTPUT_DIR/jniLibs/x86_64/libtracematch.so" ] && \
+    cp -v "$OUTPUT_DIR/jniLibs/x86_64/libtracematch.so" "$MODULE_DIR/jniLibs/x86_64/"
 
 # Generate and install Kotlin bindings
 echo "🔧 Generating Kotlin bindings..."
 mkdir -p "$OUTPUT_DIR/kotlin"
 
 # Use the arm64 library to generate bindings (any arch works)
-SO_FILE="$OUTPUT_DIR/jniLibs/arm64-v8a/libroute_matcher.so"
+SO_FILE="$OUTPUT_DIR/jniLibs/arm64-v8a/libtracematch.so"
 if [ -f "$SO_FILE" ]; then
     # Generate bindings using cargo run (most reliable method)
     cargo run --features ffi --bin uniffi-bindgen generate \

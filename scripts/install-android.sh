@@ -4,7 +4,7 @@ set -e
 # Install compiled Android libraries to the Expo native module
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MODULE_DIR="${PROJECT_DIR}/../../modules/route-matcher-native/android/src/main"
+MODULE_DIR="${PROJECT_DIR}/../../modules/tracematch-native/android/src/main"
 
 echo "Installing Android libraries to native module..."
 
@@ -16,10 +16,10 @@ mkdir -p "$MODULE_DIR/jniLibs/x86"
 
 # Copy libraries
 if [ -d "$PROJECT_DIR/target/android/jniLibs" ]; then
-    cp -v "$PROJECT_DIR/target/android/jniLibs/arm64-v8a/libroute_matcher.so" "$MODULE_DIR/jniLibs/arm64-v8a/" 2>/dev/null || echo "arm64-v8a not found"
-    cp -v "$PROJECT_DIR/target/android/jniLibs/armeabi-v7a/libroute_matcher.so" "$MODULE_DIR/jniLibs/armeabi-v7a/" 2>/dev/null || echo "armeabi-v7a not found"
-    cp -v "$PROJECT_DIR/target/android/jniLibs/x86_64/libroute_matcher.so" "$MODULE_DIR/jniLibs/x86_64/" 2>/dev/null || echo "x86_64 not found"
-    cp -v "$PROJECT_DIR/target/android/jniLibs/x86/libroute_matcher.so" "$MODULE_DIR/jniLibs/x86/" 2>/dev/null || echo "x86 not found"
+    cp -v "$PROJECT_DIR/target/android/jniLibs/arm64-v8a/libtracematch.so" "$MODULE_DIR/jniLibs/arm64-v8a/" 2>/dev/null || echo "arm64-v8a not found"
+    cp -v "$PROJECT_DIR/target/android/jniLibs/armeabi-v7a/libtracematch.so" "$MODULE_DIR/jniLibs/armeabi-v7a/" 2>/dev/null || echo "armeabi-v7a not found"
+    cp -v "$PROJECT_DIR/target/android/jniLibs/x86_64/libtracematch.so" "$MODULE_DIR/jniLibs/x86_64/" 2>/dev/null || echo "x86_64 not found"
+    cp -v "$PROJECT_DIR/target/android/jniLibs/x86/libtracematch.so" "$MODULE_DIR/jniLibs/x86/" 2>/dev/null || echo "x86 not found"
     echo "Android libraries installed successfully!"
 else
     echo "Error: Android libraries not found. Run build-android.sh first."

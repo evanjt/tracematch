@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --example batch_grouping --features parallel
 
-use route_matcher::{group_signatures_parallel, GpsPoint, MatchConfig, RouteSignature};
 use std::time::Instant;
+use tracematch::{group_signatures_parallel, GpsPoint, MatchConfig, RouteSignature};
 
 fn main() {
     println!("Batch Route Grouping Example\n");

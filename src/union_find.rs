@@ -14,7 +14,7 @@ use std::hash::Hash;
 ///
 /// # Example
 /// ```
-/// use route_matcher::union_find::UnionFind;
+/// use tracematch::union_find::UnionFind;
 ///
 /// let mut uf: UnionFind<i32> = UnionFind::new();
 /// uf.make_set(1);

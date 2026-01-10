@@ -18,8 +18,8 @@ use crate::{GpsPoint, MatchConfig, MatchResult, RouteSignature};
 ///
 /// # Example
 /// ```
-/// use route_matcher::{GpsPoint, RouteSignature, MatchConfig};
-/// use route_matcher::matching::compare_routes;
+/// use tracematch::{GpsPoint, RouteSignature, MatchConfig};
+/// use tracematch::matching::compare_routes;
 ///
 /// let points1 = vec![
 ///     GpsPoint::new(51.5074, -0.1278),

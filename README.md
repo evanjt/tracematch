@@ -1,4 +1,4 @@
-# route-matcher
+# tracematch
 
 High-performance GPS route matching using Fréchet distance and spatial indexing.
 
@@ -14,13 +14,13 @@ High-performance GPS route matching using Fréchet distance and spatial indexing
 
 ```toml
 [dependencies]
-route-matcher = "0.0.1"
+tracematch = "0.0.1"
 ```
 
 ## Quick Start
 
 ```rust
-use route_matcher::{GpsPoint, RouteSignature, MatchConfig, compare_routes};
+use tracematch::{GpsPoint, RouteSignature, MatchConfig, compare_routes};
 
 let route1 = vec![
     GpsPoint::new(51.5074, -0.1278),

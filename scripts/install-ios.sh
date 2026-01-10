@@ -4,7 +4,7 @@ set -e
 # Install compiled iOS libraries to the Expo native module
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MODULE_DIR="${PROJECT_DIR}/../../modules/route-matcher-native/ios"
+MODULE_DIR="${PROJECT_DIR}/../../modules/tracematch-native/ios"
 SOURCE_DIR="${PROJECT_DIR}/target/ios"
 SWIFT_SOURCE="${SOURCE_DIR}/swift"
 
@@ -44,21 +44,21 @@ echo "Installing Swift bindings..."
 HEADERS_DIR="${SOURCE_DIR}/headers"
 INSTALL_ERRORS=0
 
-# Copy the generated Swift file (UniFFI generates route_matcher.swift)
-if [ -f "$SWIFT_SOURCE/route_matcher.swift" ]; then
-    cp "$SWIFT_SOURCE/route_matcher.swift" "$MODULE_DIR/Generated/"
-    echo "  ✓ route_matcher.swift (UniFFI bindings)"
+# Copy the generated Swift file (UniFFI generates tracematch.swift)
+if [ -f "$SWIFT_SOURCE/tracematch.swift" ]; then
+    cp "$SWIFT_SOURCE/tracematch.swift" "$MODULE_DIR/Generated/"
+    echo "  ✓ tracematch.swift (UniFFI bindings)"
 else
-    echo "  ✗ route_matcher.swift NOT FOUND"
+    echo "  ✗ tracematch.swift NOT FOUND"
     INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
 fi
 
 # Copy the C header (needed for FFI)
-if [ -f "$SWIFT_SOURCE/route_matcherFFI.h" ]; then
-    cp "$SWIFT_SOURCE/route_matcherFFI.h" "$MODULE_DIR/Generated/"
-    echo "  ✓ route_matcherFFI.h (C header)"
+if [ -f "$SWIFT_SOURCE/tracematchFFI.h" ]; then
+    cp "$SWIFT_SOURCE/tracematchFFI.h" "$MODULE_DIR/Generated/"
+    echo "  ✓ tracematchFFI.h (C header)"
 else
-    echo "  ✗ route_matcherFFI.h NOT FOUND"
+    echo "  ✗ tracematchFFI.h NOT FOUND"
     INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
 fi
 
@@ -88,8 +88,8 @@ echo ""
 # Validate all required files are present
 MISSING=""
 [ ! -d "$MODULE_DIR/Frameworks/RouteMatcherFFI.xcframework" ] && MISSING="$MISSING RouteMatcherFFI.xcframework"
-[ ! -f "$MODULE_DIR/Generated/route_matcher.swift" ] && MISSING="$MISSING route_matcher.swift"
-[ ! -f "$MODULE_DIR/Generated/route_matcherFFI.h" ] && MISSING="$MISSING route_matcherFFI.h"
+[ ! -f "$MODULE_DIR/Generated/tracematch.swift" ] && MISSING="$MISSING tracematch.swift"
+[ ! -f "$MODULE_DIR/Generated/tracematchFFI.h" ] && MISSING="$MISSING tracematchFFI.h"
 [ ! -f "$MODULE_DIR/Generated/module.modulemap" ] && MISSING="$MISSING module.modulemap"
 
 if [ -z "$MISSING" ]; then

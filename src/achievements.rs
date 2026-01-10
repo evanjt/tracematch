@@ -13,7 +13,7 @@
 //!
 //! ## Example
 //! ```rust,ignore
-//! use route_matcher::achievements::{detect_achievements, ActivityRecord, PowerCurvePoint};
+//! use tracematch::achievements::{detect_achievements, ActivityRecord, PowerCurvePoint};
 //!
 //! let new_activity = ActivityRecord {
 //!     activity_id: "new".to_string(),
