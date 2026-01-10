@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::{
-    ActivityMetrics, Bounds, FrequentSection, GpsPoint, MatchConfig, RouteGroup,
-    RoutePerformance, RoutePerformanceResult, RouteSignature, SectionConfig, SectionLap,
-    SectionPerformanceRecord, SectionPerformanceResult,
+    ActivityMetrics, Bounds, FrequentSection, GpsPoint, MatchConfig, RouteGroup, RoutePerformance,
+    RoutePerformanceResult, RouteSignature, SectionConfig, SectionLap, SectionPerformanceRecord,
+    SectionPerformanceResult,
 };
 
 /// Modular route engine using extracted components.
@@ -111,7 +111,8 @@ impl ModularRouteEngine {
 
     /// Add an activity from flat coordinate buffer.
     pub fn add_activity_flat(&mut self, id: String, flat_coords: &[f64], sport_type: String) {
-        self.activities.add_flat(id.clone(), flat_coords, sport_type);
+        self.activities
+            .add_flat(id.clone(), flat_coords, sport_type);
         self.signatures.mark_dirty(&id);
         self.grouper.mark_dirty();
         self.sections_dirty = true;
@@ -126,7 +127,9 @@ impl ModularRouteEngine {
         offsets: &[u32],
         sport_types: &[String],
     ) {
-        let added = self.activities.add_many_flat(activity_ids, all_coords, offsets, sport_types);
+        let added = self
+            .activities
+            .add_many_flat(activity_ids, all_coords, offsets, sport_types);
         for id in added {
             self.signatures.mark_dirty(&id);
         }
@@ -191,12 +194,14 @@ impl ModularRouteEngine {
 
     /// Get a signature for an activity.
     pub fn get_signature(&mut self, id: &str) -> Option<&RouteSignature> {
-        self.signatures.get(id, &self.activities, &self.match_config)
+        self.signatures
+            .get(id, &self.activities, &self.match_config)
     }
 
     /// Get all signatures.
     pub fn get_all_signatures(&mut self) -> Vec<&RouteSignature> {
-        self.signatures.ensure_computed(&self.activities, &self.match_config);
+        self.signatures
+            .ensure_computed(&self.activities, &self.match_config);
         self.signatures.all().collect()
     }
 
@@ -204,7 +209,10 @@ impl ModularRouteEngine {
     pub fn get_signature_points_json(&mut self, id: &str) -> String {
         if let Some(sig) = self.get_signature(id) {
             serde_json::to_string(&sig.points).unwrap_or_else(|e| {
-                warn!("Failed to serialize signature points for activity '{}': {}", id, e);
+                warn!(
+                    "Failed to serialize signature points for activity '{}': {}",
+                    id, e
+                );
                 "[]".to_string()
             })
         } else {
@@ -218,13 +226,15 @@ impl ModularRouteEngine {
 
     /// Get all route groups.
     pub fn get_groups(&mut self) -> &[RouteGroup] {
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
         self.grouper.groups()
     }
 
     /// Get the group containing a specific activity.
     pub fn get_group_for_activity(&mut self, activity_id: &str) -> Option<&RouteGroup> {
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
         self.grouper.get_group_for_activity(activity_id)
     }
 
@@ -266,7 +276,8 @@ impl ModularRouteEngine {
         max_lng: f64,
     ) -> Vec<String> {
         self.spatial.ensure_built(&self.activities);
-        self.spatial.query_viewport_raw(min_lat, max_lat, min_lng, max_lng)
+        self.spatial
+            .query_viewport_raw(min_lat, max_lat, min_lng, max_lng)
     }
 
     /// Find activities near a point.
@@ -285,7 +296,8 @@ impl ModularRouteEngine {
             return;
         }
 
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
 
         let tracks = self.activities.as_tracks();
         let sport_map = self.activities.sport_type_map();
@@ -309,7 +321,10 @@ impl ModularRouteEngine {
     /// Get sections filtered by sport type.
     pub fn get_sections_for_sport(&mut self, sport_type: &str) -> Vec<&FrequentSection> {
         self.ensure_sections();
-        self.sections.iter().filter(|s| s.sport_type == sport_type).collect()
+        self.sections
+            .iter()
+            .filter(|s| s.sport_type == sport_type)
+            .collect()
     }
 
     /// Get sections as JSON string.
@@ -333,7 +348,8 @@ impl ModularRouteEngine {
         }
 
         // Find the group
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
         let group = self.grouper.get_group(group_id)?;
 
         if group.activity_ids.is_empty() {
@@ -355,7 +371,8 @@ impl ModularRouteEngine {
         let consensus = compute_medoid_track(&tracks);
 
         // Cache the result
-        self.consensus_cache.insert(group_id.to_string(), consensus.clone());
+        self.consensus_cache
+            .insert(group_id.to_string(), consensus.clone());
 
         Some(consensus)
     }
@@ -367,7 +384,8 @@ impl ModularRouteEngine {
     /// Update match configuration.
     pub fn set_match_config(&mut self, config: MatchConfig) {
         self.match_config = config;
-        self.signatures.mark_all_dirty(self.activities.ids().cloned());
+        self.signatures
+            .mark_all_dirty(self.activities.ids().cloned());
         self.grouper.invalidate();
         self.sections_dirty = true;
     }
@@ -401,7 +419,8 @@ impl ModularRouteEngine {
 
     /// Set a single activity's metrics.
     pub fn set_activity_metric(&mut self, metric: ActivityMetrics) {
-        self.activity_metrics.insert(metric.activity_id.clone(), metric);
+        self.activity_metrics
+            .insert(metric.activity_id.clone(), metric);
     }
 
     /// Get activity metrics by ID.
@@ -415,7 +434,8 @@ impl ModularRouteEngine {
         route_group_id: &str,
         current_activity_id: Option<&str>,
     ) -> RoutePerformanceResult {
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
 
         let group = match self.grouper.get_group(route_group_id) {
             Some(g) => g,
@@ -461,12 +481,20 @@ impl ModularRouteEngine {
 
         let best = performances
             .iter()
-            .max_by(|a, b| a.speed.partial_cmp(&b.speed).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.speed
+                    .partial_cmp(&b.speed)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         let current_rank = current_activity_id.and_then(|current_id| {
             let mut by_speed = performances.clone();
-            by_speed.sort_by(|a, b| b.speed.partial_cmp(&a.speed).unwrap_or(std::cmp::Ordering::Equal));
+            by_speed.sort_by(|a, b| {
+                b.speed
+                    .partial_cmp(&a.speed)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             by_speed
                 .iter()
                 .position(|p| p.activity_id == current_id)
@@ -494,7 +522,10 @@ impl ModularRouteEngine {
     ) {
         for (i, activity_id) in activity_ids.iter().enumerate() {
             let start = offsets[i] as usize;
-            let end = offsets.get(i + 1).map(|&o| o as usize).unwrap_or(all_times.len());
+            let end = offsets
+                .get(i + 1)
+                .map(|&o| o as usize)
+                .unwrap_or(all_times.len());
             let times = all_times[start..end].to_vec();
             self.time_streams.insert(activity_id.clone(), times);
         }
@@ -588,7 +619,11 @@ impl ModularRouteEngine {
 
         let best_record = records
             .iter()
-            .min_by(|a, b| a.best_time.partial_cmp(&b.best_time).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.best_time
+                    .partial_cmp(&b.best_time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         SectionPerformanceResult {
@@ -603,7 +638,8 @@ impl ModularRouteEngine {
 
     /// Get engine statistics.
     pub fn stats(&mut self) -> ModularEngineStats {
-        self.grouper.ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
         self.ensure_sections();
 
         ModularEngineStats {
@@ -793,7 +829,10 @@ mod tests {
         let group_id = groups[0].group_id.clone();
 
         engine.set_route_name(&group_id, "My Route");
-        assert_eq!(engine.get_route_name(&group_id), Some(&"My Route".to_string()));
+        assert_eq!(
+            engine.get_route_name(&group_id),
+            Some(&"My Route".to_string())
+        );
 
         let groups = engine.get_groups();
         assert_eq!(groups[0].custom_name, Some("My Route".to_string()));

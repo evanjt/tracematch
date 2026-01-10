@@ -163,7 +163,8 @@ impl RouteGrouper {
                 group.custom_name = None;
             }
         } else {
-            self.route_names.insert(route_id.to_string(), name.to_string());
+            self.route_names
+                .insert(route_id.to_string(), name.to_string());
             // Update in-memory group
             if let Some(group) = self.groups.iter_mut().find(|g| g.group_id == route_id) {
                 group.custom_name = Some(name.to_string());
@@ -275,10 +276,16 @@ mod tests {
         let group_id = grouper.groups()[0].group_id.clone();
 
         grouper.set_route_name(&group_id, "My Favorite Route");
-        assert_eq!(grouper.get_route_name(&group_id), Some(&"My Favorite Route".to_string()));
+        assert_eq!(
+            grouper.get_route_name(&group_id),
+            Some(&"My Favorite Route".to_string())
+        );
 
         // Check it's applied to the group
-        assert_eq!(grouper.groups()[0].custom_name, Some("My Favorite Route".to_string()));
+        assert_eq!(
+            grouper.groups()[0].custom_name,
+            Some("My Favorite Route".to_string())
+        );
 
         // Clear the name
         grouper.set_route_name(&group_id, "");

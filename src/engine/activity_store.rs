@@ -55,7 +55,12 @@ impl ActivityStore {
     /// Add an activity from flat coordinate buffer.
     ///
     /// Coordinates are [lat1, lng1, lat2, lng2, ...].
-    pub fn add_flat(&mut self, id: String, flat_coords: &[f64], sport_type: String) -> Option<Bounds> {
+    pub fn add_flat(
+        &mut self,
+        id: String,
+        flat_coords: &[f64],
+        sport_type: String,
+    ) -> Option<Bounds> {
         let coords: Vec<GpsPoint> = flat_coords
             .chunks_exact(2)
             .map(|chunk| GpsPoint::new(chunk[0], chunk[1]))
@@ -287,7 +292,8 @@ mod tests {
         store.add("b".to_string(), sample_coords(), "running".to_string());
         store.add("c".to_string(), sample_coords(), "swimming".to_string());
 
-        let removed = store.remove_many(&["a".to_string(), "c".to_string(), "nonexistent".to_string()]);
+        let removed =
+            store.remove_many(&["a".to_string(), "c".to_string(), "nonexistent".to_string()]);
 
         assert_eq!(removed.len(), 2);
         assert!(removed.contains(&"a".to_string()));
@@ -356,6 +362,9 @@ mod tests {
         assert_eq!(ActivityStore::compute_track_distance(&[]), 0.0);
 
         // Single point should have zero distance
-        assert_eq!(ActivityStore::compute_track_distance(&[GpsPoint::new(0.0, 0.0)]), 0.0);
+        assert_eq!(
+            ActivityStore::compute_track_distance(&[GpsPoint::new(0.0, 0.0)]),
+            0.0
+        );
     }
 }

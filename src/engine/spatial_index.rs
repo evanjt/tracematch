@@ -162,8 +162,16 @@ mod tests {
 
     fn setup_store() -> ActivityStore {
         let mut store = ActivityStore::new();
-        store.add("london".to_string(), sample_coords_london(), "cycling".to_string());
-        store.add("nyc".to_string(), sample_coords_nyc(), "running".to_string());
+        store.add(
+            "london".to_string(),
+            sample_coords_london(),
+            "cycling".to_string(),
+        );
+        store.add(
+            "nyc".to_string(),
+            sample_coords_nyc(),
+            "running".to_string(),
+        );
         store
     }
 
