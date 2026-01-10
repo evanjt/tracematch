@@ -117,7 +117,9 @@ impl SignatureCache {
 
         for id in dirty_ids {
             if let Some(activity) = store.get(&id) {
-                if let Some(sig) = RouteSignature::from_points(&activity.id, &activity.coords, config) {
+                if let Some(sig) =
+                    RouteSignature::from_points(&activity.id, &activity.coords, config)
+                {
                     self.signatures.insert(id.clone(), sig);
                     self.newly_computed.insert(id);
                 }
@@ -126,11 +128,18 @@ impl SignatureCache {
     }
 
     /// Get a signature, computing it if necessary.
-    pub fn get(&mut self, id: &str, store: &ActivityStore, config: &MatchConfig) -> Option<&RouteSignature> {
+    pub fn get(
+        &mut self,
+        id: &str,
+        store: &ActivityStore,
+        config: &MatchConfig,
+    ) -> Option<&RouteSignature> {
         // Compute if dirty
         if self.dirty.contains(id) {
             if let Some(activity) = store.get(id) {
-                if let Some(sig) = RouteSignature::from_points(&activity.id, &activity.coords, config) {
+                if let Some(sig) =
+                    RouteSignature::from_points(&activity.id, &activity.coords, config)
+                {
                     self.signatures.insert(id.to_string(), sig);
                     self.newly_computed.insert(id.to_string());
                 }
@@ -352,7 +361,11 @@ mod tests {
     fn test_short_route_not_cached() {
         let mut store = ActivityStore::new();
         // Add a route too short to create a signature
-        store.add("short".to_string(), vec![GpsPoint::new(0.0, 0.0)], "cycling".to_string());
+        store.add(
+            "short".to_string(),
+            vec![GpsPoint::new(0.0, 0.0)],
+            "cycling".to_string(),
+        );
 
         let mut cache = SignatureCache::new();
         let config = MatchConfig::default();

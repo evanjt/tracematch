@@ -50,7 +50,8 @@ fn generate_synthetic_route(
 
             let lat = start_lat + (distance_m / 111_000.0) * bearing.cos() + wobble_lat;
             let lng = start_lng
-                + (distance_m / (111_000.0 * start_lat.to_radians().cos().max(0.1))) * bearing.sin()
+                + (distance_m / (111_000.0 * start_lat.to_radians().cos().max(0.1)))
+                    * bearing.sin()
                 + wobble_lng;
 
             GpsPoint::new(lat, lng)
@@ -214,7 +215,11 @@ fn bench_incremental_grouping(c: &mut Criterion) {
 
         group.bench_with_input(
             BenchmarkId::new("add_to_200", add_count),
-            &(new_sigs.clone(), existing_groups.clone(), existing_sigs.clone()),
+            &(
+                new_sigs.clone(),
+                existing_groups.clone(),
+                existing_sigs.clone(),
+            ),
             |b, (new, groups, existing)| {
                 b.iter(|| {
                     group_incremental(

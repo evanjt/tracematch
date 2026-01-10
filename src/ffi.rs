@@ -984,7 +984,8 @@ mod tests {
 
                 // Move along bearing
                 let lat = start_lat + (distance_m / 111_000.0) * bearing.cos();
-                let lng = start_lng + (distance_m / (111_000.0 * start_lat.to_radians().cos())) * bearing.sin();
+                let lng = start_lng
+                    + (distance_m / (111_000.0 * start_lat.to_radians().cos())) * bearing.sin();
 
                 // Add deterministic "noise" based on index
                 let noise_deg = noise_meters / 111_000.0;
@@ -1023,8 +1024,14 @@ mod tests {
         assert!(sig.is_some(), "Should create signature from valid route");
         let sig = sig.unwrap();
         assert_eq!(sig.activity_id, "test-1");
-        assert!(sig.total_distance > 800.0, "~1km route should have distance > 800m");
-        assert!(!sig.points.is_empty(), "Signature should have simplified points");
+        assert!(
+            sig.total_distance > 800.0,
+            "~1km route should have distance > 800m"
+        );
+        assert!(
+            !sig.points.is_empty(),
+            "Signature should have simplified points"
+        );
     }
 
     #[test]
@@ -1054,14 +1061,15 @@ mod tests {
     #[test]
     fn test_create_signature_duplicate_points() {
         // All points at same location (degenerate case)
-        let points: Vec<GpsPoint> = (0..100)
-            .map(|_| GpsPoint::new(51.5074, -0.1278))
-            .collect();
+        let points: Vec<GpsPoint> = (0..100).map(|_| GpsPoint::new(51.5074, -0.1278)).collect();
         let sig = create_signature("test-1".to_string(), points);
         // This may or may not create a signature - document behavior
         // If it does, distance should be ~0
         if let Some(s) = sig {
-            assert!(s.total_distance < 1.0, "Duplicate points should have ~0 distance");
+            assert!(
+                s.total_distance < 1.0,
+                "Duplicate points should have ~0 distance"
+            );
         }
     }
 
@@ -1069,16 +1077,19 @@ mod tests {
     fn test_create_signature_invalid_coordinates() {
         // Mix of valid and invalid points
         let points = vec![
-            GpsPoint::new(91.0, 0.0),      // Invalid latitude
+            GpsPoint::new(91.0, 0.0),        // Invalid latitude
             GpsPoint::new(51.5074, -0.1278), // Valid
-            GpsPoint::new(0.0, 181.0),     // Invalid longitude
+            GpsPoint::new(0.0, 181.0),       // Invalid longitude
             GpsPoint::new(51.5084, -0.1288), // Valid
-            GpsPoint::new(f64::NAN, 0.0),  // NaN
+            GpsPoint::new(f64::NAN, 0.0),    // NaN
         ];
         let sig = create_signature("test-1".to_string(), points);
         // Should filter invalid and work with remaining valid points
         if let Some(s) = sig {
-            assert!(s.points.iter().all(|p| p.is_valid()), "All points should be valid");
+            assert!(
+                s.points.iter().all(|p| p.is_valid()),
+                "All points should be valid"
+            );
         }
     }
 
@@ -1093,8 +1104,14 @@ mod tests {
         let sig = sig.unwrap();
 
         // Should be heavily simplified
-        assert!(sig.points.len() <= 100, "Should simplify to max_simplified_points");
-        assert!(sig.total_distance > 50_000.0, "Should preserve approximate distance");
+        assert!(
+            sig.points.len() <= 100,
+            "Should simplify to max_simplified_points"
+        );
+        assert!(
+            sig.total_distance > 50_000.0,
+            "Should preserve approximate distance"
+        );
     }
 
     #[test]
@@ -1121,7 +1138,10 @@ mod tests {
 
         assert!(result.is_some(), "Identical routes should match");
         let result = result.unwrap();
-        assert!(result.match_percentage > 95.0, "Identical routes should have >95% match");
+        assert!(
+            result.match_percentage > 95.0,
+            "Identical routes should have >95% match"
+        );
         assert_eq!(result.direction, "same");
     }
 
@@ -1138,7 +1158,10 @@ mod tests {
         // Should still match despite GPS noise
         assert!(result.is_some(), "Routes with noise should still match");
         let result = result.unwrap();
-        assert!(result.match_percentage > 70.0, "Noisy routes should have >70% match");
+        assert!(
+            result.match_percentage > 70.0,
+            "Noisy routes should have >70% match"
+        );
     }
 
     #[test]
@@ -1154,8 +1177,14 @@ mod tests {
 
         assert!(result.is_some(), "Reversed routes should match");
         let result = result.unwrap();
-        assert!(result.match_percentage > 90.0, "Reversed routes should have high match");
-        assert_eq!(result.direction, "reverse", "Should detect reverse direction");
+        assert!(
+            result.match_percentage > 90.0,
+            "Reversed routes should have high match"
+        );
+        assert_eq!(
+            result.direction, "reverse",
+            "Should detect reverse direction"
+        );
     }
 
     #[test]
@@ -1168,7 +1197,10 @@ mod tests {
 
         let result = ffi_compare_routes(&sig1, &sig2, MatchConfig::default());
 
-        assert!(result.is_none(), "Completely different routes should not match");
+        assert!(
+            result.is_none(),
+            "Completely different routes should not match"
+        );
     }
 
     #[test]
@@ -1197,7 +1229,7 @@ mod tests {
     fn test_compare_partial_overlap() {
         // Route B is first half of route A
         let full_route = generate_route(51.5074, -0.1278, 2.0, 100, 0.0);
-        let half_route: Vec<GpsPoint> = full_route[..full_route.len()/2].to_vec();
+        let half_route: Vec<GpsPoint> = full_route[..full_route.len() / 2].to_vec();
 
         let sig1 = create_signature("full".to_string(), full_route).unwrap();
         let sig2 = create_signature("half".to_string(), half_route).unwrap();
@@ -1208,8 +1240,10 @@ mod tests {
         // This tests the distance ratio check (routes must be within 50% of each other)
         // Half route is 50% of full, so this is at the boundary
         if let Some(r) = result {
-            assert!(r.direction == "partial" || r.match_percentage < 80.0,
-                "Partial overlap should have lower match or be marked partial");
+            assert!(
+                r.direction == "partial" || r.match_percentage < 80.0,
+                "Partial overlap should have lower match or be marked partial"
+            );
         }
     }
 
@@ -1253,12 +1287,17 @@ mod tests {
         // Generate a third distinct route (Paris area)
         let paris = create_signature(
             "paris".to_string(),
-            generate_route(48.8566, 2.3522, 1.0, 100, 0.0)
-        ).unwrap();
+            generate_route(48.8566, 2.3522, 1.0, 100, 0.0),
+        )
+        .unwrap();
 
         let groups = ffi_group_signatures(vec![london, nyc, paris], MatchConfig::default());
 
-        assert_eq!(groups.len(), 3, "Different routes should form separate groups");
+        assert_eq!(
+            groups.len(),
+            3,
+            "Different routes should form separate groups"
+        );
     }
 
     #[test]
@@ -1266,16 +1305,28 @@ mod tests {
         // 3 London routes (should group), 2 NYC routes (should group), 1 Paris (alone)
         let london1 = create_signature("london1".to_string(), long_route()).unwrap();
         let london2 = create_signature("london2".to_string(), noisy_route()).unwrap();
-        let london3 = create_signature("london3".to_string(), generate_route(51.5074, -0.1278, 1.0, 100, 5.0)).unwrap();
+        let london3 = create_signature(
+            "london3".to_string(),
+            generate_route(51.5074, -0.1278, 1.0, 100, 5.0),
+        )
+        .unwrap();
 
         let nyc1 = create_signature("nyc1".to_string(), different_route()).unwrap();
-        let nyc2 = create_signature("nyc2".to_string(), generate_route(40.7128, -74.0060, 1.0, 100, 5.0)).unwrap();
+        let nyc2 = create_signature(
+            "nyc2".to_string(),
+            generate_route(40.7128, -74.0060, 1.0, 100, 5.0),
+        )
+        .unwrap();
 
-        let paris = create_signature("paris".to_string(), generate_route(48.8566, 2.3522, 1.0, 100, 0.0)).unwrap();
+        let paris = create_signature(
+            "paris".to_string(),
+            generate_route(48.8566, 2.3522, 1.0, 100, 0.0),
+        )
+        .unwrap();
 
         let groups = ffi_group_signatures(
             vec![london1, london2, london3, nyc1, nyc2, paris],
-            MatchConfig::default()
+            MatchConfig::default(),
         );
 
         // Should form 3 groups: London(3), NYC(2), Paris(1)
@@ -1294,11 +1345,11 @@ mod tests {
         // but won't affect matching threshold
         let short1 = create_signature(
             "short1".to_string(),
-            generate_route(51.5074, -0.1278, 0.3, 100, 0.0) // 300m
+            generate_route(51.5074, -0.1278, 0.3, 100, 0.0), // 300m
         );
         let short2 = create_signature(
             "short2".to_string(),
-            generate_route(51.5074, -0.1278, 0.3, 100, 0.0) // 300m
+            generate_route(51.5074, -0.1278, 0.3, 100, 0.0), // 300m
         );
 
         if let (Some(s1), Some(s2)) = (short1, short2) {
@@ -1320,7 +1371,8 @@ mod tests {
         let sig3 = create_signature("c".to_string(), route).unwrap();
 
         // Initial grouping with first two
-        let initial_groups = ffi_group_signatures(vec![sig1.clone(), sig2.clone()], MatchConfig::default());
+        let initial_groups =
+            ffi_group_signatures(vec![sig1.clone(), sig2.clone()], MatchConfig::default());
         assert_eq!(initial_groups.len(), 1);
         assert_eq!(initial_groups[0].activity_ids.len(), 2);
 
@@ -1333,7 +1385,11 @@ mod tests {
         );
 
         assert_eq!(updated.len(), 1, "Should still have one group");
-        assert_eq!(updated[0].activity_ids.len(), 3, "Should now have 3 activities");
+        assert_eq!(
+            updated[0].activity_ids.len(),
+            3,
+            "Should now have 3 activities"
+        );
     }
 
     #[test]
@@ -1343,7 +1399,8 @@ mod tests {
         let sig2 = create_signature("london2".to_string(), london_route).unwrap();
 
         // Initial grouping
-        let initial_groups = ffi_group_signatures(vec![sig1.clone(), sig2.clone()], MatchConfig::default());
+        let initial_groups =
+            ffi_group_signatures(vec![sig1.clone(), sig2.clone()], MatchConfig::default());
         assert_eq!(initial_groups.len(), 1);
 
         // Add a different route
@@ -1365,7 +1422,8 @@ mod tests {
             .map(|i| generate_route(51.5074 + i as f64 * 0.01, -0.1278, 1.0, 100, 5.0))
             .collect();
 
-        let sigs: Vec<RouteSignature> = routes.iter()
+        let sigs: Vec<RouteSignature> = routes
+            .iter()
             .enumerate()
             .filter_map(|(i, r)| create_signature(format!("route-{}", i), r.clone()))
             .collect();
@@ -1396,7 +1454,10 @@ mod tests {
 
         // Each group should have same number of activities
         let full_sizes: Vec<usize> = full_groups.iter().map(|g| g.activity_ids.len()).collect();
-        let incr_sizes: Vec<usize> = incremental_groups.iter().map(|g| g.activity_ids.len()).collect();
+        let incr_sizes: Vec<usize> = incremental_groups
+            .iter()
+            .map(|g| g.activity_ids.len())
+            .collect();
 
         let mut full_sorted = full_sizes.clone();
         let mut incr_sorted = incr_sizes.clone();
@@ -1413,7 +1474,8 @@ mod tests {
     #[test]
     fn test_flat_buffer_basic() {
         let route = long_route();
-        let flat_coords: Vec<f64> = route.iter()
+        let flat_coords: Vec<f64> = route
+            .iter()
             .flat_map(|p| vec![p.latitude, p.longitude])
             .collect();
 
@@ -1436,7 +1498,10 @@ mod tests {
         };
 
         let signatures = create_signatures_from_flat(vec![track], MatchConfig::default());
-        assert!(signatures.is_empty(), "Empty coords should produce no signatures");
+        assert!(
+            signatures.is_empty(),
+            "Empty coords should produce no signatures"
+        );
     }
 
     #[test]
@@ -1450,7 +1515,10 @@ mod tests {
         let signatures = create_signatures_from_flat(vec![track], MatchConfig::default());
         // chunks_exact(2) should handle this gracefully
         // Will get 1 point (51.5074, -0.1278), which is not enough
-        assert!(signatures.is_empty(), "Odd coords should produce no signature (only 1 valid point)");
+        assert!(
+            signatures.is_empty(),
+            "Odd coords should produce no signature (only 1 valid point)"
+        );
     }
 
     #[test]
@@ -1461,11 +1529,17 @@ mod tests {
         let tracks = vec![
             FlatGpsTrack {
                 activity_id: "london".to_string(),
-                coords: route1.iter().flat_map(|p| vec![p.latitude, p.longitude]).collect(),
+                coords: route1
+                    .iter()
+                    .flat_map(|p| vec![p.latitude, p.longitude])
+                    .collect(),
             },
             FlatGpsTrack {
                 activity_id: "nyc".to_string(),
-                coords: route2.iter().flat_map(|p| vec![p.latitude, p.longitude]).collect(),
+                coords: route2
+                    .iter()
+                    .flat_map(|p| vec![p.latitude, p.longitude])
+                    .collect(),
             },
         ];
 
@@ -1482,15 +1556,24 @@ mod tests {
         let tracks = vec![
             FlatGpsTrack {
                 activity_id: "a".to_string(),
-                coords: route.iter().flat_map(|p| vec![p.latitude, p.longitude]).collect(),
+                coords: route
+                    .iter()
+                    .flat_map(|p| vec![p.latitude, p.longitude])
+                    .collect(),
             },
             FlatGpsTrack {
                 activity_id: "b".to_string(),
-                coords: noisy_same.iter().flat_map(|p| vec![p.latitude, p.longitude]).collect(),
+                coords: noisy_same
+                    .iter()
+                    .flat_map(|p| vec![p.latitude, p.longitude])
+                    .collect(),
             },
             FlatGpsTrack {
                 activity_id: "c".to_string(),
-                coords: different_route().iter().flat_map(|p| vec![p.latitude, p.longitude]).collect(),
+                coords: different_route()
+                    .iter()
+                    .flat_map(|p| vec![p.latitude, p.longitude])
+                    .collect(),
             },
         ];
 
@@ -1586,7 +1669,10 @@ mod tests {
 
         let sig = create_signature("stationary".to_string(), points);
         if let Some(s) = sig {
-            assert!(s.total_distance < 100.0, "Stationary should have minimal distance");
+            assert!(
+                s.total_distance < 100.0,
+                "Stationary should have minimal distance"
+            );
         }
     }
 
@@ -1627,13 +1713,24 @@ mod tests {
         };
 
         let noisy = noisy_route();
-        let sig1 = create_signature_with_config("clean".to_string(), points.clone(), strict_config.clone()).unwrap();
-        let sig2 = create_signature_with_config("noisy".to_string(), noisy.clone(), strict_config.clone()).unwrap();
+        let sig1 = create_signature_with_config(
+            "clean".to_string(),
+            points.clone(),
+            strict_config.clone(),
+        )
+        .unwrap();
+        let sig2 =
+            create_signature_with_config("noisy".to_string(), noisy.clone(), strict_config.clone())
+                .unwrap();
 
         let strict_result = ffi_compare_routes(&sig1, &sig2, strict_config);
 
-        let sig1_len = create_signature_with_config("clean".to_string(), points, lenient_config.clone()).unwrap();
-        let sig2_len = create_signature_with_config("noisy".to_string(), noisy, lenient_config.clone()).unwrap();
+        let sig1_len =
+            create_signature_with_config("clean".to_string(), points, lenient_config.clone())
+                .unwrap();
+        let sig2_len =
+            create_signature_with_config("noisy".to_string(), noisy, lenient_config.clone())
+                .unwrap();
         let lenient_result = ffi_compare_routes(&sig1_len, &sig2_len, lenient_config);
 
         // Lenient config should find a match where strict might not
@@ -1690,8 +1787,11 @@ mod tests {
         let groups = ffi_group_signatures(sigs, MatchConfig::default());
 
         // Should form approximately 5 groups
-        assert!(groups.len() >= 4 && groups.len() <= 10,
-            "Should form roughly 5 groups (got {})", groups.len());
+        assert!(
+            groups.len() >= 4 && groups.len() <= 10,
+            "Should form roughly 5 groups (got {})",
+            groups.len()
+        );
     }
 
     #[test]
@@ -1708,6 +1808,9 @@ mod tests {
         assert!(sig.is_some());
 
         let sig = sig.unwrap();
-        assert!(sig.points.len() <= 100, "Should simplify to manageable size");
+        assert!(
+            sig.points.len() <= 100,
+            "Should simplify to manageable size"
+        );
     }
 }

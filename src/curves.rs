@@ -351,8 +351,7 @@ fn compute_best_pace(cumulative_distances: &[f32], target_distance: f32) -> f32 
         // Shrink window from the left while distance is greater than target
         // Note: We must recalculate the distance inside the loop since start_idx changes
         while start_idx < end_idx {
-            let dist_covered =
-                cumulative_distances[end_idx] - cumulative_distances[start_idx];
+            let dist_covered = cumulative_distances[end_idx] - cumulative_distances[start_idx];
             if dist_covered <= target_distance {
                 break;
             }
@@ -576,7 +575,10 @@ mod tests {
 
         // Test with target too long - should return 0
         let pace_too_long = compute_best_pace(&distances, 1000.0);
-        assert_eq!(pace_too_long, 0.0, "Should return 0 for target longer than activity");
+        assert_eq!(
+            pace_too_long, 0.0,
+            "Should return 0 for target longer than activity"
+        );
     }
 
     #[test]
@@ -592,6 +594,9 @@ mod tests {
         let pace = compute_best_pace(&distances, 200.0);
 
         // Should find a valid pace since total is 550m
-        assert!(pace > 0.0, "Should find valid pace for 200m target in 550m activity");
+        assert!(
+            pace > 0.0,
+            "Should find valid pace for 200m target in 550m activity"
+        );
     }
 }

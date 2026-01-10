@@ -371,7 +371,7 @@ mod tests {
     fn test_resample_for_comparison_consistent_spacing() {
         // Two routes of different lengths should have consistent point spacing
         let short_route = generate_route_with_distance(2000.0); // 2km
-        let long_route = generate_route_with_distance(8000.0);  // 8km
+        let long_route = generate_route_with_distance(8000.0); // 8km
         let config = MatchConfig::default();
 
         let resampled_short = resample_for_comparison(&short_route, 2000.0, &config);
@@ -386,8 +386,16 @@ mod tests {
         let spacing_short = 2000.0 / (resampled_short.len() - 1) as f64;
         let spacing_long = 8000.0 / (resampled_long.len() - 1) as f64;
 
-        assert!((spacing_short - 50.0).abs() < 5.0, "Short route spacing: {}", spacing_short);
-        assert!((spacing_long - 50.0).abs() < 5.0, "Long route spacing: {}", spacing_long);
+        assert!(
+            (spacing_short - 50.0).abs() < 5.0,
+            "Short route spacing: {}",
+            spacing_short
+        );
+        assert!(
+            (spacing_long - 50.0).abs() < 5.0,
+            "Long route spacing: {}",
+            spacing_long
+        );
     }
 
     #[test]
@@ -423,8 +431,10 @@ mod tests {
         let short_points = generate_route_with_distance(5000.0);
         let long_points = generate_route_with_distance(5000.0);
 
-        let sig1 = RouteSignature::from_points("short", &short_points, &MatchConfig::default()).unwrap();
-        let sig2 = RouteSignature::from_points("long", &long_points, &MatchConfig::default()).unwrap();
+        let sig1 =
+            RouteSignature::from_points("short", &short_points, &MatchConfig::default()).unwrap();
+        let sig2 =
+            RouteSignature::from_points("long", &long_points, &MatchConfig::default()).unwrap();
 
         let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
         assert!(result.is_some());
