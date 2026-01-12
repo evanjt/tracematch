@@ -27,6 +27,7 @@
 mod consensus;
 mod evolution;
 mod medoid;
+mod optimized;
 mod overlap;
 mod portions;
 mod postprocess;
@@ -49,7 +50,8 @@ pub(crate) use overlap::{
 };
 pub(crate) use portions::compute_activity_portions;
 pub(crate) use postprocess::{
-    merge_nearby_sections, remove_overlapping_sections, split_folding_sections,
+    make_sections_exclusive, merge_nearby_sections, remove_overlapping_sections,
+    split_at_gradient_changes, split_at_heading_changes, split_folding_sections,
     split_high_variance_sections,
 };
 pub(crate) use rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
@@ -59,6 +61,9 @@ pub(crate) use traces::extract_all_activity_traces;
 pub use evolution::{
     merge_overlapping_sections, update_section_with_new_traces, SectionUpdateResult,
 };
+
+// Re-export optimized detection functions
+pub use optimized::{detect_sections_incremental, detect_sections_optimized, IncrementalResult};
 
 /// Compute initial stability score from consensus metrics.
 /// Stability increases with more observations and tighter spread.
@@ -612,16 +617,34 @@ pub fn detect_sections_from_tracks(
 
         // Post-process step 1: Split sections that fold back on themselves (out-and-back)
         let fold_start = std::time::Instant::now();
-        let split_sections = split_folding_sections(sport_sections, config);
+        let fold_sections = split_folding_sections(sport_sections, config);
         info!(
             "[Sections] After fold splitting: {} sections in {}ms",
-            split_sections.len(),
+            fold_sections.len(),
             fold_start.elapsed().as_millis()
+        );
+
+        // Post-process step 1b: Split sections at heading inflection points
+        let heading_start = std::time::Instant::now();
+        let heading_sections = split_at_heading_changes(fold_sections, config);
+        info!(
+            "[Sections] After heading splitting: {} sections in {}ms",
+            heading_sections.len(),
+            heading_start.elapsed().as_millis()
+        );
+
+        // Post-process step 1c: Split sections at gradient changes (if elevation available)
+        let gradient_start = std::time::Instant::now();
+        let gradient_sections = split_at_gradient_changes(heading_sections, config);
+        info!(
+            "[Sections] After gradient splitting: {} sections in {}ms",
+            gradient_sections.len(),
+            gradient_start.elapsed().as_millis()
         );
 
         // Post-process step 2: Merge sections that are nearby (reversed, parallel, GPS drift)
         let merge_start = std::time::Instant::now();
-        let merged_sections = merge_nearby_sections(split_sections, config);
+        let merged_sections = merge_nearby_sections(gradient_sections, config);
         info!(
             "[Sections] After nearby merge: {} sections in {}ms",
             merged_sections.len(),
@@ -895,15 +918,33 @@ pub fn detect_sections_multiscale(
 
     // Apply post-processing
     let fold_start = std::time::Instant::now();
-    let split_sections = split_folding_sections(all_sections, config);
+    let fold_sections = split_folding_sections(all_sections, config);
     info!(
         "[MultiScale] After fold splitting: {} sections in {}ms",
-        split_sections.len(),
+        fold_sections.len(),
         fold_start.elapsed().as_millis()
     );
 
+    // Split at heading inflection points
+    let heading_start = std::time::Instant::now();
+    let heading_sections = split_at_heading_changes(fold_sections, config);
+    info!(
+        "[MultiScale] After heading splitting: {} sections in {}ms",
+        heading_sections.len(),
+        heading_start.elapsed().as_millis()
+    );
+
+    // Split at gradient changes (if elevation available)
+    let gradient_start = std::time::Instant::now();
+    let gradient_sections = split_at_gradient_changes(heading_sections, config);
+    info!(
+        "[MultiScale] After gradient splitting: {} sections in {}ms",
+        gradient_sections.len(),
+        gradient_start.elapsed().as_millis()
+    );
+
     let merge_start = std::time::Instant::now();
-    let merged_sections = merge_nearby_sections(split_sections, config);
+    let merged_sections = merge_nearby_sections(gradient_sections, config);
     info!(
         "[MultiScale] After nearby merge: {} sections in {}ms",
         merged_sections.len(),

@@ -8,6 +8,7 @@
 
 use super::rtree::{build_rtree, IndexedPoint};
 use super::{FrequentSection, SectionConfig};
+use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
 use crate::GpsPoint;
 use log::info;
@@ -154,6 +155,358 @@ pub fn split_folding_sections(
 }
 
 // =============================================================================
+// Heading-Based Section Splitting
+// =============================================================================
+
+/// Minimum heading change (degrees) to trigger a split.
+const MIN_HEADING_CHANGE: f64 = 45.0;
+
+/// Minimum distance (meters) the new heading must be sustained.
+const MIN_SUSTAIN_DISTANCE: f64 = 50.0;
+
+/// Window size (meters) for computing average bearing.
+const BEARING_WINDOW_METERS: f64 = 30.0;
+
+/// Maximum bearing variance (degrees) within a window to consider it "consistent".
+const MAX_BEARING_VARIANCE: f64 = 30.0;
+
+/// Minimum segment length (meters) after splitting.
+const MIN_HEADING_SPLIT_LENGTH: f64 = 100.0;
+
+/// Split sections at sustained heading inflection points.
+///
+/// A section is split where direction changes by >= 45° AND the new direction
+/// persists for at least 50 meters. This prevents splitting at single sharp
+/// turns while catching true direction changes.
+pub fn split_at_heading_changes(
+    sections: Vec<FrequentSection>,
+    _config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    let mut result = Vec::new();
+
+    for section in sections {
+        let polyline = &section.polyline;
+
+        // Need at least enough points to compute windows
+        if polyline.len() < 10 {
+            result.push(section);
+            continue;
+        }
+
+        // Find split points
+        let split_indices = find_heading_inflection_points(polyline);
+
+        if split_indices.is_empty() {
+            result.push(section);
+            continue;
+        }
+
+        // Split the section at each inflection point
+        let mut segments: Vec<(usize, usize)> = Vec::new();
+        let mut start_idx = 0;
+
+        for &split_idx in &split_indices {
+            if split_idx > start_idx {
+                segments.push((start_idx, split_idx));
+            }
+            start_idx = split_idx;
+        }
+
+        // Add final segment
+        if start_idx < polyline.len() {
+            segments.push((start_idx, polyline.len()));
+        }
+
+        // Create new sections from segments
+        let mut split_count = 0;
+        for (seg_start, seg_end) in segments {
+            let seg_polyline = polyline[seg_start..seg_end].to_vec();
+            let seg_length = calculate_route_distance(&seg_polyline);
+
+            if seg_length >= MIN_HEADING_SPLIT_LENGTH && seg_polyline.len() >= 3 {
+                let mut new_section = section.clone();
+                new_section.id = format!("{}_h{}", section.id, split_count);
+                new_section.polyline = seg_polyline;
+                new_section.distance_meters = seg_length;
+                new_section.activity_traces = HashMap::new();
+                result.push(new_section);
+                split_count += 1;
+            }
+        }
+
+        if split_count > 1 {
+            info!(
+                "[Sections] Split {} at {} heading inflection points -> {} segments",
+                section.id,
+                split_indices.len(),
+                split_count
+            );
+        } else if split_count == 0 {
+            // No valid splits produced, keep original
+            result.push(section);
+        }
+    }
+
+    result
+}
+
+/// Find indices where there's a sustained heading change.
+fn find_heading_inflection_points(polyline: &[GpsPoint]) -> Vec<usize> {
+    use crate::geo_utils::{
+        bearing_difference, calculate_bearing, circular_mean_bearing, circular_std_bearing,
+    };
+
+    let mut inflection_points = Vec::new();
+
+    if polyline.len() < 10 {
+        return inflection_points;
+    }
+
+    // Compute per-segment bearings
+    let bearings: Vec<f64> = (1..polyline.len())
+        .map(|i| calculate_bearing(&polyline[i - 1], &polyline[i]))
+        .collect();
+
+    // Estimate average point spacing
+    let total_dist = calculate_route_distance(polyline);
+    let avg_spacing = total_dist / polyline.len() as f64;
+
+    // Window size in points
+    let window_points = ((BEARING_WINDOW_METERS / avg_spacing).ceil() as usize).max(3);
+
+    // Skip if we don't have enough points for windows
+    if bearings.len() < window_points * 2 + 1 {
+        return inflection_points;
+    }
+
+    let mut last_split_idx = 0;
+
+    for i in window_points..(bearings.len() - window_points) {
+        // Compute trailing window (before point i)
+        let trailing_start = i.saturating_sub(window_points);
+        let trailing_bearings = &bearings[trailing_start..i];
+
+        // Compute leading window (after point i)
+        let leading_end = (i + window_points).min(bearings.len());
+        let leading_bearings = &bearings[i..leading_end];
+
+        // Check trailing window consistency
+        let trailing_std = circular_std_bearing(trailing_bearings);
+        if trailing_std > MAX_BEARING_VARIANCE {
+            continue; // Trailing window is too noisy
+        }
+
+        // Check leading window consistency
+        let leading_std = circular_std_bearing(leading_bearings);
+        if leading_std > MAX_BEARING_VARIANCE {
+            continue; // Leading window is too noisy
+        }
+
+        // Compute average bearings
+        let trailing_avg = circular_mean_bearing(trailing_bearings);
+        let leading_avg = circular_mean_bearing(leading_bearings);
+
+        // Check for significant direction change
+        let heading_change = bearing_difference(trailing_avg, leading_avg);
+        if heading_change < MIN_HEADING_CHANGE {
+            continue;
+        }
+
+        // Calculate distance from last split to verify sustained change
+        let dist_from_last: f64 = (last_split_idx..=i)
+            .take(i - last_split_idx)
+            .map(|j| {
+                if j + 1 < polyline.len() {
+                    haversine_distance(&polyline[j], &polyline[j + 1])
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+
+        if dist_from_last < MIN_SUSTAIN_DISTANCE && last_split_idx > 0 {
+            continue; // Too close to last split
+        }
+
+        // Found a valid inflection point
+        // Use i+1 because bearings array is offset by 1 from polyline
+        inflection_points.push(i + 1);
+        last_split_idx = i + 1;
+
+        // Skip ahead to avoid multiple splits at same corner
+        // (the loop continues from next iteration anyway)
+    }
+
+    inflection_points
+}
+
+// =============================================================================
+// Gradient-Based Section Splitting
+// =============================================================================
+
+/// Minimum gradient change (%) to trigger a split.
+/// E.g., transitioning from flat (0%) to uphill (5%) triggers a split.
+const MIN_GRADIENT_CHANGE: f64 = 5.0;
+
+/// Window size (meters) for computing average gradient.
+const GRADIENT_WINDOW_METERS: f64 = 50.0;
+
+/// Minimum segment length (meters) after splitting.
+const MIN_GRADIENT_SPLIT_LENGTH: f64 = 100.0;
+
+/// Split sections at sustained gradient changes.
+///
+/// A section is split where gradient changes significantly (flat→uphill,
+/// uphill→downhill, etc.). This only works if elevation data is available.
+pub fn split_at_gradient_changes(
+    sections: Vec<FrequentSection>,
+    _config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    let mut result = Vec::new();
+
+    for section in sections {
+        let polyline = &section.polyline;
+
+        // Check if we have elevation data
+        let has_elevation = polyline.iter().any(|p| p.elevation.is_some());
+        if !has_elevation || polyline.len() < 10 {
+            result.push(section);
+            continue;
+        }
+
+        // Find gradient inflection points
+        let split_indices = find_gradient_inflection_points(polyline);
+
+        if split_indices.is_empty() {
+            result.push(section);
+            continue;
+        }
+
+        // Split the section at each inflection point
+        let mut segments: Vec<(usize, usize)> = Vec::new();
+        let mut start_idx = 0;
+
+        for &split_idx in &split_indices {
+            if split_idx > start_idx {
+                segments.push((start_idx, split_idx));
+            }
+            start_idx = split_idx;
+        }
+
+        // Add final segment
+        if start_idx < polyline.len() {
+            segments.push((start_idx, polyline.len()));
+        }
+
+        // Create new sections from segments
+        let mut split_count = 0;
+        for (seg_start, seg_end) in segments {
+            let seg_polyline = polyline[seg_start..seg_end].to_vec();
+            let seg_length = calculate_route_distance(&seg_polyline);
+
+            if seg_length >= MIN_GRADIENT_SPLIT_LENGTH && seg_polyline.len() >= 3 {
+                let mut new_section = section.clone();
+                new_section.id = format!("{}_g{}", section.id, split_count);
+                new_section.polyline = seg_polyline;
+                new_section.distance_meters = seg_length;
+                new_section.activity_traces = HashMap::new();
+                result.push(new_section);
+                split_count += 1;
+            }
+        }
+
+        if split_count > 1 {
+            info!(
+                "[Sections] Split {} at {} gradient inflection points -> {} segments",
+                section.id,
+                split_indices.len(),
+                split_count
+            );
+        } else if split_count == 0 {
+            result.push(section);
+        }
+    }
+
+    result
+}
+
+/// Find indices where there's a sustained gradient change.
+fn find_gradient_inflection_points(polyline: &[GpsPoint]) -> Vec<usize> {
+    use crate::geo_utils::segment_gradient;
+
+    let mut inflection_points = Vec::new();
+
+    if polyline.len() < 10 {
+        return inflection_points;
+    }
+
+    // Estimate average point spacing
+    let total_dist = calculate_route_distance(polyline);
+    let avg_spacing = total_dist / polyline.len() as f64;
+
+    // Window size in points
+    let window_points = ((GRADIENT_WINDOW_METERS / avg_spacing).ceil() as usize).max(5);
+
+    // Skip if we don't have enough points for windows
+    if polyline.len() < window_points * 2 + 1 {
+        return inflection_points;
+    }
+
+    let mut last_split_idx = 0;
+
+    for i in window_points..(polyline.len() - window_points) {
+        // Compute trailing window gradient
+        let trailing_start = i.saturating_sub(window_points);
+        let trailing_gradient = match segment_gradient(&polyline[trailing_start..i]) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Compute leading window gradient
+        let leading_end = (i + window_points).min(polyline.len());
+        let leading_gradient = match segment_gradient(&polyline[i..leading_end]) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Check for significant gradient change
+        let gradient_change = (leading_gradient - trailing_gradient).abs();
+        if gradient_change < MIN_GRADIENT_CHANGE {
+            continue;
+        }
+
+        // Also check for sign change (uphill to downhill or vice versa)
+        let sign_change = (trailing_gradient > 1.0 && leading_gradient < -1.0)
+            || (trailing_gradient < -1.0 && leading_gradient > 1.0);
+
+        // Must have significant change OR sign reversal
+        if gradient_change < MIN_GRADIENT_CHANGE && !sign_change {
+            continue;
+        }
+
+        // Check distance from last split
+        let dist_from_last: f64 = (last_split_idx..i)
+            .map(|j| {
+                if j + 1 < polyline.len() {
+                    haversine_distance(&polyline[j], &polyline[j + 1])
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+
+        if dist_from_last < MIN_GRADIENT_SPLIT_LENGTH && last_split_idx > 0 {
+            continue;
+        }
+
+        inflection_points.push(i);
+        last_split_idx = i;
+    }
+
+    inflection_points
+}
+
+// =============================================================================
 // Nearby Section Merging
 // =============================================================================
 
@@ -240,6 +593,9 @@ pub fn merge_nearby_sections(
 /// Strategy: Prefer SHORTER sections over longer ones that contain them.
 /// A short section (like an intersection or bridge) is more specific and useful
 /// than a long section that happens to include it.
+///
+/// **Loop sections are protected** - they won't be removed even if contained
+/// in another section, because loops represent complete circuits.
 pub fn remove_overlapping_sections(
     mut sections: Vec<FrequentSection>,
     config: &SectionConfig,
@@ -247,6 +603,9 @@ pub fn remove_overlapping_sections(
     if sections.len() < 2 {
         return sections;
     }
+
+    // Loop detection threshold: 2x proximity to allow for GPS drift at closure
+    let loop_threshold = config.proximity_threshold * 2.0;
 
     // Sort by LENGTH ascending (shorter sections first), then by visit count descending
     // This ensures shorter, more specific sections are preferred
@@ -257,6 +616,12 @@ pub fn remove_overlapping_sections(
             None => std::cmp::Ordering::Equal,
         },
     );
+
+    // Compute which sections are loops (protected from removal)
+    let is_loop: Vec<bool> = sections
+        .iter()
+        .map(|s| is_loop_section(s, loop_threshold))
+        .collect();
 
     let mut keep: Vec<bool> = vec![true; sections.len()];
 
@@ -286,7 +651,8 @@ pub fn remove_overlapping_sections(
 
             // If j is largely contained in i (j is the longer one since we sorted by length)
             // j should be removed because i is the more specific section
-            if j_in_i > 0.6 {
+            // BUT: Don't remove j if it's a loop!
+            if j_in_i > 0.6 && !is_loop[j] {
                 info!(
                     "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
                     section_j.id,
@@ -296,10 +662,9 @@ pub fn remove_overlapping_sections(
                     section_i.distance_meters as u32
                 );
                 keep[j] = false;
-            } else if i_in_j > 0.8 {
+            } else if i_in_j > 0.8 && !is_loop[i] {
                 // If i is almost entirely contained in j, remove i (the smaller one)
-                // This handles edge cases where the "smaller" section by length
-                // is actually just a subset of another section
+                // BUT: Don't remove i if it's a loop!
                 info!(
                     "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
                     section_i.id,
@@ -310,9 +675,10 @@ pub fn remove_overlapping_sections(
                 );
                 keep[i] = false;
                 break; // Stop checking j's against removed i
-            } else if j_in_i > 0.4 && i_in_j > 0.4 {
+            } else if j_in_i > 0.4 && i_in_j > 0.4 && !is_loop[i] && !is_loop[j] {
                 // Significant mutual overlap - they're essentially the same
                 // Keep the shorter one (i, since sorted by length)
+                // BUT: Don't remove either if they're loops!
                 info!(
                     "[Sections] Removing {} due to mutual overlap with {} ({}% vs {}%)",
                     section_j.id,
@@ -325,11 +691,31 @@ pub fn remove_overlapping_sections(
         }
     }
 
-    sections
+    let result: Vec<FrequentSection> = sections
         .into_iter()
         .zip(keep)
         .filter_map(|(s, k)| if k { Some(s) } else { None })
-        .collect()
+        .collect();
+
+    let loop_count = result.iter().filter(|s| is_loop_section(s, loop_threshold)).count();
+    info!(
+        "[Sections] After removing overlaps: {} sections ({} loops protected)",
+        result.len(),
+        loop_count
+    );
+
+    result
+}
+
+/// Check if a section forms a closed loop (start ≈ end).
+/// Used by both remove_overlapping_sections and make_sections_exclusive.
+fn is_loop_section(section: &FrequentSection, threshold: f64) -> bool {
+    if section.polyline.len() < 10 {
+        return false;
+    }
+    let start = &section.polyline[0];
+    let end = &section.polyline[section.polyline.len() - 1];
+    haversine_distance(start, end) < threshold
 }
 
 /// Compute what fraction of polyline A is contained within polyline B
@@ -603,4 +989,169 @@ pub fn split_high_variance_sections(
     }
 
     result
+}
+
+// =============================================================================
+// Mutually Exclusive Sections - Cut overlapping portions
+// =============================================================================
+
+/// Make sections mutually exclusive by cutting overlapping portions.
+/// Uses a "claim territory" approach: higher-priority sections claim their
+/// territory first, and later sections are trimmed to exclude claimed areas.
+///
+/// **Loop sections are preserved intact** - they're not trimmed even if they
+/// overlap with other sections. This allows complete circuits to be preserved
+/// (e.g., a lake loop and an outer ring that share one edge).
+///
+/// Priority is determined by: confidence * log(visit_count) * loop_boost
+pub fn make_sections_exclusive(
+    mut sections: Vec<FrequentSection>,
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    if sections.len() < 2 {
+        return sections;
+    }
+
+    // Loop detection threshold: 2x proximity to allow for GPS drift at closure
+    let loop_threshold = config.proximity_threshold * 2.0;
+
+    // Sort by priority: loops get a boost, then by confidence and visits
+    sections.sort_by(|a, b| {
+        let loop_a = is_loop_section(a, loop_threshold);
+        let loop_b = is_loop_section(b, loop_threshold);
+
+        // Loops get 1.5x priority boost since they're complete circuits
+        let boost_a = if loop_a { 1.5 } else { 1.0 };
+        let boost_b = if loop_b { 1.5 } else { 1.0 };
+
+        let priority_a = a.confidence * (a.visit_count as f64).ln().max(1.0) * boost_a;
+        let priority_b = b.confidence * (b.visit_count as f64).ln().max(1.0) * boost_b;
+        priority_b.partial_cmp(&priority_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut result: Vec<FrequentSection> = Vec::new();
+    let mut claimed_trees: Vec<RTree<IndexedPoint>> = Vec::new();
+    let mut loop_count = 0;
+
+    for section in sections {
+        let is_loop = is_loop_section(&section, loop_threshold);
+
+        if is_loop {
+            // LOOPS: Preserve intact without trimming
+            // They may overlap with other loops/sections - that's OK
+            info!(
+                "[Sections] Preserving loop section {} ({:.0}m, {} visits)",
+                section.id, section.distance_meters, section.visit_count
+            );
+            claimed_trees.push(build_rtree(&section.polyline));
+            result.push(section);
+            loop_count += 1;
+        } else {
+            // NON-LOOPS: Trim to exclude claimed territory
+            let trimmed = trim_to_unclaimed(&section, &claimed_trees, config);
+
+            if let Some(trimmed_section) = trimmed {
+                // Only keep if long enough
+                if trimmed_section.distance_meters >= config.min_section_length {
+                    // Add this section's territory to claimed areas
+                    claimed_trees.push(build_rtree(&trimmed_section.polyline));
+                    result.push(trimmed_section);
+                }
+            }
+        }
+    }
+
+    info!(
+        "[Sections] After making exclusive: {} sections ({} loops preserved)",
+        result.len(),
+        loop_count
+    );
+
+    result
+}
+
+/// Trim a section to exclude areas already claimed by other sections.
+/// Returns None if the entire section is claimed.
+fn trim_to_unclaimed(
+    section: &FrequentSection,
+    claimed_trees: &[RTree<IndexedPoint>],
+    config: &SectionConfig,
+) -> Option<FrequentSection> {
+    if claimed_trees.is_empty() {
+        return Some(section.clone());
+    }
+
+    let threshold_deg = config.proximity_threshold / 111_000.0;
+    let threshold_deg_sq = threshold_deg * threshold_deg;
+
+    // Find which points are NOT claimed
+    let mut unclaimed_mask: Vec<bool> = vec![true; section.polyline.len()];
+
+    for point_idx in 0..section.polyline.len() {
+        let point = &section.polyline[point_idx];
+        let query = [point.latitude, point.longitude];
+
+        for tree in claimed_trees {
+            if let Some(nearest) = tree.nearest_neighbor(&query) {
+                if nearest.distance_2(&query) <= threshold_deg_sq {
+                    unclaimed_mask[point_idx] = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Find the longest contiguous unclaimed segment
+    let mut best_start = 0;
+    let mut best_len = 0;
+    let mut current_start = 0;
+    let mut current_len = 0;
+    let mut in_unclaimed = false;
+
+    for (i, &is_unclaimed) in unclaimed_mask.iter().enumerate() {
+        if is_unclaimed {
+            if !in_unclaimed {
+                current_start = i;
+                current_len = 0;
+                in_unclaimed = true;
+            }
+            current_len += 1;
+        } else {
+            if in_unclaimed && current_len > best_len {
+                best_start = current_start;
+                best_len = current_len;
+            }
+            in_unclaimed = false;
+        }
+    }
+    // Check final segment
+    if in_unclaimed && current_len > best_len {
+        best_start = current_start;
+        best_len = current_len;
+    }
+
+    // Need at least a few points
+    if best_len < 3 {
+        return None;
+    }
+
+    // Extract the unclaimed portion
+    let trimmed_polyline: Vec<GpsPoint> = section.polyline[best_start..(best_start + best_len)].to_vec();
+    let trimmed_distance = calculate_route_distance(&trimmed_polyline);
+
+    if trimmed_distance < config.min_section_length {
+        return None;
+    }
+
+    // Create trimmed section
+    let mut trimmed = section.clone();
+    trimmed.polyline = trimmed_polyline;
+    trimmed.distance_meters = trimmed_distance;
+
+    // Update point density if available
+    if !section.point_density.is_empty() && best_start + best_len <= section.point_density.len() {
+        trimmed.point_density = section.point_density[best_start..(best_start + best_len)].to_vec();
+    }
+
+    Some(trimmed)
 }
