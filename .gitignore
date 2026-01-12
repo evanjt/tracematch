@@ -1,2 +1,6 @@
 /target
 *.md
+*.gpx
+*.json
+*.py
+*.log
