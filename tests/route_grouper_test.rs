@@ -16,7 +16,10 @@ fn different_coords() -> Vec<GpsPoint> {
         .collect()
 }
 
-fn setup_store_and_cache() -> (tracematch::engine::ActivityStore, tracematch::engine::SignatureStore) {
+fn setup_store_and_cache() -> (
+    tracematch::engine::ActivityStore,
+    tracematch::engine::SignatureStore,
+) {
     let mut store = tracematch::engine::ActivityStore::new();
     store.add("a".to_string(), sample_coords(), "cycling".to_string());
     store.add("b".to_string(), sample_coords(), "cycling".to_string());

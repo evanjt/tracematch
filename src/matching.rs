@@ -247,4 +247,3 @@ pub fn determine_direction_by_endpoints(
         "same".to_string()
     }
 }
-

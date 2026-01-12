@@ -1,5 +1,8 @@
 //! Activity trace extraction from GPS tracks.
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::rtree::{build_rtree, IndexedPoint};
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
@@ -124,19 +127,37 @@ pub fn extract_all_activity_traces(
     section_polyline: &[GpsPoint],
     track_map: &HashMap<String, Vec<GpsPoint>>,
 ) -> HashMap<String, Vec<GpsPoint>> {
-    let mut traces = HashMap::new();
-
-    // Build R-tree once for the section polyline (O(n log n))
     let polyline_tree = build_rtree(section_polyline);
 
-    for activity_id in activity_ids {
-        if let Some(track) = track_map.get(activity_id) {
-            let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
-            if !trace.is_empty() {
-                traces.insert(activity_id.clone(), trace);
-            }
-        }
-    }
+    #[cfg(feature = "parallel")]
+    let traces: HashMap<String, Vec<GpsPoint>> = activity_ids
+        .par_iter()
+        .filter_map(|activity_id| {
+            track_map.get(activity_id).and_then(|track| {
+                let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
+                if trace.is_empty() {
+                    None
+                } else {
+                    Some((activity_id.clone(), trace))
+                }
+            })
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let traces: HashMap<String, Vec<GpsPoint>> = activity_ids
+        .iter()
+        .filter_map(|activity_id| {
+            track_map.get(activity_id).and_then(|track| {
+                let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
+                if trace.is_empty() {
+                    None
+                } else {
+                    Some((activity_id.clone(), trace))
+                }
+            })
+        })
+        .collect();
 
     traces
 }

@@ -1,8 +1,8 @@
 //! Tests for heatmap module
 
 use std::collections::HashMap;
-use tracematch::{Bounds, GpsPoint, RouteSignature};
 use tracematch::heatmap::*;
+use tracematch::{Bounds, GpsPoint, RouteSignature};
 
 fn make_signature(id: &str, points: Vec<(f64, f64)>) -> RouteSignature {
     let gps_points: Vec<GpsPoint> = points

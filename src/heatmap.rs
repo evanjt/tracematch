@@ -428,4 +428,3 @@ pub fn query_heatmap_cell(
         suggested_label,
     })
 }
-

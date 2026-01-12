@@ -92,6 +92,11 @@ pub mod sections;
 pub use sections::{
     detect_sections_from_tracks,
     detect_sections_multiscale,
+    // New section manipulation functions
+    find_sections_in_route,
+    recalculate_section_polyline,
+    split_section_at_index,
+    split_section_at_point,
     DetectionStats,
     FrequentSection,
     MultiScaleSectionResult,
@@ -99,7 +104,9 @@ pub use sections::{
     // Multi-scale detection
     ScalePreset,
     SectionConfig,
+    SectionMatch,
     SectionPortion,
+    SplitResult,
 };
 
 // Heatmap generation module
@@ -611,6 +618,69 @@ pub struct SectionPerformanceResult {
 }
 
 // ============================================================================
+// Custom Section Types
+// ============================================================================
+
+/// A user-created custom section definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct CustomSection {
+    /// Unique identifier (e.g., "custom_1234567890_abc123")
+    pub id: String,
+    /// User-defined name
+    pub name: String,
+    /// GPS polyline defining the section path
+    pub polyline: Vec<GpsPoint>,
+    /// Activity this section was created from
+    pub source_activity_id: String,
+    /// Start index in the source activity's GPS track
+    pub start_index: u32,
+    /// End index in the source activity's GPS track
+    pub end_index: u32,
+    /// Sport type (e.g., "Ride", "Run")
+    pub sport_type: String,
+    /// Distance in meters
+    pub distance_meters: f64,
+    /// ISO 8601 timestamp when section was created
+    pub created_at: String,
+}
+
+/// A match between a custom section and an activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct CustomSectionMatch {
+    /// Activity ID that matched the section
+    pub activity_id: String,
+    /// Start index in the activity's GPS track
+    pub start_index: u32,
+    /// End index in the activity's GPS track
+    pub end_index: u32,
+    /// Direction: "same" or "reverse"
+    pub direction: String,
+    /// Distance of the matched portion in meters
+    pub distance_meters: f64,
+}
+
+/// Configuration for custom section matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct CustomSectionMatchConfig {
+    /// Maximum distance in meters between section and activity points (default: 50m)
+    pub proximity_threshold: f64,
+    /// Minimum percentage of section that must be covered (default: 0.8 = 80%)
+    pub min_coverage: f64,
+}
+
+impl Default for CustomSectionMatchConfig {
+    fn default() -> Self {
+        Self {
+            proximity_threshold: 50.0,
+            min_coverage: 0.8,
+        }
+    }
+}
+
+// ============================================================================
 // Spatial Indexing Types
 // ============================================================================
 
@@ -639,4 +709,3 @@ impl RTreeObject for RouteBounds {
 
 // Use matching functions from the matching module
 use crate::matching::calculate_route_distance;
-

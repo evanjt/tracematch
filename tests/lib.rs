@@ -52,8 +52,7 @@ fn test_reverse_routes_match() {
     reversed.reverse();
 
     let sig1 = RouteSignature::from_points("test-1", &points, &MatchConfig::default()).unwrap();
-    let sig2 =
-        RouteSignature::from_points("test-2", &reversed, &MatchConfig::default()).unwrap();
+    let sig2 = RouteSignature::from_points("test-2", &reversed, &MatchConfig::default()).unwrap();
 
     let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
     assert!(result.is_some());
@@ -72,10 +71,8 @@ fn test_group_signatures() {
         .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
         .collect();
 
-    let sig1 =
-        RouteSignature::from_points("test-1", &long_route, &MatchConfig::default()).unwrap();
-    let sig2 =
-        RouteSignature::from_points("test-2", &long_route, &MatchConfig::default()).unwrap();
+    let sig1 = RouteSignature::from_points("test-1", &long_route, &MatchConfig::default()).unwrap();
+    let sig2 = RouteSignature::from_points("test-2", &long_route, &MatchConfig::default()).unwrap();
     let sig3 =
         RouteSignature::from_points("test-3", &different_route, &MatchConfig::default()).unwrap();
 

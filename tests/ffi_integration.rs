@@ -687,7 +687,8 @@ fn test_loop_route() {
     assert!(sig.is_some());
 
     let sig = sig.unwrap();
-    let start_end_dist = tracematch::geo_utils::haversine_distance(&sig.start_point, &sig.end_point);
+    let start_end_dist =
+        tracematch::geo_utils::haversine_distance(&sig.start_point, &sig.end_point);
     assert!(start_end_dist < 100.0, "Loop should have start ≈ end");
 }
 
@@ -762,12 +763,9 @@ fn test_custom_config() {
     };
 
     let noisy = noisy_route();
-    let sig1 = create_signature_with_config(
-        "clean".to_string(),
-        points.clone(),
-        strict_config.clone(),
-    )
-    .unwrap();
+    let sig1 =
+        create_signature_with_config("clean".to_string(), points.clone(), strict_config.clone())
+            .unwrap();
     let sig2 =
         create_signature_with_config("noisy".to_string(), noisy.clone(), strict_config.clone())
             .unwrap();
@@ -775,11 +773,9 @@ fn test_custom_config() {
     let strict_result = ffi_compare_routes(&sig1, &sig2, strict_config);
 
     let sig1_len =
-        create_signature_with_config("clean".to_string(), points, lenient_config.clone())
-            .unwrap();
+        create_signature_with_config("clean".to_string(), points, lenient_config.clone()).unwrap();
     let sig2_len =
-        create_signature_with_config("noisy".to_string(), noisy, lenient_config.clone())
-            .unwrap();
+        create_signature_with_config("noisy".to_string(), noisy, lenient_config.clone()).unwrap();
     let lenient_result = ffi_compare_routes(&sig1_len, &sig2_len, lenient_config);
 
     // Lenient config should find a match where strict might not

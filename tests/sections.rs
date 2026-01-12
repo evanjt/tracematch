@@ -1,7 +1,7 @@
 //! Tests for sections module
 
-use tracematch::{GpsPoint};
 use tracematch::geo_utils::{compute_center, haversine_distance};
+use tracematch::GpsPoint;
 
 fn make_point(lat: f64, lng: f64) -> GpsPoint {
     GpsPoint::new(lat, lng)

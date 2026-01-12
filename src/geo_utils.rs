@@ -418,4 +418,3 @@ pub fn segment_gradient(points: &[GpsPoint]) -> Option<f64> {
 
     Some(((elev_end - elev_start) / total_dist) * 100.0)
 }
-

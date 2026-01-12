@@ -159,25 +159,42 @@ pub fn split_folding_sections(
 // =============================================================================
 
 /// Minimum heading change (degrees) to trigger a split.
-const MIN_HEADING_CHANGE: f64 = 45.0;
+/// Set high (60°) to only split at major direction changes, not gentle curves.
+const MIN_HEADING_CHANGE: f64 = 60.0;
 
 /// Minimum distance (meters) the new heading must be sustained.
-const MIN_SUSTAIN_DISTANCE: f64 = 50.0;
+const MIN_SUSTAIN_DISTANCE: f64 = 100.0;
 
 /// Window size (meters) for computing average bearing.
-const BEARING_WINDOW_METERS: f64 = 30.0;
+const BEARING_WINDOW_METERS: f64 = 50.0;
 
 /// Maximum bearing variance (degrees) within a window to consider it "consistent".
-const MAX_BEARING_VARIANCE: f64 = 30.0;
+const MAX_BEARING_VARIANCE: f64 = 25.0;
 
 /// Minimum segment length (meters) after splitting.
-const MIN_HEADING_SPLIT_LENGTH: f64 = 100.0;
+/// Keeps sections meaningful - no tiny fragments.
+const MIN_HEADING_SPLIT_LENGTH: f64 = 300.0;
+
+/// Minimum section length (meters) to consider for splitting.
+/// Sections shorter than this are kept whole to avoid over-fragmentation.
+///
+/// Based on MDL principle from TRACLUS (Lee, Han, Whang 2007):
+/// "Only split if it improves the description" - splitting short sections
+/// rarely improves quality. Reference: https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf
+const MIN_SECTION_FOR_SPLITTING: f64 = 500.0;
 
 /// Split sections at sustained heading inflection points.
 ///
-/// A section is split where direction changes by >= 45° AND the new direction
-/// persists for at least 50 meters. This prevents splitting at single sharp
+/// A section is split where direction changes by >= 60° AND the new direction
+/// persists for at least 100 meters. This prevents splitting at single sharp
 /// turns while catching true direction changes.
+///
+/// Uses MDL-inspired guards to prevent over-segmentation:
+/// - Skips sections already < 500m (splitting rarely helps)
+/// - Ensures all fragments are >= 300m
+///
+/// Reference: TS-MF Algorithm (Xu et al. 2022) - "avoid excessive segmentation"
+/// https://www.hindawi.com/journals/wcmc/2022/9540944/
 pub fn split_at_heading_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
@@ -186,6 +203,13 @@ pub fn split_at_heading_changes(
 
     for section in sections {
         let polyline = &section.polyline;
+
+        // Guard 1: Skip splitting sections that are already short
+        // Based on MDL principle - splitting short sections rarely improves quality
+        if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
+            result.push(section);
+            continue;
+        }
 
         // Need at least enough points to compute windows
         if polyline.len() < 10 {
@@ -217,11 +241,26 @@ pub fn split_at_heading_changes(
             segments.push((start_idx, polyline.len()));
         }
 
+        // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
+        // This prevents 200m → 100m + 100m type splits that create tiny pieces
+        let segment_lengths: Vec<f64> = segments
+            .iter()
+            .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
+            .collect();
+        let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
+        let split_ratio = min_segment_length / section.distance_meters;
+
+        if split_ratio < 0.4 && segments.len() > 1 {
+            // Splitting would create unbalanced fragments - keep original
+            result.push(section);
+            continue;
+        }
+
         // Create new sections from segments
         let mut split_count = 0;
-        for (seg_start, seg_end) in segments {
+        for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
             let seg_polyline = polyline[seg_start..seg_end].to_vec();
-            let seg_length = calculate_route_distance(&seg_polyline);
+            let seg_length = segment_lengths[idx];
 
             if seg_length >= MIN_HEADING_SPLIT_LENGTH && seg_polyline.len() >= 3 {
                 let mut new_section = section.clone();
@@ -345,19 +384,28 @@ fn find_heading_inflection_points(polyline: &[GpsPoint]) -> Vec<usize> {
 // =============================================================================
 
 /// Minimum gradient change (%) to trigger a split.
-/// E.g., transitioning from flat (0%) to uphill (5%) triggers a split.
-const MIN_GRADIENT_CHANGE: f64 = 5.0;
+/// E.g., transitioning from flat (0%) to steep uphill (8%) triggers a split.
+/// Set high to only split at significant terrain changes.
+const MIN_GRADIENT_CHANGE: f64 = 8.0;
 
 /// Window size (meters) for computing average gradient.
-const GRADIENT_WINDOW_METERS: f64 = 50.0;
+const GRADIENT_WINDOW_METERS: f64 = 75.0;
 
 /// Minimum segment length (meters) after splitting.
-const MIN_GRADIENT_SPLIT_LENGTH: f64 = 100.0;
+/// Keeps sections meaningful - no tiny fragments.
+const MIN_GRADIENT_SPLIT_LENGTH: f64 = 300.0;
 
 /// Split sections at sustained gradient changes.
 ///
 /// A section is split where gradient changes significantly (flat→uphill,
 /// uphill→downhill, etc.). This only works if elevation data is available.
+///
+/// Uses MDL-inspired guards to prevent over-segmentation:
+/// - Skips sections already < 500m (splitting rarely helps)
+/// - Ensures all fragments are >= 300m
+///
+/// Reference: TS-MF Algorithm (Xu et al. 2022) - "avoid excessive segmentation"
+/// https://www.hindawi.com/journals/wcmc/2022/9540944/
 pub fn split_at_gradient_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
@@ -366,6 +414,13 @@ pub fn split_at_gradient_changes(
 
     for section in sections {
         let polyline = &section.polyline;
+
+        // Guard 1: Skip splitting sections that are already short
+        // Based on MDL principle - splitting short sections rarely improves quality
+        if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
+            result.push(section);
+            continue;
+        }
 
         // Check if we have elevation data
         let has_elevation = polyline.iter().any(|p| p.elevation.is_some());
@@ -398,11 +453,26 @@ pub fn split_at_gradient_changes(
             segments.push((start_idx, polyline.len()));
         }
 
+        // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
+        // This prevents 200m → 100m + 100m type splits that create tiny pieces
+        let segment_lengths: Vec<f64> = segments
+            .iter()
+            .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
+            .collect();
+        let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
+        let split_ratio = min_segment_length / section.distance_meters;
+
+        if split_ratio < 0.4 && segments.len() > 1 {
+            // Splitting would create unbalanced fragments - keep original
+            result.push(section);
+            continue;
+        }
+
         // Create new sections from segments
         let mut split_count = 0;
-        for (seg_start, seg_end) in segments {
+        for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
             let seg_polyline = polyline[seg_start..seg_end].to_vec();
-            let seg_length = calculate_route_distance(&seg_polyline);
+            let seg_length = segment_lengths[idx];
 
             if seg_length >= MIN_GRADIENT_SPLIT_LENGTH && seg_polyline.len() >= 3 {
                 let mut new_section = section.clone();
@@ -586,6 +656,340 @@ pub fn merge_nearby_sections(
 }
 
 // =============================================================================
+// Fragment Consolidation
+// =============================================================================
+
+/// Maximum section length (meters) to consider for fragment consolidation.
+/// Longer sections are kept as-is unless endpoints are very close.
+const MAX_FRAGMENT_LENGTH: f64 = 400.0;
+
+/// Tight threshold (meters) for joining ANY sections at endpoints.
+/// If endpoints are this close, sections should be connected regardless of length.
+const TIGHT_ENDPOINT_GAP: f64 = 50.0;
+
+/// Loose threshold (meters) for merging short fragments.
+const LOOSE_ENDPOINT_GAP: f64 = 100.0;
+
+/// Maximum combined length (meters) after merging two sections.
+const MAX_MERGED_LENGTH: f64 = 3000.0;
+
+/// Consolidate adjacent sections back into longer coherent routes.
+///
+/// Iterative approach (runs until no more merges possible):
+/// 1. **Tight join**: Connect ANY sections with endpoints < 50m apart
+/// 2. **Fragment merge**: Merge short fragments (< 400m) with endpoints < 100m apart
+///
+/// Based on the "mergence" phase of TS-MF algorithm (Xu et al. 2022):
+/// "The MDL principle merges subtrajectories by optimizing the cost function"
+/// Reference: https://www.hindawi.com/journals/wcmc/2022/9540944/
+pub fn consolidate_fragments(
+    mut sections: Vec<FrequentSection>,
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    if sections.len() < 2 {
+        return sections;
+    }
+
+    // Iterate until no more merges are possible
+    // This handles chain merges (A→B→C) that single-pass would miss
+    const MAX_ITERATIONS: usize = 10;
+    for iteration in 0..MAX_ITERATIONS {
+        let before_count = sections.len();
+
+        // Pass 1: Tight endpoint joining (any length sections)
+        sections = join_at_endpoints(sections, config, TIGHT_ENDPOINT_GAP);
+
+        // Pass 2: Fragment merging (short sections only)
+        sections = merge_short_fragments(sections, config);
+
+        let after_count = sections.len();
+
+        if after_count == before_count {
+            info!(
+                "[Sections] Consolidation converged after {} iteration(s)",
+                iteration + 1
+            );
+            break;
+        }
+
+        info!(
+            "[Sections] Consolidation iteration {}: {} → {} sections",
+            iteration + 1,
+            before_count,
+            after_count
+        );
+    }
+
+    sections
+}
+
+/// Join sections where endpoints are very close (regardless of section length).
+/// This connects route segments that are clearly continuous.
+fn join_at_endpoints(
+    sections: Vec<FrequentSection>,
+    _config: &SectionConfig,
+    max_gap: f64,
+) -> Vec<FrequentSection> {
+    if sections.len() < 2 {
+        return sections;
+    }
+
+    // Group sections by sport type
+    let mut by_sport: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, section) in sections.iter().enumerate() {
+        by_sport
+            .entry(section.sport_type.clone())
+            .or_default()
+            .push(idx);
+    }
+
+    let mut merged: Vec<bool> = vec![false; sections.len()];
+    let mut result: Vec<FrequentSection> = Vec::new();
+
+    for (_sport, indices) in &by_sport {
+        for &i in indices {
+            if merged[i] {
+                continue;
+            }
+
+            let section_i = &sections[i];
+
+            // Find best join candidate (closest endpoint)
+            let mut best_match: Option<(usize, f64, bool)> = None; // (index, gap, i_end_to_j_start)
+
+            for &j in indices {
+                if i == j || merged[j] {
+                    continue;
+                }
+
+                let section_j = &sections[j];
+
+                // Check if combined length is reasonable
+                let combined_length = section_i.distance_meters + section_j.distance_meters;
+                if combined_length > MAX_MERGED_LENGTH {
+                    continue;
+                }
+
+                // Check endpoint distances
+                let i_start = &section_i.polyline[0];
+                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
+                let j_start = &section_j.polyline[0];
+                let j_end = &section_j.polyline[section_j.polyline.len() - 1];
+
+                // We want to join end-to-start (i_end -> j_start or j_end -> i_start)
+                let gap_i_end_j_start = haversine_distance(i_end, j_start);
+                let gap_j_end_i_start = haversine_distance(j_end, i_start);
+
+                let (min_gap, is_i_to_j) = if gap_i_end_j_start <= gap_j_end_i_start {
+                    (gap_i_end_j_start, true)
+                } else {
+                    (gap_j_end_i_start, false)
+                };
+
+                if min_gap <= max_gap {
+                    if best_match.is_none() || min_gap < best_match.unwrap().1 {
+                        best_match = Some((j, min_gap, is_i_to_j));
+                    }
+                }
+            }
+
+            if let Some((j, gap, is_i_to_j)) = best_match {
+                merged[i] = true;
+                merged[j] = true;
+
+                let section_j = &sections[j];
+
+                // Merge polylines in correct order
+                let mut merged_polyline = if is_i_to_j {
+                    // i -> j order
+                    let mut p = section_i.polyline.clone();
+                    p.extend(section_j.polyline.clone());
+                    p
+                } else {
+                    // j -> i order
+                    let mut p = section_j.polyline.clone();
+                    p.extend(section_i.polyline.clone());
+                    p
+                };
+
+                // Simplify merged polyline if too dense
+                if merged_polyline.len() > 200 {
+                    merged_polyline = merged_polyline
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(idx, _)| idx % 2 == 0)
+                        .map(|(_, p)| p)
+                        .collect();
+                }
+
+                let merged_distance = calculate_route_distance(&merged_polyline);
+
+                let mut merged_section = section_i.clone();
+                merged_section.id = format!("{}_joined", section_i.id);
+                merged_section.polyline = merged_polyline;
+                merged_section.distance_meters = merged_distance;
+                merged_section.visit_count = section_i.visit_count.max(section_j.visit_count);
+                merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
+                merged_section.activity_traces = HashMap::new();
+
+                info!(
+                    "[Sections] Joined {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
+                    section_i.id, section_j.id, merged_section.id,
+                    section_i.distance_meters, section_j.distance_meters,
+                    merged_distance, gap
+                );
+
+                result.push(merged_section);
+            }
+        }
+
+        // Add non-merged sections
+        for &i in indices {
+            if !merged[i] {
+                result.push(sections[i].clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Merge short fragments (< 400m) that are adjacent (< 100m gap).
+fn merge_short_fragments(
+    sections: Vec<FrequentSection>,
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    if sections.len() < 2 {
+        return sections;
+    }
+
+    // Group sections by sport type
+    let mut by_sport: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, section) in sections.iter().enumerate() {
+        by_sport
+            .entry(section.sport_type.clone())
+            .or_default()
+            .push(idx);
+    }
+
+    let mut merged: Vec<bool> = vec![false; sections.len()];
+    let mut result: Vec<FrequentSection> = Vec::new();
+
+    for (_sport, indices) in &by_sport {
+        for &i in indices {
+            if merged[i] {
+                continue;
+            }
+
+            let section_i = &sections[i];
+
+            // Only consider short fragments
+            if section_i.distance_meters > MAX_FRAGMENT_LENGTH {
+                continue;
+            }
+
+            // Find best merge candidate
+            let mut best_match: Option<(usize, f64)> = None;
+
+            for &j in indices {
+                if i == j || merged[j] {
+                    continue;
+                }
+
+                let section_j = &sections[j];
+
+                // Only merge with other short fragments
+                if section_j.distance_meters > MAX_FRAGMENT_LENGTH {
+                    continue;
+                }
+
+                // Check if combined length is reasonable
+                let combined_length = section_i.distance_meters + section_j.distance_meters;
+                if combined_length > MAX_MERGED_LENGTH {
+                    continue;
+                }
+
+                // Check if endpoints are close
+                let i_start = &section_i.polyline[0];
+                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
+                let j_start = &section_j.polyline[0];
+                let j_end = &section_j.polyline[section_j.polyline.len() - 1];
+
+                let min_gap = haversine_distance(i_start, j_start)
+                    .min(haversine_distance(i_start, j_end))
+                    .min(haversine_distance(i_end, j_start))
+                    .min(haversine_distance(i_end, j_end));
+
+                if min_gap <= LOOSE_ENDPOINT_GAP {
+                    if best_match.is_none() || min_gap < best_match.unwrap().1 {
+                        best_match = Some((j, min_gap));
+                    }
+                }
+            }
+
+            if let Some((j, gap)) = best_match {
+                merged[i] = true;
+                merged[j] = true;
+
+                let section_j = &sections[j];
+
+                // Determine merge order
+                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
+                let j_start = &section_j.polyline[0];
+                let end_to_start_gap = haversine_distance(i_end, j_start);
+
+                let mut merged_polyline = if end_to_start_gap <= config.proximity_threshold * 2.0 {
+                    let mut p = section_i.polyline.clone();
+                    p.extend(section_j.polyline.clone());
+                    p
+                } else {
+                    let mut p = section_j.polyline.clone();
+                    p.extend(section_i.polyline.clone());
+                    p
+                };
+
+                if merged_polyline.len() > 200 {
+                    merged_polyline = merged_polyline
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(idx, _)| idx % 2 == 0)
+                        .map(|(_, p)| p)
+                        .collect();
+                }
+
+                let merged_distance = calculate_route_distance(&merged_polyline);
+
+                let mut merged_section = section_i.clone();
+                merged_section.id = format!("{}_merged", section_i.id);
+                merged_section.polyline = merged_polyline;
+                merged_section.distance_meters = merged_distance;
+                merged_section.visit_count = section_i.visit_count.max(section_j.visit_count);
+                merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
+                merged_section.activity_traces = HashMap::new();
+
+                info!(
+                    "[Sections] Merged fragments {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
+                    section_i.id, section_j.id, merged_section.id,
+                    section_i.distance_meters, section_j.distance_meters,
+                    merged_distance, gap
+                );
+
+                result.push(merged_section);
+            }
+        }
+
+        // Add non-merged sections
+        for &i in indices {
+            if !merged[i] {
+                result.push(sections[i].clone());
+            }
+        }
+    }
+
+    result
+}
+
+// =============================================================================
 // Section Deduplication
 // =============================================================================
 
@@ -697,7 +1101,10 @@ pub fn remove_overlapping_sections(
         .filter_map(|(s, k)| if k { Some(s) } else { None })
         .collect();
 
-    let loop_count = result.iter().filter(|s| is_loop_section(s, loop_threshold)).count();
+    let loop_count = result
+        .iter()
+        .filter(|s| is_loop_section(s, loop_threshold))
+        .count();
     info!(
         "[Sections] After removing overlaps: {} sections ({} loops protected)",
         result.len(),
@@ -1026,7 +1433,9 @@ pub fn make_sections_exclusive(
 
         let priority_a = a.confidence * (a.visit_count as f64).ln().max(1.0) * boost_a;
         let priority_b = b.confidence * (b.visit_count as f64).ln().max(1.0) * boost_b;
-        priority_b.partial_cmp(&priority_a).unwrap_or(std::cmp::Ordering::Equal)
+        priority_b
+            .partial_cmp(&priority_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut result: Vec<FrequentSection> = Vec::new();
@@ -1136,7 +1545,8 @@ fn trim_to_unclaimed(
     }
 
     // Extract the unclaimed portion
-    let trimmed_polyline: Vec<GpsPoint> = section.polyline[best_start..(best_start + best_len)].to_vec();
+    let trimmed_polyline: Vec<GpsPoint> =
+        section.polyline[best_start..(best_start + best_len)].to_vec();
     let trimmed_distance = calculate_route_distance(&trimmed_polyline);
 
     if trimmed_distance < config.min_section_length {
@@ -1154,4 +1564,68 @@ fn trim_to_unclaimed(
     }
 
     Some(trimmed)
+}
+
+// =============================================================================
+// Quality Filtering: Length-Weighted Visit Threshold
+// =============================================================================
+//
+// Based on graph-based clustering principles where low-density regions are noise.
+// Reference: "Graph-Based Approaches to Clustering Network-Constrained Trajectory Data"
+// https://arxiv.org/abs/1310.5249
+//
+// Philosophy: Since users can create their own segments, automatic detection
+// should be conservative. Short sections that are only visited twice are
+// probably noise—but short sections visited many times are meaningful patterns.
+
+/// Minimum visits required based on section length.
+/// Shorter sections need more visits to prove they're not noise.
+///
+/// Rationale:
+/// - Very short (< 200m): Could be GPS drift or random detour → needs 6+ visits
+/// - Short (< 400m): Possible shortcut or intersection → needs 4+ visits
+/// - Medium (< 800m): Likely a distinct route portion → needs 3+ visits
+/// - Long (800m+): Significant route segment → 2+ visits is enough
+fn required_visits_for_length(distance_meters: f64) -> u32 {
+    match distance_meters {
+        d if d < 200.0 => 6,
+        d if d < 400.0 => 4,
+        d if d < 800.0 => 3,
+        _ => 2,
+    }
+}
+
+/// Quality filter: Remove low-confidence sections based on length and visits.
+///
+/// This is the final filter in the pipeline, applied after all merging/splitting.
+/// It ensures we only keep sections that are genuinely frequent patterns.
+pub fn filter_low_quality_sections(sections: Vec<FrequentSection>) -> Vec<FrequentSection> {
+    let before = sections.len();
+    let mut filtered: Vec<FrequentSection> = Vec::new();
+
+    for section in sections {
+        let min_visits = required_visits_for_length(section.distance_meters);
+        let min_points = 8;
+
+        if section.visit_count >= min_visits && section.polyline.len() >= min_points {
+            filtered.push(section);
+        } else {
+            info!(
+                "[Sections] Filtered out {}: {:.0}m with {} visits (needs {} visits) and {} points",
+                section.id,
+                section.distance_meters,
+                section.visit_count,
+                min_visits,
+                section.polyline.len()
+            );
+        }
+    }
+
+    info!(
+        "[Sections] Quality filter: {} → {} sections",
+        before,
+        filtered.len()
+    );
+
+    filtered
 }
