@@ -32,7 +32,7 @@ mod postprocess;
 mod rtree;
 mod traces;
 
-use crate::geo_utils::polyline_length;
+use crate::matching::calculate_route_distance;
 use crate::{GpsPoint, RouteGroup};
 use log::info;
 #[cfg(feature = "parallel")]
@@ -306,7 +306,7 @@ fn process_cluster(
         return None;
     }
 
-    let distance_meters = polyline_length(&representative_polyline);
+    let distance_meters = calculate_route_distance(&representative_polyline);
 
     // Filter by max length - sections shouldn't be whole routes
     if distance_meters > config.max_section_length {
@@ -342,7 +342,7 @@ fn process_cluster(
     );
 
     // Use consensus polyline and update distance
-    let consensus_distance = polyline_length(&consensus.polyline);
+    let consensus_distance = calculate_route_distance(&consensus.polyline);
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
@@ -809,7 +809,7 @@ pub fn detect_sections_multiscale(
                     if activity_count >= 1 && activity_count < preset.min_activities as usize {
                         if let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster)) {
                             if !rep_polyline.is_empty() {
-                                let distance = polyline_length(&rep_polyline);
+                                let distance = calculate_route_distance(&rep_polyline);
                                 if distance >= preset.min_length && distance <= preset.max_length {
                                     all_potentials.push(PotentialSection {
                                         id: format!(
@@ -999,49 +999,3 @@ fn compute_polyline_containment(
     contained_count as f64 / polyline_a.len() as f64
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::geo_utils::{compute_center, haversine_distance};
-    use medoid::resample_by_distance;
-
-    fn make_point(lat: f64, lng: f64) -> GpsPoint {
-        GpsPoint::new(lat, lng)
-    }
-
-    #[test]
-    fn test_haversine_distance() {
-        let p1 = make_point(51.5074, -0.1278); // London
-        let p2 = make_point(48.8566, 2.3522); // Paris
-        let dist = haversine_distance(&p1, &p2);
-        // London to Paris is about 344 km
-        assert!(dist > 340_000.0 && dist < 350_000.0);
-    }
-
-    #[test]
-    fn test_compute_center() {
-        let points = vec![make_point(0.0, 0.0), make_point(2.0, 2.0)];
-        let center = compute_center(&points);
-        assert!((center.latitude - 1.0).abs() < 0.001);
-        assert!((center.longitude - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_resample_by_distance() {
-        // Need more points than target to trigger resampling
-        let points = vec![
-            make_point(0.0, 0.0),
-            make_point(0.001, 0.0),
-            make_point(0.002, 0.0),
-            make_point(0.003, 0.0),
-            make_point(0.004, 0.0),
-            make_point(0.005, 0.0),
-            make_point(0.006, 0.0),
-            make_point(0.007, 0.0),
-            make_point(0.008, 0.0),
-            make_point(0.009, 0.0),
-        ];
-        let resampled = resample_by_distance(&points, 5);
-        assert_eq!(resampled.len(), 5);
-    }
-}

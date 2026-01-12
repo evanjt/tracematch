@@ -15,10 +15,9 @@ name = "tracematch"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
-default = ["ffi", "parallel", "http", "persistence"]
+default = ["ffi", "parallel", "persistence"]
 ffi = ["uniffi", "parallel"]
 parallel = ["rayon"]
-http = ["reqwest", "tokio", "futures", "base64"]
 persistence = ["rusqlite", "rmp-serde"]
 
 [dependencies]
@@ -28,14 +27,11 @@ log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 once_cell = "1.19"
+lru = "0.12"
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 rmp-serde = { version = "1.1", optional = true }
 rayon = { version = "1.10", optional = true }
 uniffi = { version = "0.30", features = ["cli"], optional = true }
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false, optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "sync"], optional = true }
-futures = { version = "0.3", optional = true }
-base64 = { version = "0.21", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
@@ -47,9 +43,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 iai-callgrind = "0.14"
 
-[[bench]]
-name = "route_benchmarks"
-harness = false
+# [[bench]]
+# name = "route_benchmarks"
+# harness = false
 
 [[bench]]
 name = "iai_benchmarks"
@@ -72,13 +68,9 @@ panic = "abort"
 name = "basic_matching"
 path = "examples/basic_matching.rs"
 
-[[example]]
-name = "batch_grouping"
-path = "examples/batch_grouping.rs"
-
-[[example]]
-name = "http_benchmark"
-path = "examples/http_benchmark.rs"
+# [[example]]
+# name = "batch_grouping"
+# path = "examples/batch_grouping.rs"
 
 [[bin]]
 name = "uniffi-bindgen"

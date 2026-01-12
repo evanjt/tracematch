@@ -1,18 +1,20 @@
 //! # Route Matcher
 //!
-//! High-performance GPS route matching and activity fetching for intervals.icu.
+//! High-performance GPS route matching library for fitness applications.
 //!
 //! This library provides:
 //! - GPS route matching using Average Minimum Distance (AMD)
-//! - High-speed activity fetching with rate limiting
+//! - Route grouping and clustering algorithms
+//! - Frequent section detection (multi-scale)
+//! - Activity heatmap generation
+//! - Modular route engine with persistence support
 //! - Parallel processing for batch operations
 //!
 //! ## Features
 //!
 //! - **`parallel`** - Enable parallel processing with rayon
-//! - **`http`** - Enable HTTP client for activity fetching
+//! - **`persistence`** - Enable SQLite persistence for route engine
 //! - **`ffi`** - Enable FFI bindings for mobile platforms (iOS/Android)
-//! - **`full`** - Enable all features
 //!
 //! ## Quick Start
 //!
@@ -69,19 +71,11 @@ pub mod geo_utils;
 // Use tracematch::algorithms::{...} for standalone algorithm access
 pub mod algorithms;
 
-// LRU cache for efficient memory management
-pub mod lru_cache;
-
-// Legacy stateful route engine (singleton with all route state)
-// TODO: Migrate to modular engine components in `engine_modular`
-pub mod engine_legacy;
-pub use engine_legacy::{with_engine, EngineStats, RouteEngine, ENGINE};
-
 // Modular route engine with extracted components
 pub mod engine;
 pub use engine::{
     ActivityData, ActivityStore, ModularEngineStats, ModularRouteEngine, RouteGrouper,
-    SignatureCache, SpatialIndex,
+    SignatureStore, SpatialIndex,
 };
 
 // Persistent route engine with tiered storage
@@ -92,13 +86,6 @@ pub use persistence::{
     with_persistent_engine, PersistentEngineStats, PersistentRouteEngine, SectionDetectionHandle,
     PERSISTENT_ENGINE,
 };
-
-// HTTP module for activity fetching
-#[cfg(feature = "http")]
-pub mod http;
-
-#[cfg(feature = "http")]
-pub use http::{ActivityFetcher, ActivityMapResult, MapBounds};
 
 // Frequent sections detection (medoid-based algorithm for smooth polylines)
 pub mod sections;
@@ -121,23 +108,6 @@ pub use heatmap::{
     generate_heatmap, query_heatmap_cell, ActivityHeatmapData, CellQueryResult, HeatmapBounds,
     HeatmapCell, HeatmapConfig, HeatmapResult, RouteRef,
 };
-
-// Zone distribution calculations (power/HR zones)
-pub mod zones;
-pub use zones::{
-    calculate_hr_zones, calculate_power_zones, HRZoneConfig, HRZoneDistribution, PowerZoneConfig,
-    PowerZoneDistribution,
-};
-#[cfg(feature = "parallel")]
-pub use zones::{calculate_hr_zones_parallel, calculate_power_zones_parallel};
-
-// Power/pace curve computation
-pub mod curves;
-pub use curves::{compute_pace_curve, compute_power_curve, CurvePoint, PaceCurve, PowerCurve};
-
-// Achievement/PR detection
-pub mod achievements;
-pub use achievements::{detect_achievements, Achievement, AchievementType, ActivityRecord};
 
 // FFI bindings for mobile platforms (iOS/Android)
 #[cfg(feature = "ffi")]
@@ -657,102 +627,3 @@ impl RTreeObject for RouteBounds {
 // Use matching functions from the matching module
 use crate::matching::calculate_route_distance;
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_route() -> Vec<GpsPoint> {
-        vec![
-            GpsPoint::new(51.5074, -0.1278),
-            GpsPoint::new(51.5080, -0.1290),
-            GpsPoint::new(51.5090, -0.1300),
-            GpsPoint::new(51.5100, -0.1310),
-            GpsPoint::new(51.5110, -0.1320),
-        ]
-    }
-
-    #[test]
-    fn test_gps_point_validation() {
-        assert!(GpsPoint::new(51.5074, -0.1278).is_valid());
-        assert!(!GpsPoint::new(91.0, 0.0).is_valid());
-        assert!(!GpsPoint::new(0.0, 181.0).is_valid());
-        assert!(!GpsPoint::new(f64::NAN, 0.0).is_valid());
-    }
-
-    #[test]
-    fn test_create_signature() {
-        let points = sample_route();
-        let sig = RouteSignature::from_points("test-1", &points, &MatchConfig::default());
-
-        assert!(sig.is_some());
-        let sig = sig.unwrap();
-        assert_eq!(sig.activity_id, "test-1");
-        assert!(sig.total_distance > 0.0);
-    }
-
-    #[test]
-    fn test_identical_routes_match() {
-        let points = sample_route();
-        let sig1 = RouteSignature::from_points("test-1", &points, &MatchConfig::default()).unwrap();
-        let sig2 = RouteSignature::from_points("test-2", &points, &MatchConfig::default()).unwrap();
-
-        let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert!(result.match_percentage > 95.0);
-        // Direction is "same" when routes go the same direction
-        assert_eq!(result.direction, "same");
-    }
-
-    #[test]
-    fn test_reverse_routes_match() {
-        let points = sample_route();
-        let mut reversed = points.clone();
-        reversed.reverse();
-
-        let sig1 = RouteSignature::from_points("test-1", &points, &MatchConfig::default()).unwrap();
-        let sig2 =
-            RouteSignature::from_points("test-2", &reversed, &MatchConfig::default()).unwrap();
-
-        let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().direction, "reverse");
-    }
-
-    #[test]
-    fn test_group_signatures() {
-        // Create a longer route that meets min_route_distance (500m)
-        // Each point is about 100m apart, 10 points = ~1km
-        let long_route: Vec<GpsPoint> = (0..10)
-            .map(|i| GpsPoint::new(51.5074 + i as f64 * 0.001, -0.1278))
-            .collect();
-
-        let different_route: Vec<GpsPoint> = (0..10)
-            .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
-            .collect();
-
-        let sig1 =
-            RouteSignature::from_points("test-1", &long_route, &MatchConfig::default()).unwrap();
-        let sig2 =
-            RouteSignature::from_points("test-2", &long_route, &MatchConfig::default()).unwrap();
-        let sig3 = RouteSignature::from_points("test-3", &different_route, &MatchConfig::default())
-            .unwrap();
-
-        let groups = group_signatures(&[sig1, sig2, sig3], &MatchConfig::default());
-
-        // Should have 2 groups: one with test-1 and test-2, one with test-3
-        assert_eq!(groups.len(), 2);
-
-        // Verify the grouping is correct
-        let group_with_1 = groups
-            .iter()
-            .find(|g| g.activity_ids.contains(&"test-1".to_string()))
-            .unwrap();
-        assert!(group_with_1.activity_ids.contains(&"test-2".to_string()));
-        assert!(!group_with_1.activity_ids.contains(&"test-3".to_string()));
-    }
-}

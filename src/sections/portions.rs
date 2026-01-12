@@ -3,7 +3,7 @@
 use super::overlap::OverlapCluster;
 use super::rtree::{build_rtree, IndexedPoint};
 use super::{SectionConfig, SectionPortion};
-use crate::geo_utils::polyline_length;
+use crate::matching::calculate_route_distance;
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ pub fn compute_activity_portions(
             if let Some((start_idx, end_idx, direction)) =
                 find_track_portion(track, representative_polyline, config.proximity_threshold)
             {
-                let distance = polyline_length(&track[start_idx..end_idx]);
+                let distance = calculate_route_distance(&track[start_idx..end_idx]);
 
                 portions.push(SectionPortion {
                     activity_id: activity_id.clone(),
@@ -60,7 +60,7 @@ fn find_track_portion(
     let ref_tree = build_rtree(reference);
     let threshold_deg = threshold / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
-    let ref_length = polyline_length(reference);
+    let ref_length = calculate_route_distance(reference);
 
     // Find all contiguous overlapping segments
     let mut segments: Vec<OverlapSegment> = Vec::new();
@@ -88,7 +88,7 @@ fn find_track_portion(
                 let start = current_start.unwrap();
                 let end = i - gap_count;
                 if end > start {
-                    let distance = polyline_length(&track[start..end]);
+                    let distance = calculate_route_distance(&track[start..end]);
                     segments.push(OverlapSegment {
                         start_idx: start,
                         end_idx: end,
@@ -105,7 +105,7 @@ fn find_track_portion(
     if let Some(start) = current_start {
         let end = track.len() - gap_count.min(track.len() - start - 1);
         if end > start {
-            let distance = polyline_length(&track[start..end]);
+            let distance = calculate_route_distance(&track[start..end]);
             segments.push(OverlapSegment {
                 start_idx: start,
                 end_idx: end,
