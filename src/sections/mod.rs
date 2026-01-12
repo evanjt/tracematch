@@ -25,6 +25,7 @@
 //! - Section contracts if tracks consistently end before current bounds
 
 mod consensus;
+mod evolution;
 mod medoid;
 mod overlap;
 mod portions;
@@ -53,6 +54,24 @@ pub(crate) use postprocess::{
 };
 pub(crate) use rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
 pub(crate) use traces::extract_all_activity_traces;
+
+// Re-export evolution functions for public API
+pub use evolution::{
+    merge_overlapping_sections, update_section_with_new_traces, SectionUpdateResult,
+};
+
+/// Compute initial stability score from consensus metrics.
+/// Stability increases with more observations and tighter spread.
+fn compute_initial_stability(observation_count: u32, average_spread: f64, proximity_threshold: f64) -> f64 {
+    // Observation factor: saturates at 10 observations
+    let obs_factor = (observation_count as f64 / 10.0).min(1.0);
+
+    // Spread factor: lower spread = more stable
+    let spread_factor = 1.0 - (average_spread / proximity_threshold).clamp(0.0, 1.0);
+
+    // Combined stability: weighted average
+    (obs_factor * 0.6 + spread_factor * 0.4).clamp(0.0, 1.0)
+}
 
 /// Scale preset for multi-scale section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +257,19 @@ pub struct FrequentSection {
     pub point_density: Vec<u32>,
     /// Scale at which this section was detected: "short", "medium", "long", or "legacy"
     pub scale: Option<String>,
+
+    // === Evolution fields (Phase 3) ===
+    /// Section version - incremented each time the section is updated
+    pub version: u32,
+    /// Whether this section was user-defined (prevents automatic updates)
+    pub is_user_defined: bool,
+    /// ISO timestamp when section was created
+    pub created_at: Option<String>,
+    /// ISO timestamp when section was last updated
+    pub updated_at: Option<String>,
+    /// Stability score (0.0-1.0) - how stable the consensus has become
+    /// High stability = consensus is well-established, unlikely to change significantly
+    pub stability: f64,
 }
 
 /// A potential section detected from 1-2 activities.
@@ -344,6 +376,13 @@ fn process_cluster(
     // Use consensus polyline and update distance
     let consensus_distance = calculate_route_distance(&consensus.polyline);
 
+    // Compute stability: more observations + tighter spread = more stable
+    let stability = compute_initial_stability(
+        consensus.observation_count,
+        consensus.average_spread,
+        config.proximity_threshold,
+    );
+
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
         name: None,
@@ -361,6 +400,12 @@ fn process_cluster(
         average_spread: consensus.average_spread,
         point_density: consensus.point_density,
         scale: scale_name.map(|s| s.to_string()),
+        // Evolution fields (callers should set created_at if needed)
+        version: 1,
+        is_user_defined: false,
+        created_at: None,
+        updated_at: None,
+        stability,
     })
 }
 
