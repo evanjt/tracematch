@@ -16,7 +16,9 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use tracematch::{
     grouping::group_signatures,
-    sections::{detect_sections_multiscale, FrequentSection, SectionConfig},
+    sections::{
+        detect_sections_multiscale, detect_sections_optimized, FrequentSection, SectionConfig,
+    },
     GpsPoint, MatchConfig, RouteGroup, RouteSignature,
 };
 
@@ -68,6 +70,10 @@ enum Commands {
         /// Minimum section length in meters
         #[arg(long, default_value = "100")]
         min_length: f64,
+
+        /// Use legacy full-resolution detection (slower, for debugging)
+        #[arg(long)]
+        legacy: bool,
     },
 }
 
@@ -96,6 +102,7 @@ fn main() {
             sport,
             min_activities,
             min_length,
+            legacy,
         } => {
             run_sections(
                 &folder,
@@ -103,6 +110,7 @@ fn main() {
                 sport.as_deref(),
                 min_activities,
                 min_length,
+                legacy,
                 cli.verbose,
             );
         }
@@ -189,6 +197,7 @@ fn parse_gpx_file(path: &PathBuf) -> Result<GpxActivity, String> {
                     points.push(GpsPoint {
                         latitude: lat,
                         longitude: lon,
+                        elevation: pt.elevation,
                     });
                 }
             }
@@ -348,6 +357,7 @@ fn run_sections(
     sport_filter: Option<&str>,
     min_activities: u32,
     min_length: f64,
+    legacy: bool,
     verbose: bool,
 ) {
     let activities = load_gpx_files(folder, sport_filter, verbose);
@@ -389,38 +399,42 @@ fn run_sections(
         println!("  scale_presets: {:?}", config.scale_presets.iter().map(|s| &s.name).collect::<Vec<_>>());
     }
 
-    // Create empty groups for now (section detection needs route groups for mapping)
-    let groups: Vec<RouteGroup> = Vec::new();
-
     // Run section detection
-    println!("\n[Step 2] Running multi-scale section detection...");
-    println!("  This analyzes pairwise overlaps between all {} tracks", tracks.len());
-    println!("  Total pairs to check: {}", tracks.len() * (tracks.len() - 1) / 2);
+    let sections: Vec<FrequentSection> = if legacy {
+        // Legacy: full-resolution multi-scale (slower but more detailed)
+        println!("\n[Step 2] Running LEGACY multi-scale section detection...");
+        println!("  This analyzes pairwise overlaps between all {} tracks", tracks.len());
+        println!("  Total pairs to check: {}", tracks.len() * (tracks.len() - 1) / 2);
+        println!("  ⚠️  Using legacy mode - this is slower than default!");
 
-    let result = detect_sections_multiscale(&tracks, &sport_types, &groups, &config);
+        let groups: Vec<RouteGroup> = Vec::new();
+        let result = detect_sections_multiscale(&tracks, &sport_types, &groups, &config);
+
+        // Show legacy statistics
+        println!("\nLegacy Statistics:");
+        println!("  Activities processed: {}", result.stats.activities_processed);
+        println!("  Overlaps found: {}", result.stats.overlaps_found);
+        for (scale, count) in &result.stats.sections_by_scale {
+            println!("    {}: {}", scale, count);
+        }
+
+        result.sections
+    } else {
+        // Default: optimized detection with downsampling and grid partitioning
+        println!("\n[Step 2] Running optimized section detection...");
+        println!("  Using downsampling (100 pts) + grid partitioning for speed");
+        println!("  Tracks: {}", tracks.len());
+
+        detect_sections_optimized(&tracks, &sport_types, &config)
+    };
 
     println!("\n{}", "-".repeat(60));
     println!("RESULTS");
     println!("{}", "-".repeat(60));
 
-    // Show statistics
-    println!("\nStatistics:");
-    println!("  Activities processed: {}", result.stats.activities_processed);
-    println!("  Overlaps found: {}", result.stats.overlaps_found);
-    println!("  Sections by scale:");
-    for (scale, count) in &result.stats.sections_by_scale {
-        println!("    {}: {}", scale, count);
-    }
-    if !result.stats.potentials_by_scale.is_empty() {
-        println!("  Potential sections by scale:");
-        for (scale, count) in &result.stats.potentials_by_scale {
-            println!("    {}: {}", scale, count);
-        }
-    }
-
     // Show sections
-    println!("\nConfirmed Sections: {}", result.sections.len());
-    for (i, section) in result.sections.iter().enumerate() {
+    println!("\nSections found: {}", sections.len());
+    for (i, section) in sections.iter().enumerate() {
         println!("\n  Section {} [{}]:", i + 1, section.id);
         println!("    Name: {}", section.name.as_deref().unwrap_or("(unnamed)"));
         println!("    Sport: {}", section.sport_type);
@@ -457,27 +471,9 @@ fn run_sections(
         }
     }
 
-    // Show potential sections
-    if !result.potentials.is_empty() {
-        println!("\nPotential Sections (suggestions): {}", result.potentials.len());
-        for (i, pot) in result.potentials.iter().take(10).enumerate() {
-            println!(
-                "  {} - {} [{:.0}m, {} visits, conf: {:.2}]",
-                i + 1,
-                pot.id,
-                pot.distance_meters,
-                pot.visit_count,
-                pot.confidence
-            );
-        }
-        if result.potentials.len() > 10 {
-            println!("  ... and {} more", result.potentials.len() - 10);
-        }
-    }
-
     // Export results if output directory specified
     if let Some(output_dir) = output {
-        export_sections(&result.sections, output_dir, verbose);
+        export_sections(&sections, output_dir, verbose);
     }
 }
 
@@ -516,36 +512,81 @@ fn export_route_groups(
     println!("  Exported {} route groups", groups.len());
 }
 
-/// Export sections as GPX files
+/// Export sections as GeoJSON (combined) and individual GPX files
 fn export_sections(sections: &[FrequentSection], output_dir: &PathBuf, verbose: bool) {
     println!("\n[Export] Writing sections to: {}", output_dir.display());
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
-    for (i, section) in sections.iter().enumerate() {
-        let filename = format!(
-            "section_{:03}_{}.gpx",
-            i + 1,
-            section.sport_type.to_lowercase()
-        );
-        let path = output_dir.join(&filename);
+    // Write combined GeoJSON with all sections
+    let geojson_path = output_dir.join("sections.geojson");
+    write_sections_geojson(sections, &geojson_path);
+    println!("  Written: sections.geojson ({} features)", sections.len());
 
-        if verbose {
+    // Also write individual GPX files
+    if verbose {
+        for (i, section) in sections.iter().enumerate() {
+            let filename = format!(
+                "section_{:03}_{}.gpx",
+                i + 1,
+                section.sport_type.to_lowercase()
+            );
+            let path = output_dir.join(&filename);
             println!("  Writing: {} ({} points)", filename, section.polyline.len());
+
+            let name = section.name.clone().unwrap_or_else(|| {
+                format!(
+                    "Section {} ({} visits, {:.0}m)",
+                    i + 1,
+                    section.visit_count,
+                    section.distance_meters
+                )
+            });
+            write_gpx_file(&path, &section.polyline, &name);
         }
+        println!("  Exported {} GPX files", sections.len());
+    }
+}
+
+/// Write all sections to a single GeoJSON FeatureCollection
+fn write_sections_geojson(sections: &[FrequentSection], path: &PathBuf) {
+    let file = File::create(path).expect("Failed to create GeoJSON file");
+    let mut writer = BufWriter::new(file);
+
+    writeln!(writer, r#"{{"type": "FeatureCollection", "features": ["#).unwrap();
+
+    for (i, section) in sections.iter().enumerate() {
+        // Build coordinates array [lng, lat] (GeoJSON order)
+        let coords: Vec<String> = section
+            .polyline
+            .iter()
+            .map(|p| format!("[{:.6}, {:.6}]", p.longitude, p.latitude))
+            .collect();
 
         let name = section.name.clone().unwrap_or_else(|| {
-            format!(
-                "Section {} ({} visits, {:.0}m)",
-                i + 1,
-                section.visit_count,
-                section.distance_meters
-            )
+            format!("Section {} ({:.0}m)", i + 1, section.distance_meters)
         });
 
-        write_gpx_file(&path, &section.polyline, &name);
+        write!(
+            writer,
+            r#"  {{"type": "Feature", "properties": {{"id": "{}", "name": "{}", "sport": "{}", "distance_m": {:.0}, "visits": {}, "confidence": {:.2}, "activities": {}}}, "geometry": {{"type": "LineString", "coordinates": [{}]}}}}"#,
+            section.id,
+            name.replace('"', "'"),
+            section.sport_type,
+            section.distance_meters,
+            section.visit_count,
+            section.confidence,
+            section.activity_ids.len(),
+            coords.join(", ")
+        ).unwrap();
+
+        if i < sections.len() - 1 {
+            writeln!(writer, ",").unwrap();
+        } else {
+            writeln!(writer).unwrap();
+        }
     }
 
-    println!("  Exported {} sections", sections.len());
+    writeln!(writer, "]}}").unwrap();
 }
 
 /// Write GPS points to a GPX file

@@ -150,14 +150,27 @@ pub(crate) fn init_logging() {
 pub struct GpsPoint {
     pub latitude: f64,
     pub longitude: f64,
+    /// Elevation in meters (optional for backward compatibility)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<f64>,
 }
 
 impl GpsPoint {
-    /// Create a new GPS point.
+    /// Create a new GPS point without elevation.
     pub fn new(latitude: f64, longitude: f64) -> Self {
         Self {
             latitude,
             longitude,
+            elevation: None,
+        }
+    }
+
+    /// Create a new GPS point with elevation.
+    pub fn with_elevation(latitude: f64, longitude: f64, elevation: f64) -> Self {
+        Self {
+            latitude,
+            longitude,
+            elevation: Some(elevation),
         }
     }
 
