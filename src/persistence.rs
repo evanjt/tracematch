@@ -504,6 +504,12 @@ impl PersistentRouteEngine {
                             average_spread: 0.0,
                             point_density: vec![],
                             scale: None,
+                            // Evolution fields
+                            version: 1,
+                            is_user_defined: false,
+                            created_at: None,
+                            updated_at: None,
+                            stability: 0.0,
                         }
                     });
                 Ok(section)

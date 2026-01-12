@@ -2,6 +2,7 @@
 name = "tracematch"
 version = "0.0.1"
 edition = "2021"
+authors = ["Evan Thomas <evan@evanjt.com>"]
 license = "Apache-2.0"
 description = "High-performance GPS route matching and activity analysis"
 repository = "https://github.com/evanjt/route-matcher"
@@ -19,6 +20,7 @@ default = ["ffi", "parallel", "persistence"]
 ffi = ["uniffi", "parallel"]
 parallel = ["rayon"]
 persistence = ["rusqlite", "rmp-serde"]
+cli = ["gpx", "clap", "env_logger", "chrono", "parallel"]
 
 [dependencies]
 geo = "0.29"
@@ -32,6 +34,11 @@ rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 rmp-serde = { version = "1.1", optional = true }
 rayon = { version = "1.10", optional = true }
 uniffi = { version = "0.30", features = ["cli"], optional = true }
+# CLI dependencies
+gpx = { version = "0.10", optional = true }
+clap = { version = "4.4", features = ["derive"], optional = true }
+env_logger = { version = "0.11", optional = true }
+chrono = { version = "0.4", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
@@ -75,3 +82,8 @@ path = "examples/basic_matching.rs"
 [[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
+
+[[bin]]
+name = "tracematch-cli"
+path = "src/bin/cli.rs"
+required-features = ["cli"]

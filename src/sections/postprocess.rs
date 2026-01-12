@@ -562,6 +562,12 @@ fn split_section_by_density(
                 average_spread: section.average_spread,
                 point_density: split_density,
                 scale: section.scale.clone(),
+                // Inherit evolution fields from parent section
+                version: section.version,
+                is_user_defined: section.is_user_defined,
+                created_at: section.created_at.clone(),
+                updated_at: section.updated_at.clone(),
+                stability: section.stability,
             };
 
             info!(
