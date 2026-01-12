@@ -1,7 +1,7 @@
 //! Tests for geo_utils module
 
-use tracematch::{Bounds, GpsPoint};
 use tracematch::geo_utils::*;
+use tracematch::{Bounds, GpsPoint};
 
 fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
     (a - b).abs() < epsilon

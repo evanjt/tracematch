@@ -50,9 +50,9 @@ pub(crate) use overlap::{
 };
 pub(crate) use portions::compute_activity_portions;
 pub(crate) use postprocess::{
-    make_sections_exclusive, merge_nearby_sections, remove_overlapping_sections,
-    split_at_gradient_changes, split_at_heading_changes, split_folding_sections,
-    split_high_variance_sections,
+    consolidate_fragments, filter_low_quality_sections, make_sections_exclusive,
+    merge_nearby_sections, remove_overlapping_sections, split_at_gradient_changes,
+    split_at_heading_changes, split_folding_sections, split_high_variance_sections,
 };
 pub(crate) use rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
 pub(crate) use traces::extract_all_activity_traces;
@@ -63,11 +63,19 @@ pub use evolution::{
 };
 
 // Re-export optimized detection functions
-pub use optimized::{detect_sections_incremental, detect_sections_optimized, IncrementalResult};
+pub use optimized::{
+    detect_sections_incremental, detect_sections_optimized, find_sections_in_route,
+    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    IncrementalResult, SectionMatch, SplitResult,
+};
 
 /// Compute initial stability score from consensus metrics.
 /// Stability increases with more observations and tighter spread.
-fn compute_initial_stability(observation_count: u32, average_spread: f64, proximity_threshold: f64) -> f64 {
+pub(crate) fn compute_initial_stability(
+    observation_count: u32,
+    average_spread: f64,
+    proximity_threshold: f64,
+) -> f64 {
     // Observation factor: saturates at 10 observations
     let obs_factor = (observation_count as f64 / 10.0).min(1.0);
 
@@ -486,12 +494,19 @@ pub fn detect_sections_from_tracks(
             sport_type
         );
 
-        // Build R-trees for all tracks
         let rtree_start = std::time::Instant::now();
+        #[cfg(feature = "parallel")]
+        let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
+            .par_iter()
+            .map(|(_, pts)| build_rtree(pts))
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
         let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
             .iter()
             .map(|(_, pts)| build_rtree(pts))
             .collect();
+
         info!(
             "[Sections] Built {} R-trees in {}ms",
             rtrees.len(),
@@ -784,7 +799,13 @@ pub fn detect_sections_multiscale(
                 continue;
             }
 
-            // Build R-trees
+            #[cfg(feature = "parallel")]
+            let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
+                .par_iter()
+                .map(|(_, pts)| build_rtree(pts))
+                .collect();
+
+            #[cfg(not(feature = "parallel"))]
             let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
                 .iter()
                 .map(|(_, pts)| build_rtree(pts))
@@ -1084,4 +1105,3 @@ fn compute_polyline_containment(
 
     contained_count as f64 / polyline_a.len() as f64
 }
-

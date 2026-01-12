@@ -1,7 +1,7 @@
 //! Tests for grouping module
 
-use tracematch::{GpsPoint, MatchConfig, RouteSignature};
 use tracematch::grouping::*;
+use tracematch::{GpsPoint, MatchConfig, RouteSignature};
 
 fn create_long_route() -> Vec<GpsPoint> {
     // Create a route long enough to meet min_route_distance (500m)
@@ -15,10 +15,8 @@ fn create_long_route() -> Vec<GpsPoint> {
 fn test_group_identical_routes() {
     let long_route = create_long_route();
 
-    let sig1 =
-        RouteSignature::from_points("test-1", &long_route, &MatchConfig::default()).unwrap();
-    let sig2 =
-        RouteSignature::from_points("test-2", &long_route, &MatchConfig::default()).unwrap();
+    let sig1 = RouteSignature::from_points("test-1", &long_route, &MatchConfig::default()).unwrap();
+    let sig2 = RouteSignature::from_points("test-2", &long_route, &MatchConfig::default()).unwrap();
 
     let groups = group_signatures(&[sig1, sig2], &MatchConfig::default());
 

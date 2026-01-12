@@ -394,8 +394,7 @@ fn blend_polylines(
     for (i, new_point) in new_polyline.iter().enumerate() {
         // Find corresponding point in old polyline (by normalized position)
         let normalized_pos = i as f64 / (new_polyline.len().max(1) - 1).max(1) as f64;
-        let old_idx =
-            (normalized_pos * (old_polyline.len().max(1) - 1) as f64).round() as usize;
+        let old_idx = (normalized_pos * (old_polyline.len().max(1) - 1) as f64).round() as usize;
         let old_idx = old_idx.min(old_polyline.len().saturating_sub(1));
 
         if old_idx < old_polyline.len() {
@@ -441,10 +440,7 @@ mod tests {
             id: "test_sec".to_string(),
             name: None,
             sport_type: "Run".to_string(),
-            polyline: vec![
-                GpsPoint::new(46.23, 7.36),
-                GpsPoint::new(46.24, 7.37),
-            ],
+            polyline: vec![GpsPoint::new(46.23, 7.36), GpsPoint::new(46.24, 7.37)],
             representative_activity_id: "act1".to_string(),
             activity_ids: vec!["act1".to_string()],
             activity_portions: vec![],

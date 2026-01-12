@@ -594,4 +594,3 @@ pub fn distance_ratio_ok(d1: f64, d2: f64) -> bool {
     let ratio = if d1 > d2 { d2 / d1 } else { d1 / d2 };
     ratio >= 0.5
 }
-

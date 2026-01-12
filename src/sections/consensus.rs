@@ -63,7 +63,9 @@ pub fn compute_consensus_polyline(
         // Collect nearby points from all traces
         let mut weighted_lat = 0.0;
         let mut weighted_lng = 0.0;
+        let mut weighted_elev = 0.0;
         let mut total_weight = 0.0;
+        let mut elev_weight = 0.0;
         let mut nearby_distances: Vec<f64> = Vec::new();
         let mut this_point_observations = 0u32;
 
@@ -86,6 +88,12 @@ pub fn compute_consensus_polyline(
                     total_weight += weight;
                     nearby_distances.push(dist_meters);
                     this_point_observations += 1;
+
+                    // Track elevation if available
+                    if let Some(elev) = trace_point.elevation {
+                        weighted_elev += elev * weight;
+                        elev_weight += weight;
+                    }
                 }
             }
         }
@@ -97,7 +105,17 @@ pub fn compute_consensus_polyline(
             // Compute weighted centroid
             let consensus_lat = weighted_lat / total_weight;
             let consensus_lng = weighted_lng / total_weight;
-            consensus_points.push(GpsPoint::new(consensus_lat, consensus_lng));
+            let consensus_elev = if elev_weight > 0.0 {
+                Some(weighted_elev / elev_weight)
+            } else {
+                ref_point.elevation
+            };
+
+            consensus_points.push(GpsPoint {
+                latitude: consensus_lat,
+                longitude: consensus_lng,
+                elevation: consensus_elev,
+            });
 
             // Track spread (average distance of observations from consensus)
             if !nearby_distances.is_empty() {

@@ -80,20 +80,17 @@ enum Commands {
 fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "[{:5}] {}",
-                record.level(),
-                record.args()
-            )
-        })
+        .format(|buf, record| writeln!(buf, "[{:5}] {}", record.level(), record.args()))
         .init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Routes { folder, output, sport } => {
+        Commands::Routes {
+            folder,
+            output,
+            sport,
+        } => {
             run_routes(&folder, output.as_ref(), sport.as_deref(), cli.verbose);
         }
         Commands::Sections {
@@ -146,7 +143,10 @@ fn load_gpx_files(folder: &PathBuf, sport_filter: Option<&str>, verbose: bool) -
                     if let Some(filter) = sport_filter {
                         if !activity.sport_type.eq_ignore_ascii_case(filter) {
                             if verbose {
-                                println!("    Skipped (sport: {} != {})", activity.sport_type, filter);
+                                println!(
+                                    "    Skipped (sport: {} != {})",
+                                    activity.sport_type, filter
+                                );
                             }
                             continue;
                         }
@@ -277,7 +277,12 @@ impl GpxActivity {
 }
 
 /// Run route grouping
-fn run_routes(folder: &PathBuf, output: Option<&PathBuf>, sport_filter: Option<&str>, verbose: bool) {
+fn run_routes(
+    folder: &PathBuf,
+    output: Option<&PathBuf>,
+    sport_filter: Option<&str>,
+    verbose: bool,
+) {
     let activities = load_gpx_files(folder, sport_filter, verbose);
     if activities.is_empty() {
         println!("No activities to process");
@@ -306,14 +311,16 @@ fn run_routes(folder: &PathBuf, output: Option<&PathBuf>, sport_filter: Option<&
                 println!("    Distance: {:.2}km", sig.total_distance / 1000.0);
                 println!(
                     "    Bounds: [{:.4}, {:.4}] to [{:.4}, {:.4}]",
-                    sig.bounds.min_lat, sig.bounds.min_lng,
-                    sig.bounds.max_lat, sig.bounds.max_lng
+                    sig.bounds.min_lat, sig.bounds.min_lng, sig.bounds.max_lat, sig.bounds.max_lng
                 );
             }
             sport_types.insert(activity.id.clone(), activity.sport_type.clone());
             signatures.push(sig);
         } else {
-            println!("  [WARN] Could not generate signature for: {}", activity.name);
+            println!(
+                "  [WARN] Could not generate signature for: {}",
+                activity.name
+            );
         }
     }
 
@@ -328,7 +335,11 @@ fn run_routes(folder: &PathBuf, output: Option<&PathBuf>, sport_filter: Option<&
     println!("{}", "-".repeat(60));
 
     for (i, group) in groups.iter().enumerate() {
-        println!("\n  Group {} ({} activities):", i + 1, group.activity_ids.len());
+        println!(
+            "\n  Group {} ({} activities):",
+            i + 1,
+            group.activity_ids.len()
+        );
         println!("    Representative: {}", group.representative_id);
         println!("    Sport type: {}", group.sport_type);
         if let Some(bounds) = &group.bounds {
@@ -340,7 +351,11 @@ fn run_routes(folder: &PathBuf, output: Option<&PathBuf>, sport_filter: Option<&
         println!("    Activities:");
         for aid in &group.activity_ids {
             let activity_name = activities.iter().find(|a| a.id == *aid).map(|a| &a.name);
-            println!("      - {} ({})", aid, activity_name.unwrap_or(&"unknown".to_string()));
+            println!(
+                "      - {} ({})",
+                aid,
+                activity_name.unwrap_or(&"unknown".to_string())
+            );
         }
     }
 
@@ -396,15 +411,28 @@ fn run_sections(
         println!("  max_section_length: {}m", config.max_section_length);
         println!("  min_activities: {}", config.min_activities);
         println!("  cluster_tolerance: {}m", config.cluster_tolerance);
-        println!("  scale_presets: {:?}", config.scale_presets.iter().map(|s| &s.name).collect::<Vec<_>>());
+        println!(
+            "  scale_presets: {:?}",
+            config
+                .scale_presets
+                .iter()
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     // Run section detection
     let sections: Vec<FrequentSection> = if legacy {
         // Legacy: full-resolution multi-scale (slower but more detailed)
         println!("\n[Step 2] Running LEGACY multi-scale section detection...");
-        println!("  This analyzes pairwise overlaps between all {} tracks", tracks.len());
-        println!("  Total pairs to check: {}", tracks.len() * (tracks.len() - 1) / 2);
+        println!(
+            "  This analyzes pairwise overlaps between all {} tracks",
+            tracks.len()
+        );
+        println!(
+            "  Total pairs to check: {}",
+            tracks.len() * (tracks.len() - 1) / 2
+        );
         println!("  ⚠️  Using legacy mode - this is slower than default!");
 
         let groups: Vec<RouteGroup> = Vec::new();
@@ -412,7 +440,10 @@ fn run_sections(
 
         // Show legacy statistics
         println!("\nLegacy Statistics:");
-        println!("  Activities processed: {}", result.stats.activities_processed);
+        println!(
+            "  Activities processed: {}",
+            result.stats.activities_processed
+        );
         println!("  Overlaps found: {}", result.stats.overlaps_found);
         for (scale, count) in &result.stats.sections_by_scale {
             println!("    {}: {}", scale, count);
@@ -436,12 +467,18 @@ fn run_sections(
     println!("\nSections found: {}", sections.len());
     for (i, section) in sections.iter().enumerate() {
         println!("\n  Section {} [{}]:", i + 1, section.id);
-        println!("    Name: {}", section.name.as_deref().unwrap_or("(unnamed)"));
+        println!(
+            "    Name: {}",
+            section.name.as_deref().unwrap_or("(unnamed)")
+        );
         println!("    Sport: {}", section.sport_type);
         println!("    Distance: {:.0}m", section.distance_meters);
         println!("    Visits: {}", section.visit_count);
         println!("    Confidence: {:.2}", section.confidence);
-        println!("    Scale: {}", section.scale.as_deref().unwrap_or("legacy"));
+        println!(
+            "    Scale: {}",
+            section.scale.as_deref().unwrap_or("legacy")
+        );
         println!("    Polyline points: {}", section.polyline.len());
         println!("    Activities ({}):", section.activity_ids.len());
         for aid in &section.activity_ids {
@@ -463,9 +500,8 @@ fn run_sections(
             println!("    Observation count: {}", section.observation_count);
             println!("    Average spread: {:.2}m", section.average_spread);
             if !section.point_density.is_empty() {
-                let avg_density: f64 =
-                    section.point_density.iter().map(|&x| x as f64).sum::<f64>()
-                        / section.point_density.len() as f64;
+                let avg_density: f64 = section.point_density.iter().map(|&x| x as f64).sum::<f64>()
+                    / section.point_density.len() as f64;
                 println!("    Avg point density: {:.1}", avg_density);
             }
         }
@@ -484,7 +520,10 @@ fn export_route_groups(
     output_dir: &PathBuf,
     verbose: bool,
 ) {
-    println!("\n[Export] Writing route groups to: {}", output_dir.display());
+    println!(
+        "\n[Export] Writing route groups to: {}",
+        output_dir.display()
+    );
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
     for (i, group) in groups.iter().enumerate() {
@@ -504,7 +543,11 @@ fn export_route_groups(
             write_gpx_file(
                 &path,
                 &sig.points,
-                &format!("Route Group {} ({} activities)", i + 1, group.activity_ids.len()),
+                &format!(
+                    "Route Group {} ({} activities)",
+                    i + 1,
+                    group.activity_ids.len()
+                ),
             );
         }
     }
@@ -531,7 +574,11 @@ fn export_sections(sections: &[FrequentSection], output_dir: &PathBuf, verbose: 
                 section.sport_type.to_lowercase()
             );
             let path = output_dir.join(&filename);
-            println!("  Writing: {} ({} points)", filename, section.polyline.len());
+            println!(
+                "  Writing: {} ({} points)",
+                filename,
+                section.polyline.len()
+            );
 
             let name = section.name.clone().unwrap_or_else(|| {
                 format!(
@@ -562,9 +609,10 @@ fn write_sections_geojson(sections: &[FrequentSection], path: &PathBuf) {
             .map(|p| format!("[{:.6}, {:.6}]", p.longitude, p.latitude))
             .collect();
 
-        let name = section.name.clone().unwrap_or_else(|| {
-            format!("Section {} ({:.0}m)", i + 1, section.distance_meters)
-        });
+        let name = section
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Section {} ({:.0}m)", i + 1, section.distance_meters));
 
         write!(
             writer,

@@ -267,11 +267,37 @@ impl PersistentRouteEngine {
                 sport_type TEXT NOT NULL
             );
 
+            -- Custom sections (user-created)
+            CREATE TABLE IF NOT EXISTS custom_sections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                polyline_json TEXT NOT NULL,
+                source_activity_id TEXT NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                sport_type TEXT NOT NULL,
+                distance_meters REAL NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            -- Custom section matches
+            CREATE TABLE IF NOT EXISTS custom_section_matches (
+                section_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                distance_meters REAL NOT NULL,
+                PRIMARY KEY (section_id, activity_id),
+                FOREIGN KEY (section_id) REFERENCES custom_sections(id) ON DELETE CASCADE
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_activities_sport ON activities(sport_type);
             CREATE INDEX IF NOT EXISTS idx_activities_bounds ON activities(min_lat, max_lat, min_lng, max_lng);
             CREATE INDEX IF NOT EXISTS idx_groups_sport ON route_groups(sport_type);
             CREATE INDEX IF NOT EXISTS idx_activity_matches_route ON activity_matches(route_id);
+            CREATE INDEX IF NOT EXISTS idx_custom_section_matches_section ON custom_section_matches(section_id);
 
             -- Enable foreign keys
             PRAGMA foreign_keys = ON;
@@ -1317,6 +1343,376 @@ impl PersistentRouteEngine {
     }
 
     // ========================================================================
+    // Custom Sections CRUD
+    // ========================================================================
+
+    /// Add a custom section.
+    pub fn add_custom_section(&mut self, section: &crate::CustomSection) -> SqlResult<bool> {
+        let polyline_json = serde_json::to_string(&section.polyline).unwrap_or_else(|_| "[]".to_string());
+
+        self.db.execute(
+            "INSERT OR REPLACE INTO custom_sections
+             (id, name, polyline_json, source_activity_id, start_index, end_index,
+              sport_type, distance_meters, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                &section.id,
+                &section.name,
+                &polyline_json,
+                &section.source_activity_id,
+                section.start_index,
+                section.end_index,
+                &section.sport_type,
+                section.distance_meters,
+                &section.created_at,
+            ],
+        )?;
+
+        // Also set the section name in the section_names table
+        self.db.execute(
+            "INSERT OR REPLACE INTO section_names (section_id, custom_name) VALUES (?, ?)",
+            params![&section.id, &section.name],
+        )?;
+
+        Ok(true)
+    }
+
+    /// Remove a custom section.
+    pub fn remove_custom_section(&mut self, section_id: &str) -> SqlResult<bool> {
+        // Delete matches first (FK will cascade but explicit is clearer)
+        self.db.execute(
+            "DELETE FROM custom_section_matches WHERE section_id = ?",
+            params![section_id],
+        )?;
+
+        // Delete the section
+        let rows = self.db.execute(
+            "DELETE FROM custom_sections WHERE id = ?",
+            params![section_id],
+        )?;
+
+        // Also remove from section_names
+        self.db.execute(
+            "DELETE FROM section_names WHERE section_id = ?",
+            params![section_id],
+        )?;
+
+        Ok(rows > 0)
+    }
+
+    /// Get all custom sections.
+    pub fn get_custom_sections(&self) -> Vec<crate::CustomSection> {
+        let mut stmt = match self.db.prepare(
+            "SELECT id, name, polyline_json, source_activity_id, start_index, end_index,
+                    sport_type, distance_meters, created_at
+             FROM custom_sections"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let result: Vec<crate::CustomSection> = stmt
+            .query_map([], |row| {
+                let polyline_json: String = row.get(2)?;
+                let polyline: Vec<crate::GpsPoint> = serde_json::from_str(&polyline_json)
+                    .unwrap_or_default();
+
+                Ok(crate::CustomSection {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    polyline,
+                    source_activity_id: row.get(3)?,
+                    start_index: row.get(4)?,
+                    end_index: row.get(5)?,
+                    sport_type: row.get(6)?,
+                    distance_meters: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        result
+    }
+
+    /// Get a custom section by ID.
+    pub fn get_custom_section(&self, section_id: &str) -> Option<crate::CustomSection> {
+        let mut stmt = match self.db.prepare(
+            "SELECT id, name, polyline_json, source_activity_id, start_index, end_index,
+                    sport_type, distance_meters, created_at
+             FROM custom_sections WHERE id = ?"
+        ) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+
+        stmt.query_row(params![section_id], |row| {
+            let polyline_json: String = row.get(2)?;
+            let polyline: Vec<crate::GpsPoint> = serde_json::from_str(&polyline_json)
+                .unwrap_or_default();
+
+            Ok(crate::CustomSection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                polyline,
+                source_activity_id: row.get(3)?,
+                start_index: row.get(4)?,
+                end_index: row.get(5)?,
+                sport_type: row.get(6)?,
+                distance_meters: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })
+        .ok()
+    }
+
+    /// Get all custom sections as JSON.
+    pub fn get_custom_sections_json(&self) -> String {
+        serde_json::to_string(&self.get_custom_sections()).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Add a match for a custom section.
+    pub fn add_custom_section_match(
+        &mut self,
+        section_id: &str,
+        match_info: &crate::CustomSectionMatch,
+    ) -> SqlResult<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO custom_section_matches
+             (section_id, activity_id, start_index, end_index, direction, distance_meters)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                section_id,
+                &match_info.activity_id,
+                match_info.start_index,
+                match_info.end_index,
+                &match_info.direction,
+                match_info.distance_meters,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get matches for a custom section.
+    pub fn get_custom_section_matches(&self, section_id: &str) -> Vec<crate::CustomSectionMatch> {
+        let mut stmt = match self.db.prepare(
+            "SELECT activity_id, start_index, end_index, direction, distance_meters
+             FROM custom_section_matches WHERE section_id = ?"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        stmt.query_map(params![section_id], |row| {
+            Ok(crate::CustomSectionMatch {
+                activity_id: row.get(0)?,
+                start_index: row.get(1)?,
+                end_index: row.get(2)?,
+                direction: row.get(3)?,
+                distance_meters: row.get(4)?,
+            })
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Custom Section Matching
+    // ========================================================================
+
+    /// Match a custom section against an activity's GPS track.
+    /// Returns match info if the activity traverses the section, None otherwise.
+    pub fn match_custom_section(
+        &self,
+        section: &crate::CustomSection,
+        activity_id: &str,
+        track: &[GpsPoint],
+        config: &crate::CustomSectionMatchConfig,
+    ) -> Option<crate::CustomSectionMatch> {
+        if track.len() < 2 || section.polyline.len() < 2 {
+            return None;
+        }
+
+        let section_start = &section.polyline[0];
+        let section_end = &section.polyline[section.polyline.len() - 1];
+
+        // Try matching in "same" direction first
+        if let Some(m) = self.try_match_direction(
+            section,
+            activity_id,
+            track,
+            section_start,
+            section_end,
+            "same",
+            config,
+        ) {
+            return Some(m);
+        }
+
+        // Try matching in "reverse" direction
+        self.try_match_direction(
+            section,
+            activity_id,
+            track,
+            section_end,
+            section_start,
+            "reverse",
+            config,
+        )
+    }
+
+    /// Try to match a section in a specific direction.
+    fn try_match_direction(
+        &self,
+        section: &crate::CustomSection,
+        activity_id: &str,
+        track: &[GpsPoint],
+        start: &GpsPoint,
+        end: &GpsPoint,
+        direction: &str,
+        config: &crate::CustomSectionMatchConfig,
+    ) -> Option<crate::CustomSectionMatch> {
+        // Find potential start point
+        let (start_idx, start_dist) = self.find_nearest_point_index(track, start, 0);
+        if start_dist > config.proximity_threshold {
+            return None;
+        }
+
+        // Find potential end point (search after start)
+        let (end_idx, end_dist) = self.find_nearest_point_index(track, end, start_idx);
+        if end_dist > config.proximity_threshold {
+            return None;
+        }
+
+        // Validate that start comes before end
+        if end_idx <= start_idx {
+            return None;
+        }
+
+        // Calculate coverage
+        let coverage = self.calculate_coverage(track, &section.polyline, start_idx, end_idx, direction, config.proximity_threshold);
+        if coverage < config.min_coverage {
+            return None;
+        }
+
+        // Calculate distance of matched portion
+        let distance_meters = self.calculate_track_distance(track, start_idx, end_idx);
+
+        Some(crate::CustomSectionMatch {
+            activity_id: activity_id.to_string(),
+            start_index: start_idx as u32,
+            end_index: end_idx as u32,
+            direction: direction.to_string(),
+            distance_meters,
+        })
+    }
+
+    /// Find the index of the nearest point in a track to a given point.
+    fn find_nearest_point_index(&self, track: &[GpsPoint], point: &GpsPoint, start_idx: usize) -> (usize, f64) {
+        let mut nearest_idx = start_idx;
+        let mut nearest_dist = f64::INFINITY;
+
+        for (i, p) in track.iter().enumerate().skip(start_idx) {
+            let dist = geo_utils::haversine_distance(point, p);
+            if dist < nearest_dist {
+                nearest_dist = dist;
+                nearest_idx = i;
+            }
+        }
+
+        (nearest_idx, nearest_dist)
+    }
+
+    /// Calculate what percentage of the section is covered by the activity track.
+    fn calculate_coverage(
+        &self,
+        track: &[GpsPoint],
+        section_polyline: &[GpsPoint],
+        start_idx: usize,
+        end_idx: usize,
+        direction: &str,
+        proximity_threshold: f64,
+    ) -> f64 {
+        // Sample points along the section
+        let sample_count = std::cmp::min(20, section_polyline.len());
+        let sample_step = std::cmp::max(1, section_polyline.len() / sample_count);
+
+        let mut covered_points = 0;
+        let mut total_points = 0;
+
+        // Get the section polyline in the right order based on direction
+        let ordered_section: Vec<&GpsPoint> = if direction == "same" {
+            section_polyline.iter().collect()
+        } else {
+            section_polyline.iter().rev().collect()
+        };
+
+        for (i, section_point) in ordered_section.iter().enumerate() {
+            if i % sample_step != 0 {
+                continue;
+            }
+            total_points += 1;
+
+            // Check if any track point is within proximity
+            let is_covered = track[start_idx..=end_idx]
+                .iter()
+                .any(|p| geo_utils::haversine_distance(section_point, p) <= proximity_threshold);
+
+            if is_covered {
+                covered_points += 1;
+            }
+        }
+
+        if total_points > 0 {
+            covered_points as f64 / total_points as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Calculate distance along a track between two indices.
+    fn calculate_track_distance(&self, track: &[GpsPoint], start_idx: usize, end_idx: usize) -> f64 {
+        let mut total_distance = 0.0;
+        for i in start_idx..end_idx {
+            total_distance += geo_utils::haversine_distance(&track[i], &track[i + 1]);
+        }
+        total_distance
+    }
+
+    /// Match a custom section against multiple activities and store results.
+    pub fn match_custom_section_against_activities(
+        &mut self,
+        section_id: &str,
+        activity_ids: &[String],
+        config: &crate::CustomSectionMatchConfig,
+    ) -> Vec<crate::CustomSectionMatch> {
+        let section = match self.get_custom_section(section_id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let mut matches = Vec::new();
+
+        for activity_id in activity_ids {
+            // Load the GPS track for this activity
+            let track: Vec<GpsPoint> = match self.get_gps_track(activity_id) {
+                Some(t) if t.len() >= 2 => t,
+                _ => continue,
+            };
+
+            if let Some(match_info) = self.match_custom_section(&section, activity_id, &track, config) {
+                // Store the match
+                let _ = self.add_custom_section_match(section_id, &match_info);
+                matches.push(match_info);
+            }
+        }
+
+        matches
+    }
+
+    // ========================================================================
     // Activity Metrics & Route Performances
     // ========================================================================
 
@@ -1948,6 +2344,148 @@ pub mod persistent_engine_ffi {
             *handle_guard = None;
             info!("[PersistentEngine] Section detection cancelled");
         }
+    }
+
+    // ========================================================================
+    // Custom Section FFI
+    // ========================================================================
+
+    /// Add a custom section from JSON.
+    #[uniffi::export]
+    pub fn persistent_engine_add_custom_section(section_json: String) -> bool {
+        let section: crate::CustomSection = match serde_json::from_str(&section_json) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("[PersistentEngine] Failed to parse custom section: {:?}", e);
+                return false;
+            }
+        };
+
+        with_persistent_engine(|e| {
+            match e.add_custom_section(&section) {
+                Ok(success) => {
+                    info!("[PersistentEngine] Added custom section: {}", section.id);
+                    success
+                }
+                Err(e) => {
+                    log::error!("[PersistentEngine] Failed to add custom section: {:?}", e);
+                    false
+                }
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// Remove a custom section.
+    #[uniffi::export]
+    pub fn persistent_engine_remove_custom_section(section_id: String) -> bool {
+        with_persistent_engine(|e| {
+            match e.remove_custom_section(&section_id) {
+                Ok(success) => {
+                    info!("[PersistentEngine] Removed custom section: {}", section_id);
+                    success
+                }
+                Err(e) => {
+                    log::error!("[PersistentEngine] Failed to remove custom section: {:?}", e);
+                    false
+                }
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// Get all custom sections as JSON.
+    #[uniffi::export]
+    pub fn persistent_engine_get_custom_sections_json() -> String {
+        with_persistent_engine(|e| e.get_custom_sections_json())
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Match a custom section against activities.
+    /// Returns JSON array of matches.
+    #[uniffi::export]
+    pub fn persistent_engine_match_custom_section(
+        section_id: String,
+        activity_ids: Vec<String>,
+    ) -> String {
+        let config = crate::CustomSectionMatchConfig::default();
+
+        with_persistent_engine(|e| {
+            let matches = e.match_custom_section_against_activities(&section_id, &activity_ids, &config);
+            serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
+        })
+        .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Get matches for a custom section.
+    /// Returns JSON array of matches.
+    #[uniffi::export]
+    pub fn persistent_engine_get_custom_section_matches(section_id: String) -> String {
+        with_persistent_engine(|e| {
+            let matches = e.get_custom_section_matches(&section_id);
+            serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
+        })
+        .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Get default custom section matching config.
+    #[uniffi::export]
+    pub fn default_custom_section_match_config() -> crate::CustomSectionMatchConfig {
+        crate::CustomSectionMatchConfig::default()
+    }
+
+    /// Extract the GPS trace for an activity that overlaps with a section polyline.
+    /// Returns a flat array of [lat, lng, lat, lng, ...] or empty if no overlap.
+    #[uniffi::export]
+    pub fn persistent_engine_extract_section_trace(
+        activity_id: String,
+        section_polyline_json: String,
+    ) -> Vec<f64> {
+        with_persistent_engine(|engine| {
+            // Parse the section polyline
+            let polyline: Vec<GpsPoint> = match serde_json::from_str(&section_polyline_json) {
+                Ok(p) => p,
+                Err(_) => return vec![],
+            };
+
+            if polyline.len() < 2 {
+                return vec![];
+            }
+
+            // Load the activity's GPS track
+            let track = match engine.get_gps_track(&activity_id) {
+                Some(t) => t,
+                None => return vec![],
+            };
+
+            if track.len() < 3 {
+                return vec![];
+            }
+
+            // Build a track map with just this activity
+            let mut track_map = std::collections::HashMap::new();
+            track_map.insert(activity_id.clone(), track);
+
+            // Use the existing trace extraction algorithm
+            let traces = crate::sections::extract_all_activity_traces(
+                &[activity_id.clone()],
+                &polyline,
+                &track_map,
+            );
+
+            // Get the trace for this activity
+            match traces.get(&activity_id) {
+                Some(trace) => {
+                    // Flatten to [lat, lng, lat, lng, ...]
+                    trace
+                        .iter()
+                        .flat_map(|p| vec![p.latitude, p.longitude])
+                        .collect()
+                }
+                None => vec![],
+            }
+        })
+        .unwrap_or_default()
     }
 }
 

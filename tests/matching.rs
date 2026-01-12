@@ -1,7 +1,7 @@
 //! Tests for matching module
 
-use tracematch::{GpsPoint, MatchConfig, RouteSignature};
 use tracematch::matching::*;
+use tracematch::{GpsPoint, MatchConfig, RouteSignature};
 
 fn sample_route() -> Vec<GpsPoint> {
     vec![
@@ -184,8 +184,7 @@ fn test_compare_routes_different_lengths() {
 
     let sig1 =
         RouteSignature::from_points("short", &short_points, &MatchConfig::default()).unwrap();
-    let sig2 =
-        RouteSignature::from_points("long", &long_points, &MatchConfig::default()).unwrap();
+    let sig2 = RouteSignature::from_points("long", &long_points, &MatchConfig::default()).unwrap();
 
     let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
     assert!(result.is_some());

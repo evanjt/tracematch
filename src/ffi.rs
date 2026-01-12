@@ -273,7 +273,6 @@ pub fn process_routes_from_flat(tracks: Vec<FlatGpsTrack>, config: MatchConfig) 
     groups
 }
 
-
 // ============================================================================
 // Frequent Sections Detection
 // ============================================================================
@@ -284,7 +283,6 @@ pub struct ActivitySportType {
     pub activity_id: String,
     pub sport_type: String,
 }
-
 
 /// Get conservative section config (fewer sections, higher confidence)
 #[uniffi::export]
@@ -380,6 +378,67 @@ pub fn ffi_detect_sections_multiscale(
     result
 }
 
+/// Optimized section detection using downsampling and grid partitioning.
+/// 20-50x faster than full resolution detection, suitable for mobile devices.
+#[uniffi::export]
+pub fn ffi_detect_sections_optimized(
+    activity_ids: Vec<String>,
+    all_coords: Vec<f64>,
+    offsets: Vec<u32>,
+    sport_types: Vec<ActivitySportType>,
+    config: crate::SectionConfig,
+) -> Vec<crate::FrequentSection> {
+    init_logging();
+    info!(
+        "[RouteMatcherRust] detect_sections_optimized: {} activities, {} coords",
+        activity_ids.len(),
+        all_coords.len() / 2,
+    );
+
+    let start = std::time::Instant::now();
+
+    let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(activity_ids.len());
+
+    for (i, activity_id) in activity_ids.iter().enumerate() {
+        let start_offset = offsets[i] as usize;
+        let end_offset = offsets
+            .get(i + 1)
+            .map(|&o| o as usize)
+            .unwrap_or(all_coords.len() / 2);
+
+        let mut points = Vec::with_capacity(end_offset - start_offset);
+        for j in start_offset..end_offset {
+            let coord_idx = j * 2;
+            if coord_idx + 1 < all_coords.len() {
+                points.push(GpsPoint::new(
+                    all_coords[coord_idx],
+                    all_coords[coord_idx + 1],
+                ));
+            }
+        }
+
+        if !points.is_empty() {
+            tracks.push((activity_id.clone(), points));
+        }
+    }
+
+    let sport_map: std::collections::HashMap<String, String> = sport_types
+        .into_iter()
+        .map(|st| (st.activity_id, st.sport_type))
+        .collect();
+
+    let result = crate::sections::detect_sections_optimized(&tracks, &sport_map, &config);
+
+    let elapsed = start.elapsed();
+    info!(
+        "[RouteMatcherRust] Optimized detection: {} sections in {:?}",
+        result.len(),
+        elapsed
+    );
+
+    result
+}
+
 // ============================================================================
 // Heatmap Generation FFI
 // ============================================================================
@@ -431,3 +490,54 @@ pub fn ffi_query_heatmap_cell(
     crate::query_heatmap_cell(&heatmap, lat, lng, heatmap.cell_size_meters)
 }
 
+// =============================================================================
+// Section Manipulation FFI Functions
+// =============================================================================
+
+/// Find all sections that exist within a given GPS route.
+///
+/// Returns a list of section matches with their positions in the route.
+#[uniffi::export]
+pub fn ffi_find_sections_in_route(
+    route: Vec<crate::GpsPoint>,
+    sections: Vec<crate::FrequentSection>,
+    config: crate::SectionConfig,
+) -> Vec<crate::SectionMatch> {
+    crate::find_sections_in_route(&route, &sections, &config)
+}
+
+/// Split a section at a geographic point.
+///
+/// Returns two new sections if the point is close enough to the section's polyline.
+#[uniffi::export]
+pub fn ffi_split_section_at_point(
+    section: crate::FrequentSection,
+    lat: f64,
+    lng: f64,
+    max_distance_meters: f64,
+) -> Option<crate::SplitResult> {
+    let point = crate::GpsPoint::new(lat, lng);
+    crate::split_section_at_point(&section, &point, max_distance_meters)
+}
+
+/// Split a section at a specific polyline index.
+///
+/// Returns two new sections split at the given index.
+#[uniffi::export]
+pub fn ffi_split_section_at_index(
+    section: crate::FrequentSection,
+    split_index: u32,
+) -> Option<crate::SplitResult> {
+    crate::split_section_at_index(&section, split_index as usize)
+}
+
+/// Recalculate a section's polyline based on its activity traces.
+///
+/// Useful when a section's polyline has drifted or is biased.
+#[uniffi::export]
+pub fn ffi_recalculate_section_polyline(
+    section: crate::FrequentSection,
+    config: crate::SectionConfig,
+) -> crate::FrequentSection {
+    crate::recalculate_section_polyline(&section, &config)
+}

@@ -88,8 +88,7 @@ fn test_remove_many() {
     store.add("b".to_string(), sample_coords(), "running".to_string());
     store.add("c".to_string(), sample_coords(), "swimming".to_string());
 
-    let removed =
-        store.remove_many(&["a".to_string(), "c".to_string(), "nonexistent".to_string()]);
+    let removed = store.remove_many(&["a".to_string(), "c".to_string(), "nonexistent".to_string()]);
 
     assert_eq!(removed.len(), 2);
     assert!(removed.contains(&"a".to_string()));

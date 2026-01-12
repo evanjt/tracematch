@@ -92,9 +92,9 @@ fn test_detect_sections_finds_overlaps() {
 
     // Use discovery config with lower thresholds
     let config = SectionConfig {
-        min_section_length: 500.0, // 500m minimum
+        min_section_length: 500.0,  // 500m minimum
         max_section_length: 2000.0, // 2km max
-        min_activities: 2, // Need at least 2 activities
+        min_activities: 2,          // Need at least 2 activities
         proximity_threshold: 50.0,
         cluster_tolerance: 100.0,
         scale_presets: vec![], // Use legacy single-scale
@@ -409,7 +409,10 @@ fn test_section_polyline_quality() {
 
         // All points should be valid GPS coordinates
         for point in &section.polyline {
-            assert!(point.is_valid(), "All points should be valid GPS coordinates");
+            assert!(
+                point.is_valid(),
+                "All points should be valid GPS coordinates"
+            );
         }
 
         // Confidence should be positive
@@ -447,7 +450,11 @@ fn test_similar_length_routes_group_together() {
 
     println!("Route distances:");
     for sig in &signatures {
-        println!("  {}: {:.1}km", sig.activity_id, sig.total_distance / 1000.0);
+        println!(
+            "  {}: {:.1}km",
+            sig.activity_id,
+            sig.total_distance / 1000.0
+        );
     }
 
     let groups = group_signatures(&signatures, &config);
@@ -562,7 +569,7 @@ fn test_debug_a3_sections() {
         min_section_length: 100.0,
         max_section_length: 5000.0,
         min_activities: 2,
-        proximity_threshold: 100.0,  // Larger threshold
+        proximity_threshold: 100.0, // Larger threshold
         cluster_tolerance: 150.0,
         scale_presets: vec![],
         ..SectionConfig::default()
@@ -664,7 +671,7 @@ fn test_investigate_start_section() {
     let full_config = SectionConfig {
         min_section_length: 200.0,
         max_section_length: 1500.0,
-        min_activities: 3,  // Require 3+ activities
+        min_activities: 3, // Require 3+ activities
         proximity_threshold: 50.0,
         ..SectionConfig::default()
     };
