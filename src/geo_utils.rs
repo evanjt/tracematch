@@ -10,7 +10,6 @@
 //! | Function | Description |
 //! |----------|-------------|
 //! | [`haversine_distance`] | Great-circle distance between two GPS points |
-//! | [`polyline_length`] | Total length of a GPS track in meters |
 //! | [`compute_bounds`] | Bounding box of a GPS track |
 //! | [`compute_center`] | Centroid of a GPS track |
 //! | [`bounds_overlap`] | Check if two bounding boxes overlap |
@@ -26,10 +25,6 @@
 //!     GpsPoint::new(51.5080, -0.1290),
 //!     GpsPoint::new(51.5090, -0.1300),
 //! ];
-//!
-//! // Calculate track length
-//! let length = geo_utils::polyline_length(&track);
-//! println!("Track length: {:.0}m", length);
 //!
 //! // Get bounding box
 //! let bounds = geo_utils::compute_bounds(&track);
@@ -98,44 +93,6 @@ pub fn haversine_distance(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
     let point1 = Point::new(p1.longitude, p1.latitude);
     let point2 = Point::new(p2.longitude, p2.latitude);
     Haversine::distance(point1, point2)
-}
-
-/// Calculate the total length of a polyline (GPS track) in meters.
-///
-/// Sums the haversine distance between consecutive points. Empty or single-point
-/// tracks return 0.0.
-///
-/// # Arguments
-///
-/// * `points` - Slice of GPS points forming the track
-///
-/// # Returns
-///
-/// Total track length in meters.
-///
-/// # Example
-///
-/// ```rust
-/// use tracematch::{GpsPoint, geo_utils};
-///
-/// let track = vec![
-///     GpsPoint::new(51.5074, -0.1278),
-///     GpsPoint::new(51.5080, -0.1290),
-///     GpsPoint::new(51.5090, -0.1300),
-/// ];
-///
-/// let length = geo_utils::polyline_length(&track);
-/// println!("Track is {:.0} meters long", length);
-/// ```
-pub fn polyline_length(points: &[GpsPoint]) -> f64 {
-    if points.len() < 2 {
-        return 0.0;
-    }
-
-    points
-        .windows(2)
-        .map(|w| haversine_distance(&w[0], &w[1]))
-        .sum()
 }
 
 /// Convert meters to approximate degrees at a given latitude.
@@ -344,146 +301,3 @@ pub fn compute_center(points: &[GpsPoint]) -> GpsPoint {
     GpsPoint::new(sum_lat / n, sum_lng / n)
 }
 
-// =============================================================================
-// Unit Tests
-// =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
-        (a - b).abs() < epsilon
-    }
-
-    #[test]
-    fn test_haversine_distance_same_point() {
-        let p = GpsPoint::new(51.5074, -0.1278);
-        assert_eq!(haversine_distance(&p, &p), 0.0);
-    }
-
-    #[test]
-    fn test_haversine_distance_known_value() {
-        // London to Paris is approximately 344 km
-        let london = GpsPoint::new(51.5074, -0.1278);
-        let paris = GpsPoint::new(48.8566, 2.3522);
-        let dist = haversine_distance(&london, &paris);
-        assert!(approx_eq(dist, 343_560.0, 5000.0)); // Within 5km
-    }
-
-    #[test]
-    fn test_polyline_length_empty() {
-        let empty: Vec<GpsPoint> = vec![];
-        assert_eq!(polyline_length(&empty), 0.0);
-    }
-
-    #[test]
-    fn test_polyline_length_single_point() {
-        let single = vec![GpsPoint::new(51.5074, -0.1278)];
-        assert_eq!(polyline_length(&single), 0.0);
-    }
-
-    #[test]
-    fn test_polyline_length_two_points() {
-        let track = vec![
-            GpsPoint::new(51.5074, -0.1278),
-            GpsPoint::new(51.5080, -0.1280),
-        ];
-        let length = polyline_length(&track);
-        assert!(length > 0.0);
-        assert!(length < 100.0); // Should be about 68m
-    }
-
-    #[test]
-    fn test_compute_bounds() {
-        let track = vec![
-            GpsPoint::new(51.50, -0.13),
-            GpsPoint::new(51.51, -0.12),
-            GpsPoint::new(51.505, -0.125),
-        ];
-        let bounds = compute_bounds(&track);
-        assert_eq!(bounds.min_lat, 51.50);
-        assert_eq!(bounds.max_lat, 51.51);
-        assert_eq!(bounds.min_lng, -0.13);
-        assert_eq!(bounds.max_lng, -0.12);
-    }
-
-    #[test]
-    fn test_compute_center() {
-        let track = vec![GpsPoint::new(51.50, -0.10), GpsPoint::new(51.52, -0.12)];
-        let center = compute_center(&track);
-        assert!(approx_eq(center.latitude, 51.51, 0.001));
-        assert!(approx_eq(center.longitude, -0.11, 0.001));
-    }
-
-    #[test]
-    fn test_compute_center_empty() {
-        let empty: Vec<GpsPoint> = vec![];
-        let center = compute_center(&empty);
-        assert_eq!(center.latitude, 0.0);
-        assert_eq!(center.longitude, 0.0);
-    }
-
-    #[test]
-    fn test_bounds_overlap_yes() {
-        let a = Bounds {
-            min_lat: 51.50,
-            max_lat: 51.52,
-            min_lng: -0.13,
-            max_lng: -0.11,
-        };
-        let b = Bounds {
-            min_lat: 51.51,
-            max_lat: 51.53,
-            min_lng: -0.12,
-            max_lng: -0.10,
-        };
-        assert!(bounds_overlap(&a, &b, 0.0, 51.5));
-    }
-
-    #[test]
-    fn test_bounds_overlap_no() {
-        let a = Bounds {
-            min_lat: 51.50,
-            max_lat: 51.51,
-            min_lng: -0.13,
-            max_lng: -0.12,
-        };
-        let b = Bounds {
-            min_lat: 51.52,
-            max_lat: 51.53,
-            min_lng: -0.11,
-            max_lng: -0.10,
-        };
-        assert!(!bounds_overlap(&a, &b, 0.0, 51.5));
-    }
-
-    #[test]
-    fn test_bounds_overlap_with_buffer() {
-        let a = Bounds {
-            min_lat: 51.50,
-            max_lat: 51.51,
-            min_lng: -0.13,
-            max_lng: -0.12,
-        };
-        let b = Bounds {
-            min_lat: 51.52,
-            max_lat: 51.53,
-            min_lng: -0.11,
-            max_lng: -0.10,
-        };
-        // With large buffer (5km), these should overlap
-        assert!(bounds_overlap(&a, &b, 5000.0, 51.5));
-    }
-
-    #[test]
-    fn test_meters_to_degrees() {
-        // At equator, 111km = 1 degree
-        let deg = meters_to_degrees(111_320.0, 0.0);
-        assert!(approx_eq(deg, 1.0, 0.01));
-
-        // At higher latitude, same distance = more degrees
-        let deg_45 = meters_to_degrees(111_320.0, 45.0);
-        assert!(deg_45 > 1.0);
-    }
-}

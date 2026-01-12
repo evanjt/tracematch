@@ -47,8 +47,10 @@ pub use crate::{Bounds, GpsPoint, MatchConfig, MatchResult, RouteGroup, RouteSig
 
 pub use crate::geo_utils::{
     bounds_overlap, compute_bounds, compute_bounds_tuple, compute_center, haversine_distance,
-    meters_to_degrees, polyline_length,
+    meters_to_degrees,
 };
+
+pub use crate::matching::calculate_route_distance;
 
 // =============================================================================
 // Route Matching Algorithms
@@ -223,7 +225,7 @@ pub fn resample_track(points: &[crate::GpsPoint], count: usize) -> Vec<crate::Gp
         return vec![points[0]];
     }
 
-    let total_length = polyline_length(points);
+    let total_length = calculate_route_distance(points);
     if total_length == 0.0 {
         return vec![points[0]; count];
     }

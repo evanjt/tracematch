@@ -41,7 +41,7 @@ use crate::{
 };
 
 #[cfg(feature = "persistence")]
-use crate::lru_cache::LruCache;
+use lru::LruCache;
 
 // ============================================================================
 // Types
@@ -160,8 +160,8 @@ impl PersistentRouteEngine {
             db_path: db_path.to_string(),
             activity_metadata: HashMap::new(),
             spatial_index: RTree::new(),
-            signature_cache: LruCache::new(200),
-            consensus_cache: LruCache::new(50),
+            signature_cache: LruCache::new(std::num::NonZeroUsize::new(200).unwrap()),
+            consensus_cache: LruCache::new(std::num::NonZeroUsize::new(50).unwrap()),
             groups: Vec::new(),
             activity_matches: HashMap::new(),
             activity_metrics: HashMap::new(),
@@ -543,7 +543,7 @@ impl PersistentRouteEngine {
         if let Some(sig) = &signature {
             self.store_signature(&id, sig)?;
             // Also cache it since we just computed it
-            self.signature_cache.insert(id.clone(), sig.clone());
+            self.signature_cache.put(id.clone(), sig.clone());
         }
 
         // Update in-memory state
@@ -586,7 +586,7 @@ impl PersistentRouteEngine {
 
         // Remove from memory
         self.activity_metadata.remove(id);
-        self.signature_cache.invalidate(&id.to_string());
+        self.signature_cache.pop(&id.to_string());
         self.consensus_cache.clear(); // Invalidate all consensus since groups may change
 
         self.rebuild_spatial_index();
@@ -842,13 +842,13 @@ impl PersistentRouteEngine {
     /// Get a signature, loading from DB if not cached.
     pub fn get_signature(&mut self, id: &str) -> Option<RouteSignature> {
         // Check cache first
-        if let Some(sig) = self.signature_cache.get_cloned(&id.to_string()) {
-            return Some(sig);
+        if let Some(sig) = self.signature_cache.get(&id.to_string()) {
+            return Some(sig.clone());
         }
 
         // Load from database
         let sig = self.load_signature_from_db(id)?;
-        self.signature_cache.insert(id.to_string(), sig.clone());
+        self.signature_cache.put(id.to_string(), sig.clone());
         Some(sig)
     }
 
@@ -1121,8 +1121,8 @@ impl PersistentRouteEngine {
     /// Get consensus route for a group, with caching.
     pub fn get_consensus_route(&mut self, group_id: &str) -> Option<Vec<GpsPoint>> {
         // Check cache
-        if let Some(consensus) = self.consensus_cache.get_cloned(&group_id.to_string()) {
-            return Some(consensus);
+        if let Some(consensus) = self.consensus_cache.get(&group_id.to_string()) {
+            return Some(consensus.clone());
         }
 
         // Find the group and extract activity IDs (to release the mutable borrow)
@@ -1150,7 +1150,7 @@ impl PersistentRouteEngine {
 
         // Cache result
         self.consensus_cache
-            .insert(group_id.to_string(), consensus.clone());
+            .put(group_id.to_string(), consensus.clone());
 
         Some(consensus)
     }

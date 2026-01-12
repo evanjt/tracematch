@@ -1,30 +1,30 @@
 //! # Modular Route Engine
 //!
-//! This module provides a refactored version of the RouteEngine with
-//! focused subcomponents for better testability and maintainability.
+//! This module provides a route engine with focused subcomponents for
+//! better testability and maintainability.
 //!
 //! ## Architecture
 //!
 //! The engine is composed of focused modules:
 //! - `ActivityStore` - Activity CRUD operations
-//! - `SignatureCache` - Lazy signature computation with dirty tracking
+//! - `SignatureStore` - Lazy signature computation with dirty tracking
 //! - `SpatialIndex` - R-tree for viewport queries
 //! - `RouteGrouper` - Union-Find clustering with incremental support
-//!
-//! ## Migration
-//!
-//! This module coexists with the legacy `engine.rs` during migration.
-//! Import from `crate::engine::modular` for the new implementation.
 
 pub mod activity_store;
 pub mod route_grouper;
-pub mod signature_cache;
+pub mod signature_store;
 pub mod spatial_index;
 
 pub use activity_store::{ActivityData, ActivityStore};
 pub use route_grouper::RouteGrouper;
-pub use signature_cache::SignatureCache;
+pub use signature_store::SignatureStore;
 pub use spatial_index::{ActivityBounds, SpatialIndex};
+
+#[cfg(test)]
+mod integration_tests {
+    // Tests are in tests/engine/ directory
+}
 
 use std::collections::HashMap;
 
@@ -38,12 +38,12 @@ use crate::{
 
 /// Modular route engine using extracted components.
 ///
-/// This is the refactored version of RouteEngine with clear separation
-/// of concerns. Each component handles a specific responsibility.
+/// This engine provides clear separation of concerns with each component
+/// handling a specific responsibility.
 pub struct ModularRouteEngine {
     // Core components
     pub activities: ActivityStore,
-    pub signatures: SignatureCache,
+    pub signatures: SignatureStore,
     pub grouper: RouteGrouper,
     pub spatial: SpatialIndex,
 
@@ -74,7 +74,7 @@ impl ModularRouteEngine {
     pub fn new() -> Self {
         Self {
             activities: ActivityStore::new(),
-            signatures: SignatureCache::new(),
+            signatures: SignatureStore::new(),
             grouper: RouteGrouper::new(),
             spatial: SpatialIndex::new(),
             sections: Vec::new(),
@@ -189,7 +189,7 @@ impl ModularRouteEngine {
     }
 
     // ========================================================================
-    // Signature Operations (delegates to SignatureCache)
+    // Signature Operations (delegates to SignatureStore)
     // ========================================================================
 
     /// Get a signature for an activity.
@@ -653,8 +653,6 @@ impl ModularRouteEngine {
 }
 
 /// Engine statistics for monitoring (modular engine version).
-///
-/// Note: The FFI-compatible version is in engine_legacy.rs.
 #[derive(Debug, Clone)]
 pub struct ModularEngineStats {
     pub activity_count: u32,
@@ -716,125 +714,4 @@ fn track_distance(track1: &[GpsPoint], track2: &[GpsPoint]) -> f64 {
         })
         .sum::<f64>()
         / sample_size as f64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_coords() -> Vec<GpsPoint> {
-        (0..10)
-            .map(|i| GpsPoint::new(51.5074 + i as f64 * 0.001, -0.1278))
-            .collect()
-    }
-
-    fn different_coords() -> Vec<GpsPoint> {
-        (0..10)
-            .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
-            .collect()
-    }
-
-    #[test]
-    fn test_add_and_query() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-
-        assert_eq!(engine.activity_count(), 1);
-        assert!(engine.has_activity("a"));
-    }
-
-    #[test]
-    fn test_grouping() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("b".to_string(), sample_coords(), "cycling".to_string());
-
-        let groups = engine.get_groups();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].activity_ids.len(), 2);
-    }
-
-    #[test]
-    fn test_different_routes() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("b".to_string(), different_coords(), "running".to_string());
-
-        let groups = engine.get_groups();
-        assert_eq!(groups.len(), 2);
-    }
-
-    #[test]
-    fn test_viewport_query() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("london".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("nyc".to_string(), different_coords(), "running".to_string());
-
-        let results = engine.query_viewport_raw(51.5, 51.52, -0.15, -0.10);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "london");
-    }
-
-    #[test]
-    fn test_remove_activity() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("b".to_string(), sample_coords(), "cycling".to_string());
-
-        engine.remove_activity("a");
-
-        assert_eq!(engine.activity_count(), 1);
-        assert!(!engine.has_activity("a"));
-        assert!(engine.has_activity("b"));
-    }
-
-    #[test]
-    fn test_clear() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-        engine.clear();
-
-        assert_eq!(engine.activity_count(), 0);
-    }
-
-    #[test]
-    fn test_incremental_grouping() {
-        let mut engine = ModularRouteEngine::new();
-
-        // Initial batch
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("b".to_string(), sample_coords(), "cycling".to_string());
-
-        let groups = engine.get_groups();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].activity_ids.len(), 2);
-
-        // Add more
-        engine.add_activity("c".to_string(), sample_coords(), "cycling".to_string());
-        engine.add_activity("d".to_string(), different_coords(), "cycling".to_string());
-
-        let groups = engine.get_groups();
-        assert_eq!(groups.len(), 2);
-
-        let large_group = groups.iter().find(|g| g.activity_ids.len() == 3);
-        assert!(large_group.is_some());
-    }
-
-    #[test]
-    fn test_route_names() {
-        let mut engine = ModularRouteEngine::new();
-        engine.add_activity("a".to_string(), sample_coords(), "cycling".to_string());
-
-        let groups = engine.get_groups();
-        let group_id = groups[0].group_id.clone();
-
-        engine.set_route_name(&group_id, "My Route");
-        assert_eq!(
-            engine.get_route_name(&group_id),
-            Some(&"My Route".to_string())
-        );
-
-        let groups = engine.get_groups();
-        assert_eq!(groups[0].custom_name, Some("My Route".to_string()));
-    }
 }

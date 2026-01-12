@@ -8,7 +8,7 @@
 
 use super::rtree::{build_rtree, IndexedPoint};
 use super::{FrequentSection, SectionConfig};
-use crate::geo_utils::polyline_length;
+use crate::matching::calculate_route_distance;
 use crate::GpsPoint;
 use log::info;
 use rstar::{PointDistance, RTree};
@@ -111,7 +111,7 @@ pub fn split_folding_sections(
             {
                 // Create outbound section (start to fold point)
                 let outbound_polyline = section.polyline[..fold_idx].to_vec();
-                let outbound_length = polyline_length(&outbound_polyline);
+                let outbound_length = calculate_route_distance(&outbound_polyline);
 
                 if outbound_length >= config.min_section_length {
                     let mut outbound = section.clone();
@@ -125,7 +125,7 @@ pub fn split_folding_sections(
 
                 // Create return section (fold point to end)
                 let return_polyline = section.polyline[fold_idx..].to_vec();
-                let return_length = polyline_length(&return_polyline);
+                let return_length = calculate_route_distance(&return_polyline);
 
                 if return_length >= config.min_section_length {
                     let mut return_section = section.clone();
@@ -448,7 +448,7 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
 
             // Compute distance of this portion
             let portion_distance = if end_idx > start_idx {
-                polyline_length(&section.polyline[start_idx..=end_idx])
+                calculate_route_distance(&section.polyline[start_idx..=end_idx])
             } else {
                 0.0
             };
@@ -508,7 +508,7 @@ fn split_section_by_density(
         // Extract the high-density portion
         let split_polyline = section.polyline[candidate.start_idx..=candidate.end_idx].to_vec();
         let split_density = section.point_density[candidate.start_idx..=candidate.end_idx].to_vec();
-        let split_distance = polyline_length(&split_polyline);
+        let split_distance = calculate_route_distance(&split_polyline);
 
         // Re-compute which activities overlap with this portion
         let mut split_activity_ids = Vec::new();
@@ -533,7 +533,7 @@ fn split_section_by_density(
                 }
 
                 // Need substantial overlap to count
-                let overlap_distance = polyline_length(&overlap_points);
+                let overlap_distance = calculate_route_distance(&overlap_points);
                 if overlap_distance >= split_distance * 0.5 {
                     split_activity_ids.push(activity_id.clone());
                     if !overlap_points.is_empty() {
