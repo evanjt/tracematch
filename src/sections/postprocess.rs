@@ -834,9 +834,13 @@ fn join_at_endpoints(
 
                 info!(
                     "[Sections] Joined {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
-                    section_i.id, section_j.id, merged_section.id,
-                    section_i.distance_meters, section_j.distance_meters,
-                    merged_distance, gap
+                    section_i.id,
+                    section_j.id,
+                    merged_section.id,
+                    section_i.distance_meters,
+                    section_j.distance_meters,
+                    merged_distance,
+                    gap
                 );
 
                 result.push(merged_section);
