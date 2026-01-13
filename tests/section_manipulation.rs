@@ -22,15 +22,11 @@ fn load_gpx(path: &Path) -> Vec<GpsPoint> {
     for line in content.lines() {
         if line.contains("<trkpt") {
             // Extract lat and lon attributes
-            if let (Some(lat_start), Some(lon_start)) =
-                (line.find("lat=\""), line.find("lon=\""))
-            {
+            if let (Some(lat_start), Some(lon_start)) = (line.find("lat=\""), line.find("lon=\"")) {
                 let lat_str = &line[lat_start + 5..];
                 let lon_str = &line[lon_start + 5..];
 
-                if let (Some(lat_end), Some(lon_end)) =
-                    (lat_str.find('"'), lon_str.find('"'))
-                {
+                if let (Some(lat_end), Some(lon_end)) = (lat_str.find('"'), lon_str.find('"')) {
                     if let (Ok(lat), Ok(lon)) = (
                         lat_str[..lat_end].parse::<f64>(),
                         lon_str[..lon_end].parse::<f64>(),
@@ -124,7 +120,10 @@ fn test_find_sections_in_route() {
         "Finding section in original track: {} matches",
         matches.len()
     );
-    assert!(!matches.is_empty(), "Section should be found in original track");
+    assert!(
+        !matches.is_empty(),
+        "Section should be found in original track"
+    );
 
     let m = &matches[0];
     println!(
@@ -200,8 +199,14 @@ fn test_split_section_at_index() {
 
     assert_eq!(split.first.polyline.len(), 51); // 0..=50
     assert_eq!(split.second.polyline.len(), 50); // 50..100
-    assert!(split.first.is_user_defined, "Split sections should be marked user-defined");
-    assert!(split.second.is_user_defined, "Split sections should be marked user-defined");
+    assert!(
+        split.first.is_user_defined,
+        "Split sections should be marked user-defined"
+    );
+    assert!(
+        split.second.is_user_defined,
+        "Split sections should be marked user-defined"
+    );
 
     // Test invalid splits
     assert!(
@@ -338,7 +343,10 @@ fn test_recalculate_section_polyline() {
     println!("  Original points: {}", section.polyline.len());
     println!("  Recalculated points: {}", recalculated.polyline.len());
     println!("  Original distance: {:.0}m", section.distance_meters);
-    println!("  Recalculated distance: {:.0}m", recalculated.distance_meters);
+    println!(
+        "  Recalculated distance: {:.0}m",
+        recalculated.distance_meters
+    );
     println!("  Version: {} -> {}", section.version, recalculated.version);
 
     assert_eq!(
@@ -373,7 +381,10 @@ fn test_find_sections_real_data() {
     // Load GPX files
     let tracks = load_gpx_files(gpx_dir, 50);
     if tracks.len() < 10 {
-        println!("Skipping test - not enough GPX files (need 10, have {})", tracks.len());
+        println!(
+            "Skipping test - not enough GPX files (need 10, have {})",
+            tracks.len()
+        );
         return;
     }
 

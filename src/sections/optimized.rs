@@ -18,9 +18,8 @@ use super::rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
 use super::{
     cluster_overlaps, compute_consensus_polyline, compute_initial_stability, consolidate_fragments,
     extract_all_activity_traces, filter_low_quality_sections, make_sections_exclusive,
-    merge_nearby_sections, remove_overlapping_sections, select_medoid,
-    split_at_gradient_changes, split_at_heading_changes, FrequentSection, FullTrackOverlap,
-    SectionConfig,
+    merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
+    split_at_heading_changes, FrequentSection, FullTrackOverlap, SectionConfig,
 };
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
@@ -861,7 +860,10 @@ pub struct SplitResult {
 ///
 /// # Returns
 /// SplitResult with two new sections, or None if split_index is invalid
-pub fn split_section_at_index(section: &FrequentSection, split_index: usize) -> Option<SplitResult> {
+pub fn split_section_at_index(
+    section: &FrequentSection,
+    split_index: usize,
+) -> Option<SplitResult> {
     if split_index == 0 || split_index >= section.polyline.len() - 1 {
         return None;
     }
@@ -994,11 +996,8 @@ pub fn recalculate_section_polyline(
     // Use the first trace as reference for consensus
     let reference = &traces[0];
 
-    let consensus = super::compute_consensus_polyline(
-        reference,
-        &traces,
-        config.proximity_threshold,
-    );
+    let consensus =
+        super::compute_consensus_polyline(reference, &traces, config.proximity_threshold);
 
     let new_distance = crate::matching::calculate_route_distance(&consensus.polyline);
     let new_confidence = compute_initial_stability(
