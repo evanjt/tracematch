@@ -746,7 +746,7 @@ fn join_at_endpoints(
     let mut merged: Vec<bool> = vec![false; sections.len()];
     let mut result: Vec<FrequentSection> = Vec::new();
 
-    for (_sport, indices) in &by_sport {
+    for indices in by_sport.values() {
         for &i in indices {
             if merged[i] {
                 continue;
@@ -786,10 +786,8 @@ fn join_at_endpoints(
                     (gap_j_end_i_start, false)
                 };
 
-                if min_gap <= max_gap {
-                    if best_match.is_none() || min_gap < best_match.unwrap().1 {
-                        best_match = Some((j, min_gap, is_i_to_j));
-                    }
+                if min_gap <= max_gap && (best_match.is_none() || min_gap < best_match.unwrap().1) {
+                    best_match = Some((j, min_gap, is_i_to_j));
                 }
             }
 
@@ -879,7 +877,7 @@ fn merge_short_fragments(
     let mut merged: Vec<bool> = vec![false; sections.len()];
     let mut result: Vec<FrequentSection> = Vec::new();
 
-    for (_sport, indices) in &by_sport {
+    for indices in by_sport.values() {
         for &i in indices {
             if merged[i] {
                 continue;
@@ -924,10 +922,10 @@ fn merge_short_fragments(
                     .min(haversine_distance(i_end, j_start))
                     .min(haversine_distance(i_end, j_end));
 
-                if min_gap <= LOOSE_ENDPOINT_GAP {
-                    if best_match.is_none() || min_gap < best_match.unwrap().1 {
-                        best_match = Some((j, min_gap));
-                    }
+                if min_gap <= LOOSE_ENDPOINT_GAP
+                    && (best_match.is_none() || min_gap < best_match.unwrap().1)
+                {
+                    best_match = Some((j, min_gap));
                 }
             }
 
@@ -1500,8 +1498,7 @@ fn trim_to_unclaimed(
     // Find which points are NOT claimed
     let mut unclaimed_mask: Vec<bool> = vec![true; section.polyline.len()];
 
-    for point_idx in 0..section.polyline.len() {
-        let point = &section.polyline[point_idx];
+    for (point_idx, point) in section.polyline.iter().enumerate() {
         let query = [point.latitude, point.longitude];
 
         for tree in claimed_trees {
