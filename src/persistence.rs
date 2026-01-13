@@ -1565,6 +1565,7 @@ impl PersistentRouteEngine {
     }
 
     /// Try to match a section in a specific direction.
+    #[allow(clippy::too_many_arguments)]
     fn try_match_direction(
         &self,
         section: &crate::CustomSection,
@@ -2487,7 +2488,7 @@ pub mod persistent_engine_ffi {
 
             // Use the existing trace extraction algorithm
             let traces = crate::sections::extract_all_activity_traces(
-                &[activity_id.clone()],
+                std::slice::from_ref(&activity_id),
                 &polyline,
                 &track_map,
             );

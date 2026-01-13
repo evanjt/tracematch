@@ -48,7 +48,7 @@ fn load_gpx_files(dir: &Path, limit: usize) -> Vec<(String, Vec<GpsPoint>)> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "gpx") {
+            if path.extension().is_some_and(|e| e == "gpx") {
                 let points = load_gpx(&path);
                 if points.len() >= 50 {
                     let name = path.file_stem().unwrap().to_string_lossy().to_string();

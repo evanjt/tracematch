@@ -22,9 +22,10 @@ fn load_fixture(name: &str) -> Vec<GpsPoint> {
     path.push("tests/fixtures/raw_traces");
     path.push(name);
 
-    let contents = fs::read_to_string(&path).expect(&format!("Failed to read fixture: {:?}", path));
-    let coords: Vec<Vec<f64>> =
-        serde_json::from_str(&contents).expect(&format!("Failed to parse fixture: {:?}", path));
+    let contents =
+        fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read fixture: {:?}", path));
+    let coords: Vec<Vec<f64>> = serde_json::from_str(&contents)
+        .unwrap_or_else(|_| panic!("Failed to parse fixture: {:?}", path));
 
     coords
         .into_iter()
@@ -618,10 +619,10 @@ fn test_investigate_start_section() {
         .map(|(id, points)| {
             // Take points until we've covered ~1km
             let mut distance = 0.0;
-            let mut start_points = vec![points[0].clone()];
+            let mut start_points = vec![points[0]];
             for i in 1..points.len() {
                 distance += tracematch::geo_utils::haversine_distance(&points[i - 1], &points[i]);
-                start_points.push(points[i].clone());
+                start_points.push(points[i]);
                 if distance >= 1000.0 {
                     break;
                 }
