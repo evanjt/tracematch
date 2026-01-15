@@ -538,6 +538,11 @@ fn build_route_groups(
                 sport_type,
                 bounds,
                 custom_name: None,
+                // Performance stats populated by engine when metrics are available
+                best_time: None,
+                avg_time: None,
+                best_pace: None,
+                best_activity_id: None,
             }
         })
         .collect()

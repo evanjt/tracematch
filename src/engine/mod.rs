@@ -248,13 +248,65 @@ impl ModularRouteEngine {
         self.grouper.get_route_name(route_id)
     }
 
-    /// Get groups as JSON string.
+    /// Get groups as JSON string with performance stats populated.
     pub fn get_groups_json(&mut self) -> String {
-        let groups = self.get_groups();
-        serde_json::to_string(groups).unwrap_or_else(|e| {
+        self.grouper
+            .ensure_computed(&mut self.signatures, &self.activities, &self.match_config);
+
+        // Clone groups and populate performance stats from activity_metrics
+        let groups_with_stats: Vec<RouteGroup> = self
+            .grouper
+            .groups()
+            .iter()
+            .map(|group| {
+                let mut g = group.clone();
+                self.populate_group_performance_stats(&mut g);
+                g
+            })
+            .collect();
+
+        serde_json::to_string(&groups_with_stats).unwrap_or_else(|e| {
             warn!("Failed to serialize route groups: {}", e);
             "[]".to_string()
         })
+    }
+
+    /// Populate performance statistics for a route group from activity metrics.
+    fn populate_group_performance_stats(&self, group: &mut RouteGroup) {
+        if self.activity_metrics.is_empty() {
+            return;
+        }
+
+        let mut times: Vec<f64> = Vec::new();
+        let mut best_speed: f64 = 0.0;
+        let mut best_time_val: f64 = f64::MAX;
+        let mut best_id: Option<String> = None;
+
+        for activity_id in &group.activity_ids {
+            if let Some(metrics) = self.activity_metrics.get(activity_id) {
+                let moving_time = metrics.moving_time as f64;
+                if moving_time > 0.0 {
+                    times.push(moving_time);
+
+                    // Calculate speed (m/s)
+                    let speed = metrics.distance / moving_time;
+
+                    // Track best (fastest) by speed
+                    if speed > best_speed {
+                        best_speed = speed;
+                        best_time_val = moving_time;
+                        best_id = Some(activity_id.clone());
+                    }
+                }
+            }
+        }
+
+        if !times.is_empty() {
+            group.best_time = Some(best_time_val);
+            group.avg_time = Some(times.iter().sum::<f64>() / times.len() as f64);
+            group.best_pace = Some(best_speed);
+            group.best_activity_id = best_id;
+        }
     }
 
     // ========================================================================

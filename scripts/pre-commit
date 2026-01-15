@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Pre-commit hook for tracematch
+# Runs the same checks as CI to catch issues before push
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+echo "→ cargo fmt --check"
+if ! cargo fmt --check; then
+    echo ""
+    echo "Formatting issues found. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "→ cargo clippy -- -D warnings"
+if ! cargo clippy -- -D warnings; then
+    echo ""
+    echo "Clippy found issues. Fix the warnings above."
+    exit 1
+fi
+
+echo "✓ All checks passed"
