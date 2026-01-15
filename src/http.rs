@@ -136,8 +136,7 @@ pub struct ActivityFetcher {
 impl ActivityFetcher {
     /// Create a new activity fetcher with the given API key
     pub fn new(api_key: &str) -> Result<Self, String> {
-        let auth =
-            base64::engine::general_purpose::STANDARD.encode(format!("API_KEY:{}", api_key));
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("API_KEY:{}", api_key));
 
         let client = Client::builder()
             .pool_max_idle_per_host(MAX_CONCURRENCY * 2)

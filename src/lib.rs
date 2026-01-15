@@ -473,6 +473,18 @@ pub struct RouteGroup {
     pub bounds: Option<Bounds>,
     /// User-defined custom name for this route (None = use auto-generated name)
     pub custom_name: Option<String>,
+    /// Best moving time in seconds (fastest completion)
+    #[serde(default)]
+    pub best_time: Option<f64>,
+    /// Average moving time in seconds
+    #[serde(default)]
+    pub avg_time: Option<f64>,
+    /// Best pace/speed in m/s (from fastest activity)
+    #[serde(default)]
+    pub best_pace: Option<f64>,
+    /// Activity ID with the best performance
+    #[serde(default)]
+    pub best_activity_id: Option<String>,
 }
 
 /// Match info for an activity within a route group.

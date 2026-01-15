@@ -397,6 +397,11 @@ impl PersistentRouteEngine {
                         sport_type: row.get(3)?,
                         bounds,
                         custom_name: None, // Will be loaded separately from route_names table
+                        // Performance stats populated by engine when metrics are available
+                        best_time: None,
+                        avg_time: None,
+                        best_pace: None,
+                        best_activity_id: None,
                     })
                 })?
                 .filter_map(|r| r.ok())

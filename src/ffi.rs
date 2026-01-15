@@ -9,6 +9,20 @@ use crate::{
 };
 use log::{debug, info};
 
+// ============================================================================
+// Callback Interfaces
+// ============================================================================
+
+/// Callback interface for receiving progress updates during fetch operations.
+/// Implement this in TypeScript/Kotlin/Swift to receive real-time updates.
+#[uniffi::export(callback_interface)]
+pub trait FetchProgressCallback: Send + Sync {
+    /// Called when a single activity fetch completes.
+    /// - completed: Number of activities fetched so far
+    /// - total: Total number of activities to fetch
+    fn on_progress(&self, completed: u32, total: u32);
+}
+
 #[cfg(feature = "parallel")]
 use crate::grouping::{group_incremental, group_signatures_parallel};
 
@@ -569,7 +583,10 @@ pub struct FfiActivityMapResult {
 /// Automatically retries on 429 errors with exponential backoff.
 #[cfg(feature = "http")]
 #[uniffi::export]
-pub fn fetch_activity_maps(api_key: String, activity_ids: Vec<String>) -> Vec<FfiActivityMapResult> {
+pub fn fetch_activity_maps(
+    api_key: String,
+    activity_ids: Vec<String>,
+) -> Vec<FfiActivityMapResult> {
     init_logging();
     info!(
         "[RouteMatcherRust] fetch_activity_maps called for {} activities",
@@ -577,6 +594,51 @@ pub fn fetch_activity_maps(api_key: String, activity_ids: Vec<String>) -> Vec<Ff
     );
 
     let results = crate::http::fetch_activity_maps_sync(api_key, activity_ids, None);
+
+    // Convert to FFI-friendly format (flat arrays)
+    results
+        .into_iter()
+        .map(|r| FfiActivityMapResult {
+            activity_id: r.activity_id,
+            bounds: r
+                .bounds
+                .map_or(vec![], |b| vec![b.ne[0], b.ne[1], b.sw[0], b.sw[1]]),
+            latlngs: r.latlngs.map_or(vec![], |coords| {
+                coords.into_iter().flat_map(|p| vec![p[0], p[1]]).collect()
+            }),
+            success: r.success,
+            error: r.error,
+        })
+        .collect()
+}
+
+/// Fetch map data with real-time progress callbacks.
+///
+/// Same as fetch_activity_maps but calls the progress callback after each
+/// activity is fetched, allowing the UI to show real-time progress.
+#[cfg(feature = "http")]
+#[uniffi::export]
+pub fn fetch_activity_maps_with_progress(
+    api_key: String,
+    activity_ids: Vec<String>,
+    callback: Box<dyn FetchProgressCallback>,
+) -> Vec<FfiActivityMapResult> {
+    use std::sync::Arc;
+
+    init_logging();
+    info!(
+        "[RouteMatcherRust] fetch_activity_maps_with_progress called for {} activities",
+        activity_ids.len()
+    );
+
+    // Wrap the callback to match the expected type
+    let callback = Arc::new(callback);
+    let progress_callback: crate::http::ProgressCallback = Arc::new(move |completed, total| {
+        callback.on_progress(completed, total);
+    });
+
+    let results =
+        crate::http::fetch_activity_maps_sync(api_key, activity_ids, Some(progress_callback));
 
     // Convert to FFI-friendly format (flat arrays)
     results
