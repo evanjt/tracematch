@@ -1112,15 +1112,15 @@ impl PersistentRouteEngine {
                 })
                 .collect();
 
-            // Detect sections
-            let sections = crate::sections::detect_sections_from_tracks(
+            // Detect sections using multi-scale algorithm
+            let result = crate::sections::detect_sections_multiscale(
                 &tracks,
                 &sport_map,
                 &groups,
                 &section_config,
             );
 
-            tx.send(sections).ok();
+            tx.send(result.sections).ok();
         });
 
         SectionDetectionHandle { receiver: rx }
