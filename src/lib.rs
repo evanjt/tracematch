@@ -116,6 +116,12 @@ pub use heatmap::{
     HeatmapCell, HeatmapConfig, HeatmapResult, RouteRef,
 };
 
+// HTTP client for activity fetching from intervals.icu
+#[cfg(feature = "http")]
+pub mod http;
+#[cfg(feature = "http")]
+pub use http::{ActivityFetcher, ActivityMapResult, MapBounds};
+
 // FFI bindings for mobile platforms (iOS/Android)
 #[cfg(feature = "ffi")]
 pub mod ffi;

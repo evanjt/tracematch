@@ -46,22 +46,22 @@ echo "🔨 Building all Android architectures in parallel..."
 
 # arm64-v8a (most modern Android devices)
 echo "  → arm64-v8a (physical devices)"
-cargo ndk -t arm64-v8a build --release --features full &
+cargo ndk -t arm64-v8a build --release  &
 PIDS+=($!)
 
 # armeabi-v7a (older 32-bit devices)
 echo "  → armeabi-v7a (legacy 32-bit devices)"
-cargo ndk -t armeabi-v7a build --release --features full &
+cargo ndk -t armeabi-v7a build --release  &
 PIDS+=($!)
 
 # x86_64 (emulator on Intel/AMD)
 echo "  → x86_64 (emulator)"
-cargo ndk -t x86_64 build --release --features full &
+cargo ndk -t x86_64 build --release  &
 PIDS+=($!)
 
 # x86 (older emulators)
 echo "  → x86 (legacy emulator)"
-cargo ndk -t x86 build --release --features full &
+cargo ndk -t x86 build --release  &
 PIDS+=($!)
 
 # Wait for all builds to complete

@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${PROJECT_DIR}/target/android"
-MODULE_DIR="${PROJECT_DIR}/../../modules/tracematch-native/android/src/main"
+MODULE_DIR="${PROJECT_DIR}/../veloq/modules/route-matcher-native/android/src/main"
 
 cd "$PROJECT_DIR"
 
@@ -27,14 +27,14 @@ ARCH=${1:-"both"}
 
 build_arm64() {
     echo "🦀 Building for arm64-v8a (physical devices)..."
-    cargo ndk -t arm64-v8a build --release --features full
+    cargo ndk -t arm64-v8a build --release
     mkdir -p "$OUTPUT_DIR/jniLibs/arm64-v8a"
     cp target/aarch64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/arm64-v8a/"
 }
 
 build_x86_64() {
     echo "🦀 Building for x86_64 (emulators)..."
-    cargo ndk -t x86_64 build --release --features full
+    cargo ndk -t x86_64 build --release
     mkdir -p "$OUTPUT_DIR/jniLibs/x86_64"
     cp target/x86_64-linux-android/release/libtracematch.so "$OUTPUT_DIR/jniLibs/x86_64/"
 }

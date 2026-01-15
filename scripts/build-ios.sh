@@ -75,15 +75,15 @@ fi
 # Build for all iOS targets (only if libraries weren't cached)
 if [ "$LIBS_EXIST" -eq 0 ]; then
 echo "Building for iOS device (aarch64-apple-ios)..."
-cargo build --release --target aarch64-apple-ios --features full
+cargo build --release --target aarch64-apple-ios 
 
 echo ""
 echo "Building for iOS simulator - Apple Silicon (aarch64-apple-ios-sim)..."
-cargo build --release --target aarch64-apple-ios-sim --features full
+cargo build --release --target aarch64-apple-ios-sim 
 
 echo ""
 echo "Building for iOS simulator - Intel (x86_64-apple-ios)..."
-cargo build --release --target x86_64-apple-ios --features full
+cargo build --release --target x86_64-apple-ios 
 fi
 
 # Create output directories

@@ -4,7 +4,7 @@ set -e
 # Install compiled Android libraries to the Expo native module
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MODULE_DIR="${PROJECT_DIR}/../../modules/tracematch-native/android/src/main"
+MODULE_DIR="${PROJECT_DIR}/../veloq/modules/route-matcher-native/android/src/main"
 
 echo "Installing Android libraries to native module..."
 
