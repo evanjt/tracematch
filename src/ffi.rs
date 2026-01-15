@@ -541,3 +541,56 @@ pub fn ffi_recalculate_section_polyline(
 ) -> crate::FrequentSection {
     crate::recalculate_section_polyline(&section, &config)
 }
+
+// =============================================================================
+// HTTP Activity Fetching (requires "http" feature)
+// =============================================================================
+
+/// Result of fetching activity map data from intervals.icu
+#[cfg(feature = "http")]
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiActivityMapResult {
+    pub activity_id: String,
+    /// Bounds as [ne_lat, ne_lng, sw_lat, sw_lng] or empty if no bounds
+    pub bounds: Vec<f64>,
+    /// GPS coordinates as flat array [lat1, lng1, lat2, lng2, ...]
+    pub latlngs: Vec<f64>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Fetch map data for multiple activities in parallel.
+///
+/// This function respects intervals.icu rate limits:
+/// - 30 req/s burst limit
+/// - 131 req/10s sustained limit
+///
+/// Uses connection pooling and parallel fetching for maximum performance.
+/// Automatically retries on 429 errors with exponential backoff.
+#[cfg(feature = "http")]
+#[uniffi::export]
+pub fn fetch_activity_maps(api_key: String, activity_ids: Vec<String>) -> Vec<FfiActivityMapResult> {
+    init_logging();
+    info!(
+        "[RouteMatcherRust] fetch_activity_maps called for {} activities",
+        activity_ids.len()
+    );
+
+    let results = crate::http::fetch_activity_maps_sync(api_key, activity_ids, None);
+
+    // Convert to FFI-friendly format (flat arrays)
+    results
+        .into_iter()
+        .map(|r| FfiActivityMapResult {
+            activity_id: r.activity_id,
+            bounds: r
+                .bounds
+                .map_or(vec![], |b| vec![b.ne[0], b.ne[1], b.sw[0], b.sw[1]]),
+            latlngs: r.latlngs.map_or(vec![], |coords| {
+                coords.into_iter().flat_map(|p| vec![p[0], p[1]]).collect()
+            }),
+            success: r.success,
+            error: r.error,
+        })
+        .collect()
+}
