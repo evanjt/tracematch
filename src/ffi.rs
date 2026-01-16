@@ -581,10 +581,14 @@ pub struct FfiActivityMapResult {
 ///
 /// Uses connection pooling and parallel fetching for maximum performance.
 /// Automatically retries on 429 errors with exponential backoff.
+///
+/// The auth_header should be a pre-formatted Authorization header value:
+/// - For API key auth: "Basic {base64(API_KEY:key)}"
+/// - For OAuth: "Bearer {access_token}"
 #[cfg(feature = "http")]
 #[uniffi::export]
 pub fn fetch_activity_maps(
-    api_key: String,
+    auth_header: String,
     activity_ids: Vec<String>,
 ) -> Vec<FfiActivityMapResult> {
     init_logging();
@@ -593,7 +597,7 @@ pub fn fetch_activity_maps(
         activity_ids.len()
     );
 
-    let results = crate::http::fetch_activity_maps_sync(api_key, activity_ids, None);
+    let results = crate::http::fetch_activity_maps_sync(auth_header, activity_ids, None);
 
     // Convert to FFI-friendly format (flat arrays)
     results
@@ -616,10 +620,14 @@ pub fn fetch_activity_maps(
 ///
 /// Same as fetch_activity_maps but calls the progress callback after each
 /// activity is fetched, allowing the UI to show real-time progress.
+///
+/// The auth_header should be a pre-formatted Authorization header value:
+/// - For API key auth: "Basic {base64(API_KEY:key)}"
+/// - For OAuth: "Bearer {access_token}"
 #[cfg(feature = "http")]
 #[uniffi::export]
 pub fn fetch_activity_maps_with_progress(
-    api_key: String,
+    auth_header: String,
     activity_ids: Vec<String>,
     callback: Box<dyn FetchProgressCallback>,
 ) -> Vec<FfiActivityMapResult> {
@@ -638,7 +646,7 @@ pub fn fetch_activity_maps_with_progress(
     });
 
     let results =
-        crate::http::fetch_activity_maps_sync(api_key, activity_ids, Some(progress_callback));
+        crate::http::fetch_activity_maps_sync(auth_header, activity_ids, Some(progress_callback));
 
     // Convert to FFI-friendly format (flat arrays)
     results

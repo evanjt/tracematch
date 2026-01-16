@@ -134,10 +134,15 @@ pub struct ActivityFetcher {
 }
 
 impl ActivityFetcher {
-    /// Create a new activity fetcher with the given API key
+    /// Create a new activity fetcher with the given API key (Basic auth)
     pub fn new(api_key: &str) -> Result<Self, String> {
         let auth = base64::engine::general_purpose::STANDARD.encode(format!("API_KEY:{}", api_key));
+        Self::with_auth_header(format!("Basic {}", auth))
+    }
 
+    /// Create a new activity fetcher with a pre-formatted auth header
+    /// Supports both "Basic ..." and "Bearer ..." formats
+    pub fn with_auth_header(auth_header: String) -> Result<Self, String> {
         let client = Client::builder()
             .pool_max_idle_per_host(MAX_CONCURRENCY * 2)
             .pool_idle_timeout(Duration::from_secs(60))
@@ -148,7 +153,7 @@ impl ActivityFetcher {
 
         Ok(Self {
             client,
-            auth_header: format!("Basic {}", auth),
+            auth_header,
             rate_limiter: Arc::new(DispatchRateLimiter::new()),
         })
     }
@@ -388,9 +393,10 @@ impl ActivityFetcher {
 }
 
 /// Synchronous wrapper for FFI - runs the async code on a tokio runtime
+/// Accepts a pre-formatted auth header (e.g., "Basic ..." or "Bearer ...")
 #[cfg(feature = "ffi")]
 pub fn fetch_activity_maps_sync(
-    api_key: String,
+    auth_header: String,
     activity_ids: Vec<String>,
     on_progress: Option<ProgressCallback>,
 ) -> Vec<ActivityMapResult> {
@@ -423,7 +429,7 @@ pub fn fetch_activity_maps_sync(
         }
     };
 
-    let fetcher = match ActivityFetcher::new(&api_key) {
+    let fetcher = match ActivityFetcher::with_auth_header(auth_header) {
         Ok(f) => f,
         Err(e) => {
             warn!("Failed to create fetcher: {}", e);

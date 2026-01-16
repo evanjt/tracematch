@@ -490,6 +490,12 @@ fn convert_cluster_to_section(
         config.proximity_threshold,
     );
 
+    // Calculate consensus distance and filter by min length
+    let consensus_distance = calculate_route_distance(&consensus.polyline);
+    if consensus_distance < config.min_section_length {
+        return None;
+    }
+
     let stability = super::compute_initial_stability(
         consensus.observation_count,
         consensus.average_spread,
@@ -506,7 +512,7 @@ fn convert_cluster_to_section(
         activity_portions: vec![], // Skip for optimized mode
         route_ids: vec![],
         visit_count: cluster.overlaps.len() as u32 + 1,
-        distance_meters: calculate_route_distance(&representative_polyline),
+        distance_meters: consensus_distance, // Use consensus distance, not representative
         activity_traces,
         confidence: consensus.confidence,
         observation_count: consensus.observation_count,
