@@ -734,8 +734,188 @@ pub fn detect_sections_from_tracks(
     all_sections
 }
 
-/// Detect sections at multiple scales with support for potential sections.
-/// This is the new flagship entry point for section detection.
+/// Result from processing a single scale preset
+struct ScaleResult {
+    sections: Vec<FrequentSection>,
+    potentials: Vec<PotentialSection>,
+    overlaps_found: u32,
+    scale_name: String,
+}
+
+/// Process a single scale preset (extracted for parallel execution)
+fn process_scale_preset(
+    preset: &ScalePreset,
+    tracks_by_sport: &HashMap<String, Vec<(&str, &[GpsPoint])>>,
+    track_map: &HashMap<String, Vec<GpsPoint>>,
+    activity_to_route: &HashMap<&str, &str>,
+    config: &SectionConfig,
+) -> ScaleResult {
+    info!(
+        "[MultiScale] Processing {} scale: {}-{}m, min {} activities",
+        preset.name, preset.min_length, preset.max_length, preset.min_activities
+    );
+
+    let scale_config = SectionConfig {
+        min_section_length: preset.min_length,
+        max_section_length: preset.max_length,
+        min_activities: preset.min_activities,
+        ..config.clone()
+    };
+
+    let mut scale_sections: Vec<FrequentSection> = Vec::new();
+    let mut scale_potentials: Vec<PotentialSection> = Vec::new();
+    let mut overlaps_found = 0u32;
+
+    // Process each sport type
+    for (sport_type, sport_tracks) in tracks_by_sport {
+        // For potentials, we only need 1 activity; for sections, use preset.min_activities
+        let min_tracks_for_processing = if config.include_potentials {
+            1
+        } else {
+            preset.min_activities as usize
+        };
+        if sport_tracks.len() < min_tracks_for_processing {
+            continue;
+        }
+
+        #[cfg(feature = "parallel")]
+        let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
+            .par_iter()
+            .map(|(_, pts)| build_rtree(pts))
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
+            .iter()
+            .map(|(_, pts)| build_rtree(pts))
+            .collect();
+
+        // Generate pairs and find overlaps
+        let pairs: Vec<(usize, usize)> = (0..sport_tracks.len())
+            .flat_map(|i| ((i + 1)..sport_tracks.len()).map(move |j| (i, j)))
+            .collect();
+
+        #[cfg(feature = "parallel")]
+        let overlaps: Vec<FullTrackOverlap> = pairs
+            .into_par_iter()
+            .filter_map(|(i, j)| {
+                let (id_a, track_a) = sport_tracks[i];
+                let (id_b, track_b) = sport_tracks[j];
+                if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
+                    return None;
+                }
+                find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let overlaps: Vec<FullTrackOverlap> = pairs
+            .into_iter()
+            .filter_map(|(i, j)| {
+                let (id_a, track_a) = sport_tracks[i];
+                let (id_b, track_b) = sport_tracks[j];
+                if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
+                    return None;
+                }
+                find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
+            })
+            .collect();
+
+        overlaps_found += overlaps.len() as u32;
+
+        // Cluster overlaps
+        let clusters = cluster_overlaps(overlaps, &scale_config);
+
+        // Separate into confirmed sections and potential sections
+        let (significant, potential): (Vec<_>, Vec<_>) = clusters
+            .into_iter()
+            .partition(|c| c.activity_ids.len() >= preset.min_activities as usize);
+
+        // Process confirmed sections
+        #[cfg(feature = "parallel")]
+        let sport_sections: Vec<FrequentSection> = significant
+            .into_par_iter()
+            .enumerate()
+            .filter_map(|(idx, cluster)| {
+                process_cluster(
+                    idx,
+                    cluster,
+                    sport_type,
+                    track_map,
+                    activity_to_route,
+                    &scale_config,
+                    Some(&preset.name),
+                )
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let sport_sections: Vec<FrequentSection> = significant
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, cluster)| {
+                process_cluster(
+                    idx,
+                    cluster,
+                    sport_type,
+                    track_map,
+                    activity_to_route,
+                    &scale_config,
+                    Some(&preset.name),
+                )
+            })
+            .collect();
+
+        scale_sections.extend(sport_sections);
+
+        // Process potential sections if enabled
+        if config.include_potentials {
+            for (idx, cluster) in potential.into_iter().enumerate() {
+                // Only include clusters with 1-2 activities
+                let activity_count = cluster.activity_ids.len();
+                if activity_count >= 1 && activity_count < preset.min_activities as usize {
+                    if let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster)) {
+                        if !rep_polyline.is_empty() {
+                            let distance = calculate_route_distance(&rep_polyline);
+                            if distance >= preset.min_length && distance <= preset.max_length {
+                                scale_potentials.push(PotentialSection {
+                                    id: format!(
+                                        "pot_{}_{}_{}",
+                                        preset.name,
+                                        sport_type.to_lowercase(),
+                                        idx
+                                    ),
+                                    sport_type: sport_type.to_string(),
+                                    polyline: rep_polyline,
+                                    activity_ids: cluster.activity_ids.into_iter().collect(),
+                                    visit_count: activity_count as u32,
+                                    distance_meters: distance,
+                                    confidence: 0.3 + (activity_count as f64 * 0.2), // 0.5 for 1, 0.7 for 2
+                                    scale: preset.name.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    info!(
+        "[MultiScale] {} scale: {} sections, {} potentials",
+        preset.name,
+        scale_sections.len(),
+        scale_potentials.len()
+    );
+
+    ScaleResult {
+        sections: scale_sections,
+        potentials: scale_potentials,
+        overlaps_found,
+        scale_name: preset.name.clone(),
+    }
+}
+
 pub fn detect_sections_multiscale(
     tracks: &[(String, Vec<GpsPoint>)],
     sport_types: &HashMap<String, String>,
@@ -748,8 +928,6 @@ pub fn detect_sections_multiscale(
         config.scale_presets.len()
     );
 
-    let mut all_sections: Vec<FrequentSection> = Vec::new();
-    let mut all_potentials: Vec<PotentialSection> = Vec::new();
     let mut stats = DetectionStats {
         activities_processed: tracks.len() as u32,
         overlaps_found: 0,
@@ -803,171 +981,51 @@ pub fn detect_sections_multiscale(
             .push((activity_id.as_str(), points.as_slice()));
     }
 
-    // Process each scale preset
-    for preset in &config.scale_presets {
-        info!(
-            "[MultiScale] Processing {} scale: {}-{}m, min {} activities",
-            preset.name, preset.min_length, preset.max_length, preset.min_activities
-        );
+    // Process all scale presets IN PARALLEL
+    #[cfg(feature = "parallel")]
+    let scale_results: Vec<ScaleResult> = config
+        .scale_presets
+        .par_iter()
+        .map(|preset| {
+            process_scale_preset(
+                preset,
+                &tracks_by_sport,
+                &track_map,
+                &activity_to_route,
+                config,
+            )
+        })
+        .collect();
 
-        let scale_config = SectionConfig {
-            min_section_length: preset.min_length,
-            max_section_length: preset.max_length,
-            min_activities: preset.min_activities,
-            ..config.clone()
-        };
+    #[cfg(not(feature = "parallel"))]
+    let scale_results: Vec<ScaleResult> = config
+        .scale_presets
+        .iter()
+        .map(|preset| {
+            process_scale_preset(
+                preset,
+                &tracks_by_sport,
+                &track_map,
+                &activity_to_route,
+                config,
+            )
+        })
+        .collect();
 
-        let mut scale_sections = 0u32;
-        let mut scale_potentials = 0u32;
+    // Merge results from all scales
+    let mut all_sections: Vec<FrequentSection> = Vec::new();
+    let mut all_potentials: Vec<PotentialSection> = Vec::new();
 
-        // Process each sport type
-        for (sport_type, sport_tracks) in &tracks_by_sport {
-            // For potentials, we only need 1 activity; for sections, use preset.min_activities
-            let min_tracks_for_processing = if config.include_potentials {
-                1
-            } else {
-                preset.min_activities as usize
-            };
-            if sport_tracks.len() < min_tracks_for_processing {
-                continue;
-            }
-
-            #[cfg(feature = "parallel")]
-            let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
-                .par_iter()
-                .map(|(_, pts)| build_rtree(pts))
-                .collect();
-
-            #[cfg(not(feature = "parallel"))]
-            let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
-                .iter()
-                .map(|(_, pts)| build_rtree(pts))
-                .collect();
-
-            // Generate pairs and find overlaps
-            let pairs: Vec<(usize, usize)> = (0..sport_tracks.len())
-                .flat_map(|i| ((i + 1)..sport_tracks.len()).map(move |j| (i, j)))
-                .collect();
-
-            #[cfg(feature = "parallel")]
-            let overlaps: Vec<FullTrackOverlap> = pairs
-                .into_par_iter()
-                .filter_map(|(i, j)| {
-                    let (id_a, track_a) = sport_tracks[i];
-                    let (id_b, track_b) = sport_tracks[j];
-                    if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
-                        return None;
-                    }
-                    find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
-                })
-                .collect();
-
-            #[cfg(not(feature = "parallel"))]
-            let overlaps: Vec<FullTrackOverlap> = pairs
-                .into_iter()
-                .filter_map(|(i, j)| {
-                    let (id_a, track_a) = sport_tracks[i];
-                    let (id_b, track_b) = sport_tracks[j];
-                    if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
-                        return None;
-                    }
-                    find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
-                })
-                .collect();
-
-            stats.overlaps_found += overlaps.len() as u32;
-
-            // Cluster overlaps
-            let clusters = cluster_overlaps(overlaps, &scale_config);
-
-            // Separate into confirmed sections and potential sections
-            let (significant, potential): (Vec<_>, Vec<_>) = clusters
-                .into_iter()
-                .partition(|c| c.activity_ids.len() >= preset.min_activities as usize);
-
-            // Process confirmed sections
-            #[cfg(feature = "parallel")]
-            let sport_sections: Vec<FrequentSection> = significant
-                .into_par_iter()
-                .enumerate()
-                .filter_map(|(idx, cluster)| {
-                    process_cluster(
-                        idx,
-                        cluster,
-                        sport_type,
-                        &track_map,
-                        &activity_to_route,
-                        &scale_config,
-                        Some(&preset.name),
-                    )
-                })
-                .collect();
-
-            #[cfg(not(feature = "parallel"))]
-            let sport_sections: Vec<FrequentSection> = significant
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, cluster)| {
-                    process_cluster(
-                        idx,
-                        cluster,
-                        sport_type,
-                        &track_map,
-                        &activity_to_route,
-                        &scale_config,
-                        Some(&preset.name),
-                    )
-                })
-                .collect();
-
-            scale_sections += sport_sections.len() as u32;
-            all_sections.extend(sport_sections);
-
-            // Process potential sections if enabled
-            if config.include_potentials {
-                for (idx, cluster) in potential.into_iter().enumerate() {
-                    // Only include clusters with 1-2 activities
-                    let activity_count = cluster.activity_ids.len();
-                    if activity_count >= 1 && activity_count < preset.min_activities as usize {
-                        if let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster)) {
-                            if !rep_polyline.is_empty() {
-                                let distance = calculate_route_distance(&rep_polyline);
-                                if distance >= preset.min_length && distance <= preset.max_length {
-                                    all_potentials.push(PotentialSection {
-                                        id: format!(
-                                            "pot_{}_{}_{}",
-                                            preset.name,
-                                            sport_type.to_lowercase(),
-                                            idx
-                                        ),
-                                        sport_type: sport_type.to_string(),
-                                        polyline: rep_polyline,
-                                        activity_ids: cluster.activity_ids.into_iter().collect(),
-                                        visit_count: activity_count as u32,
-                                        distance_meters: distance,
-                                        confidence: 0.3 + (activity_count as f64 * 0.2), // 0.5 for 1, 0.7 for 2
-                                        scale: preset.name.clone(),
-                                    });
-                                    scale_potentials += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+    for result in scale_results {
+        stats.overlaps_found += result.overlaps_found;
         stats
             .sections_by_scale
-            .insert(preset.name.clone(), scale_sections);
+            .insert(result.scale_name.clone(), result.sections.len() as u32);
         stats
             .potentials_by_scale
-            .insert(preset.name.clone(), scale_potentials);
-
-        info!(
-            "[MultiScale] {} scale: {} sections, {} potentials",
-            preset.name, scale_sections, scale_potentials
-        );
+            .insert(result.scale_name, result.potentials.len() as u32);
+        all_sections.extend(result.sections);
+        all_potentials.extend(result.potentials);
     }
 
     // Apply post-processing
@@ -1446,6 +1504,20 @@ fn remove_overlapping_sections_hierarchical(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
+    #[cfg(feature = "parallel")]
+    let rtrees: Vec<rstar::RTree<IndexedPoint>> = {
+        use rayon::prelude::*;
+        sections
+            .par_iter()
+            .map(|s| build_rtree(&s.polyline))
+            .collect()
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let rtrees: Vec<rstar::RTree<IndexedPoint>> =
+        sections.iter().map(|s| build_rtree(&s.polyline)).collect();
+
     let mut keep = vec![true; sections.len()];
 
     for i in 0..sections.len() {
@@ -1453,15 +1525,17 @@ fn remove_overlapping_sections_hierarchical(
             continue;
         }
 
+        let tree_i = &rtrees[i]; // Use pre-computed R-tree (O(1) lookup)
+
         for j in (i + 1)..sections.len() {
             if !keep[j] {
                 continue;
             }
 
             // Check if shorter section (j) is contained in longer section (i)
-            let containment = compute_polyline_containment(
+            let containment = compute_polyline_containment_with_rtree(
                 &sections[j].polyline,
-                &sections[i].polyline,
+                tree_i,
                 config.proximity_threshold,
             );
 
@@ -1490,7 +1564,38 @@ fn remove_overlapping_sections_hierarchical(
         .collect()
 }
 
+/// Compute what fraction of polyline A is contained within proximity of polyline B (using R-tree).
+/// O(a * log b) instead of O(a * b).
+fn compute_polyline_containment_with_rtree(
+    polyline_a: &[GpsPoint],
+    tree_b: &rstar::RTree<IndexedPoint>,
+    proximity_threshold: f64,
+) -> f64 {
+    use rstar::PointDistance;
+
+    if polyline_a.is_empty() {
+        return 0.0;
+    }
+
+    let threshold_deg = proximity_threshold / 111_000.0;
+    let threshold_deg_sq = threshold_deg * threshold_deg;
+
+    let mut contained_count = 0;
+    for point_a in polyline_a {
+        let query = [point_a.latitude, point_a.longitude];
+        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
+            if nearest.distance_2(&query) <= threshold_deg_sq {
+                contained_count += 1;
+            }
+        }
+    }
+
+    contained_count as f64 / polyline_a.len() as f64
+}
+
 /// Compute what fraction of polyline A is contained within proximity of polyline B
+/// (Brute-force version - kept for backward compatibility)
+#[allow(dead_code)]
 fn compute_polyline_containment(
     polyline_a: &[GpsPoint],
     polyline_b: &[GpsPoint],

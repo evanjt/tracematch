@@ -2014,8 +2014,14 @@ impl PersistentRouteEngine {
 
     /// Get section performances with accurate time calculations.
     /// Uses time streams to calculate actual traversal times.
+    /// Supports both engine-detected sections and custom sections.
     pub fn get_section_performances(&self, section_id: &str) -> SectionPerformanceResult {
-        // Find the section
+        // Check if this is a custom section
+        if section_id.starts_with("custom_") {
+            return self.get_custom_section_performances(section_id);
+        }
+
+        // Find the engine-detected section
         let section = match self.sections.iter().find(|s| s.id == section_id) {
             Some(s) => s,
             None => {
@@ -2108,6 +2114,113 @@ impl PersistentRouteEngine {
                     avg_pace,
                     direction,
                     section_distance,
+                })
+            })
+            .collect();
+
+        // Sort by date
+        records.sort_by_key(|r| r.activity_date);
+
+        // Find best record (fastest time)
+        let best_record = records
+            .iter()
+            .min_by(|a, b| {
+                a.best_time
+                    .partial_cmp(&b.best_time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned();
+
+        SectionPerformanceResult {
+            records,
+            best_record,
+        }
+    }
+
+    /// Get performances for a custom section.
+    /// Combines source activity and all matched activities.
+    fn get_custom_section_performances(&self, section_id: &str) -> SectionPerformanceResult {
+        // Get the custom section
+        let custom_section = match self.get_custom_section(section_id) {
+            Some(s) => s,
+            None => {
+                return SectionPerformanceResult {
+                    records: vec![],
+                    best_record: None,
+                }
+            }
+        };
+
+        // Get all matches for this custom section
+        let matches = self.get_custom_section_matches(section_id);
+
+        // Build portions: source activity + matched activities
+        let mut portions: Vec<(String, u32, u32, f64, String)> = Vec::new();
+
+        // Add source activity
+        portions.push((
+            custom_section.source_activity_id.clone(),
+            custom_section.start_index,
+            custom_section.end_index,
+            custom_section.distance_meters,
+            "same".to_string(),
+        ));
+
+        // Add matched activities
+        for m in &matches {
+            portions.push((
+                m.activity_id.clone(),
+                m.start_index,
+                m.end_index,
+                m.distance_meters,
+                m.direction.clone(),
+            ));
+        }
+
+        // Build performance records
+        let mut records: Vec<SectionPerformanceRecord> = portions
+            .iter()
+            .filter_map(|(activity_id, start_idx, end_idx, distance, direction)| {
+                let metrics = self.activity_metrics.get(activity_id)?;
+                let times = self.time_streams.get(activity_id)?;
+
+                let start = *start_idx as usize;
+                let end = *end_idx as usize;
+
+                if start >= times.len() || end >= times.len() {
+                    return None;
+                }
+
+                let lap_time = (times[end] as f64 - times[start] as f64).abs();
+                if lap_time <= 0.0 {
+                    return None;
+                }
+
+                let pace = distance / lap_time;
+
+                let lap = SectionLap {
+                    id: format!("{}_lap0", activity_id),
+                    activity_id: activity_id.clone(),
+                    time: lap_time,
+                    pace,
+                    distance: *distance,
+                    direction: direction.clone(),
+                    start_index: *start_idx,
+                    end_index: *end_idx,
+                };
+
+                Some(SectionPerformanceRecord {
+                    activity_id: activity_id.clone(),
+                    activity_name: metrics.name.clone(),
+                    activity_date: metrics.date,
+                    laps: vec![lap.clone()],
+                    lap_count: 1,
+                    best_time: lap_time,
+                    best_pace: pace,
+                    avg_time: lap_time,
+                    avg_pace: pace,
+                    direction: direction.clone(),
+                    section_distance: custom_section.distance_meters,
                 })
             })
             .collect();
