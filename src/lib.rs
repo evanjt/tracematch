@@ -443,10 +443,13 @@ impl Default for MatchConfig {
         Self {
             perfect_threshold: 30.0,
             zero_threshold: 250.0,
-            min_match_percentage: 65.0,
+            // Lowered from 65% to be more inclusive - let match % show similarity
+            min_match_percentage: 50.0,
             min_route_distance: 500.0,
-            max_distance_diff_ratio: 0.20,
-            endpoint_threshold: 200.0,
+            // Increased from 20% to 30% - routes can vary in distance
+            max_distance_diff_ratio: 0.30,
+            // Increased from 200m to 300m - more tolerant of start/end variations
+            endpoint_threshold: 300.0,
             resample_count: 50,
             resample_spacing_meters: 50.0,
             min_resample_points: 20,
@@ -581,9 +584,11 @@ pub struct RoutePerformanceResult {
 
 /// A single lap of a section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionLap {
     pub id: String,
+    #[serde(alias = "activity_id")]
     pub activity_id: String,
     /// Lap time in seconds
     pub time: f64,
@@ -594,44 +599,58 @@ pub struct SectionLap {
     /// Direction: "forward" or "backward"
     pub direction: String,
     /// Start index in the activity's GPS track
+    #[serde(alias = "start_index")]
     pub start_index: u32,
     /// End index in the activity's GPS track
+    #[serde(alias = "end_index")]
     pub end_index: u32,
 }
 
 /// Section performance record for an activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionPerformanceRecord {
+    #[serde(alias = "activity_id")]
     pub activity_id: String,
+    #[serde(alias = "activity_name")]
     pub activity_name: String,
     /// Unix timestamp
+    #[serde(alias = "activity_date")]
     pub activity_date: i64,
     /// All laps for this activity on this section
     pub laps: Vec<SectionLap>,
     /// Number of times this section was traversed
+    #[serde(alias = "lap_count")]
     pub lap_count: u32,
     /// Best (fastest) lap time in seconds
+    #[serde(alias = "best_time")]
     pub best_time: f64,
     /// Best pace in m/s
+    #[serde(alias = "best_pace")]
     pub best_pace: f64,
     /// Average lap time in seconds
+    #[serde(alias = "avg_time")]
     pub avg_time: f64,
     /// Average pace in m/s
+    #[serde(alias = "avg_pace")]
     pub avg_pace: f64,
     /// Primary direction: "forward" or "backward"
     pub direction: String,
     /// Section distance in meters
+    #[serde(alias = "section_distance")]
     pub section_distance: f64,
 }
 
 /// Complete section performance result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionPerformanceResult {
     /// Performance records sorted by date (oldest first)
     pub records: Vec<SectionPerformanceRecord>,
     /// Best record (fastest time)
+    #[serde(alias = "best_record")]
     pub best_record: Option<SectionPerformanceRecord>,
 }
 

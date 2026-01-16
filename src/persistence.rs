@@ -26,6 +26,12 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 #[cfg(feature = "persistence")]
+use std::sync::atomic::{AtomicU32, Ordering};
+
+#[cfg(feature = "persistence")]
+use std::sync::Arc;
+
+#[cfg(feature = "persistence")]
 use std::thread;
 
 #[cfg(feature = "persistence")]
@@ -38,6 +44,7 @@ use rstar::{RTree, RTreeObject, AABB};
 use crate::{
     geo_utils, ActivityMatchInfo, ActivityMetrics, Bounds, FrequentSection, GpsPoint, MatchConfig,
     RouteGroup, RoutePerformance, RoutePerformanceResult, RouteSignature, SectionConfig,
+    SectionLap, SectionPerformanceRecord, SectionPerformanceResult,
 };
 
 #[cfg(feature = "persistence")]
@@ -76,10 +83,64 @@ impl RTreeObject for ActivityBoundsEntry {
     }
 }
 
+/// Progress state for section detection, shared between threads.
+#[cfg(feature = "persistence")]
+#[derive(Debug, Clone)]
+pub struct SectionDetectionProgress {
+    /// Current phase: "loading", "building_rtrees", "finding_overlaps", "clustering", "building_sections", "postprocessing"
+    pub phase: Arc<std::sync::Mutex<String>>,
+    /// Number of items completed in current phase
+    pub completed: Arc<AtomicU32>,
+    /// Total items in current phase
+    pub total: Arc<AtomicU32>,
+}
+
+#[cfg(feature = "persistence")]
+impl SectionDetectionProgress {
+    pub fn new() -> Self {
+        Self {
+            phase: Arc::new(std::sync::Mutex::new("loading".to_string())),
+            completed: Arc::new(AtomicU32::new(0)),
+            total: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    pub fn set_phase(&self, phase: &str, total: u32) {
+        *self.phase.lock().unwrap() = phase.to_string();
+        self.completed.store(0, Ordering::SeqCst);
+        self.total.store(total, Ordering::SeqCst);
+    }
+
+    pub fn increment(&self) {
+        self.completed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn get_phase(&self) -> String {
+        self.phase.lock().unwrap().clone()
+    }
+
+    pub fn get_completed(&self) -> u32 {
+        self.completed.load(Ordering::SeqCst)
+    }
+
+    pub fn get_total(&self) -> u32 {
+        self.total.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "persistence")]
+impl Default for SectionDetectionProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Handle for background section detection.
 #[cfg(feature = "persistence")]
 pub struct SectionDetectionHandle {
     receiver: mpsc::Receiver<Vec<FrequentSection>>,
+    /// Shared progress state
+    pub progress: SectionDetectionProgress,
 }
 
 #[cfg(feature = "persistence")]
@@ -87,6 +148,15 @@ impl SectionDetectionHandle {
     /// Check if detection is complete (non-blocking).
     pub fn try_recv(&self) -> Option<Vec<FrequentSection>> {
         self.receiver.try_recv().ok()
+    }
+
+    /// Get current progress.
+    pub fn get_progress(&self) -> (String, u32, u32) {
+        (
+            self.progress.get_phase(),
+            self.progress.get_completed(),
+            self.progress.get_total(),
+        )
     }
 
     /// Wait for detection to complete (blocking).
@@ -132,6 +202,9 @@ pub struct PersistentRouteEngine {
     /// Activity metrics for performance calculations
     activity_metrics: HashMap<String, ActivityMetrics>,
 
+    /// Time streams for section performance calculations (activity_id -> cumulative times at each GPS point)
+    time_streams: HashMap<String, Vec<u32>>,
+
     /// Cached sections (loaded from DB)
     sections: Vec<FrequentSection>,
 
@@ -165,6 +238,7 @@ impl PersistentRouteEngine {
             groups: Vec::new(),
             activity_matches: HashMap::new(),
             activity_metrics: HashMap::new(),
+            time_streams: HashMap::new(),
             sections: Vec::new(),
             groups_dirty: false,
             sections_dirty: false,
@@ -510,13 +584,26 @@ impl PersistentRouteEngine {
     fn load_sections(&mut self) -> SqlResult<()> {
         self.sections.clear();
 
-        let mut stmt = self.db.prepare("SELECT data FROM sections")?;
+        // First check how many rows are in the table
+        let count: i64 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM sections", [], |row| row.get(0))
+            .unwrap_or(0);
+        log::info!("[PersistentEngine] Loading sections: {} rows in DB", count);
+
+        let mut stmt = self.db.prepare("SELECT id, data FROM sections")?;
 
         self.sections = stmt
             .query_map([], |row| {
-                let data_blob: Vec<u8> = row.get(0)?;
+                let id: String = row.get(0)?;
+                let data_blob: Vec<u8> = row.get(1)?;
                 let section: FrequentSection =
-                    serde_json::from_slice(&data_blob).unwrap_or_else(|_| {
+                    serde_json::from_slice(&data_blob).unwrap_or_else(|e| {
+                        log::info!(
+                            "[PersistentEngine] Failed to deserialize section {}: {:?}",
+                            id,
+                            e
+                        );
                         // Return a default/empty section if deserialization fails
                         FrequentSection {
                             id: String::new(),
@@ -546,8 +633,14 @@ impl PersistentRouteEngine {
                 Ok(section)
             })?
             .filter_map(|r| r.ok())
-            .filter(|s: &FrequentSection| !s.id.is_empty()) // Filter out empty sections
+            .filter(|s: &FrequentSection| !s.id.is_empty())
             .collect();
+
+        log::info!(
+            "[PersistentEngine] Loaded {} sections into memory (from {} in DB)",
+            self.sections.len(),
+            count
+        );
 
         self.sections_dirty = false;
         Ok(())
@@ -1050,12 +1143,16 @@ impl PersistentRouteEngine {
 
     /// Get sections as JSON string.
     pub fn get_sections_json(&self) -> String {
+        log::info!(
+            "[PersistentEngine] get_sections_json called, {} sections in memory",
+            self.sections.len()
+        );
         serde_json::to_string(&self.sections).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Start section detection in a background thread.
     ///
-    /// Returns a handle that can be polled for completion.
+    /// Returns a handle that can be polled for completion and progress.
     pub fn detect_sections_background(
         &mut self,
         sport_filter: Option<String>,
@@ -1063,6 +1160,10 @@ impl PersistentRouteEngine {
         let (tx, rx) = mpsc::channel();
         let db_path = self.db_path.clone();
         let section_config = self.section_config.clone();
+
+        // Create shared progress tracker
+        let progress = SectionDetectionProgress::new();
+        let progress_clone = progress.clone();
 
         // Get groups first (may trigger recomputation)
         let groups = self.get_groups().to_vec();
@@ -1085,20 +1186,35 @@ impl PersistentRouteEngine {
             self.activity_metadata.keys().cloned().collect()
         };
 
+        // Set initial loading phase
+        progress.set_phase("loading", activity_ids.len() as u32);
+
         thread::spawn(move || {
+            log::info!(
+                "[SectionDetection] Background thread started with {} activity IDs",
+                activity_ids.len()
+            );
+
             // Open separate connection for background thread
             let conn = match Connection::open(&db_path) {
                 Ok(c) => c,
-                Err(_) => {
+                Err(e) => {
+                    log::info!("[SectionDetection] Failed to open DB: {:?}", e);
                     tx.send(Vec::new()).ok();
                     return;
                 }
             };
 
-            // Load GPS tracks from DB
+            // Set loading phase with total count
+            progress_clone.set_phase("loading", activity_ids.len() as u32);
+
+            // Load GPS tracks from DB with progress updates
+            let mut tracks_loaded = 0;
+            let mut tracks_empty = 0;
             let tracks: Vec<(String, Vec<GpsPoint>)> = activity_ids
                 .iter()
                 .filter_map(|id| {
+                    progress_clone.increment();
                     let mut stmt = conn
                         .prepare("SELECT track_data FROM gps_tracks WHERE activity_id = ?")
                         .ok()?;
@@ -1108,22 +1224,60 @@ impl PersistentRouteEngine {
                             Ok(rmp_serde::from_slice(&blob).unwrap_or_default())
                         })
                         .ok()?;
+                    if track.is_empty() {
+                        tracks_empty += 1;
+                        return None; // Skip empty tracks
+                    }
+                    tracks_loaded += 1;
                     Some((id.clone(), track))
                 })
                 .collect();
 
-            // Detect sections using multi-scale algorithm
-            let result = crate::sections::detect_sections_multiscale(
+            log::info!(
+                "[SectionDetection] Loaded {} tracks ({} empty/missing) from {} activity IDs",
+                tracks_loaded,
+                tracks_empty,
+                activity_ids.len()
+            );
+
+            if tracks.is_empty() {
+                log::info!("[SectionDetection] No tracks loaded, skipping detection");
+                progress_clone.set_phase("complete", 0);
+                tx.send(Vec::new()).ok();
+                return;
+            }
+
+            // Log track point counts for debugging
+            let total_points: usize = tracks.iter().map(|(_, t)| t.len()).sum();
+            log::info!(
+                "[SectionDetection] Total GPS points: {}, avg per track: {}",
+                total_points,
+                total_points / tracks.len().max(1)
+            );
+
+            // Detect sections using multi-scale algorithm with progress
+            let result = crate::sections::detect_sections_multiscale_with_progress(
                 &tracks,
                 &sport_map,
                 &groups,
                 &section_config,
+                &progress_clone,
             );
 
+            log::info!(
+                "[SectionDetection] Detection complete: {} sections, {} potentials",
+                result.sections.len(),
+                result.potentials.len()
+            );
+
+            progress_clone.set_phase("complete", 0);
             tx.send(result.sections).ok();
         });
 
-        SectionDetectionHandle { receiver: rx }
+        SectionDetectionHandle {
+            receiver: rx,
+            progress,
+        }
     }
 
     /// Apply completed section detection results.
@@ -1584,17 +1738,35 @@ impl PersistentRouteEngine {
         // Find potential start point
         let (start_idx, start_dist) = self.find_nearest_point_index(track, start, 0);
         if start_dist > config.proximity_threshold {
+            log::debug!(
+                "[CustomSectionMatch] {} FAIL: start too far ({:.1}m > {:.1}m threshold)",
+                activity_id,
+                start_dist,
+                config.proximity_threshold
+            );
             return None;
         }
 
         // Find potential end point (search after start)
         let (end_idx, end_dist) = self.find_nearest_point_index(track, end, start_idx);
         if end_dist > config.proximity_threshold {
+            log::debug!(
+                "[CustomSectionMatch] {} FAIL: end too far ({:.1}m > {:.1}m threshold)",
+                activity_id,
+                end_dist,
+                config.proximity_threshold
+            );
             return None;
         }
 
         // Validate that start comes before end
         if end_idx <= start_idx {
+            log::debug!(
+                "[CustomSectionMatch] {} FAIL: end before start (start_idx={}, end_idx={})",
+                activity_id,
+                start_idx,
+                end_idx
+            );
             return None;
         }
 
@@ -1608,6 +1780,12 @@ impl PersistentRouteEngine {
             config.proximity_threshold,
         );
         if coverage < config.min_coverage {
+            log::debug!(
+                "[CustomSectionMatch] {} FAIL: low coverage ({:.1}% < {:.1}% required)",
+                activity_id,
+                coverage * 100.0,
+                config.min_coverage * 100.0
+            );
             return None;
         }
 
@@ -1718,22 +1896,52 @@ impl PersistentRouteEngine {
         };
 
         let mut matches = Vec::new();
+        let mut activities_with_tracks = 0;
+        let mut activities_without_tracks = 0;
+
+        log::info!(
+            "[CustomSectionMatch] Matching section {} ({} points, {}m) against {} activities",
+            section_id,
+            section.polyline.len(),
+            section.distance_meters as i32,
+            activity_ids.len()
+        );
 
         for activity_id in activity_ids {
             // Load the GPS track for this activity
             let track: Vec<GpsPoint> = match self.get_gps_track(activity_id) {
-                Some(t) if t.len() >= 2 => t,
-                _ => continue,
+                Some(t) if t.len() >= 2 => {
+                    activities_with_tracks += 1;
+                    t
+                }
+                _ => {
+                    activities_without_tracks += 1;
+                    continue;
+                }
             };
 
             if let Some(match_info) =
                 self.match_custom_section(&section, activity_id, &track, config)
             {
+                log::info!(
+                    "[CustomSectionMatch] MATCHED activity {} ({}m, direction: {})",
+                    activity_id,
+                    match_info.distance_meters as i32,
+                    match_info.direction
+                );
                 // Store the match
                 let _ = self.add_custom_section_match(section_id, &match_info);
                 matches.push(match_info);
             }
         }
+
+        log::info!(
+            "[CustomSectionMatch] Result: {} matches from {} activities ({} with tracks, {} without)",
+            matches.len(),
+            activity_ids.len(),
+            activities_with_tracks,
+            activities_without_tracks
+        );
 
         matches
     }
@@ -1779,6 +1987,148 @@ impl PersistentRouteEngine {
     /// Get activity metrics for a specific activity.
     pub fn get_activity_metrics(&self, activity_id: &str) -> Option<&ActivityMetrics> {
         self.activity_metrics.get(activity_id)
+    }
+
+    /// Set time streams for activities from flat buffer.
+    /// Time streams are cumulative seconds at each GPS point, used for section performance calculations.
+    pub fn set_time_streams_flat(
+        &mut self,
+        activity_ids: &[String],
+        all_times: &[u32],
+        offsets: &[u32],
+    ) {
+        for (i, activity_id) in activity_ids.iter().enumerate() {
+            let start = offsets[i] as usize;
+            let end = offsets
+                .get(i + 1)
+                .map(|&o| o as usize)
+                .unwrap_or(all_times.len());
+            let times = all_times[start..end].to_vec();
+            self.time_streams.insert(activity_id.clone(), times);
+        }
+        log::debug!(
+            "[PersistentEngine] Set time streams for {} activities",
+            activity_ids.len()
+        );
+    }
+
+    /// Get section performances with accurate time calculations.
+    /// Uses time streams to calculate actual traversal times.
+    pub fn get_section_performances(&self, section_id: &str) -> SectionPerformanceResult {
+        // Find the section
+        let section = match self.sections.iter().find(|s| s.id == section_id) {
+            Some(s) => s,
+            None => {
+                return SectionPerformanceResult {
+                    records: vec![],
+                    best_record: None,
+                }
+            }
+        };
+
+        // Group portions by activity
+        let mut portions_by_activity: HashMap<&str, Vec<&crate::SectionPortion>> = HashMap::new();
+        for portion in &section.activity_portions {
+            portions_by_activity
+                .entry(&portion.activity_id)
+                .or_default()
+                .push(portion);
+        }
+
+        // Build performance records
+        let mut records: Vec<SectionPerformanceRecord> = portions_by_activity
+            .iter()
+            .filter_map(|(activity_id, portions)| {
+                let metrics = self.activity_metrics.get(*activity_id)?;
+                let times = self.time_streams.get(*activity_id)?;
+
+                let laps: Vec<SectionLap> = portions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, portion)| {
+                        let start_idx = portion.start_index as usize;
+                        let end_idx = portion.end_index as usize;
+
+                        if start_idx >= times.len() || end_idx >= times.len() {
+                            return None;
+                        }
+
+                        let lap_time = (times[end_idx] as f64 - times[start_idx] as f64).abs();
+                        if lap_time <= 0.0 {
+                            return None;
+                        }
+
+                        let pace = portion.distance_meters / lap_time;
+
+                        Some(SectionLap {
+                            id: format!("{}_lap{}", activity_id, i),
+                            activity_id: activity_id.to_string(),
+                            time: lap_time,
+                            pace,
+                            distance: portion.distance_meters,
+                            direction: portion.direction.clone(),
+                            start_index: portion.start_index,
+                            end_index: portion.end_index,
+                        })
+                    })
+                    .collect();
+
+                if laps.is_empty() {
+                    return None;
+                }
+
+                let lap_count = laps.len() as u32;
+                let best_time = laps
+                    .iter()
+                    .map(|l| l.time)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(0.0);
+                let best_pace = laps
+                    .iter()
+                    .map(|l| l.pace)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(0.0);
+                let avg_time = laps.iter().map(|l| l.time).sum::<f64>() / lap_count as f64;
+                let avg_pace = laps.iter().map(|l| l.pace).sum::<f64>() / lap_count as f64;
+                let direction = laps
+                    .first()
+                    .map(|l| l.direction.clone())
+                    .unwrap_or_else(|| "same".to_string());
+                let section_distance = section.distance_meters;
+
+                Some(SectionPerformanceRecord {
+                    activity_id: activity_id.to_string(),
+                    activity_name: metrics.name.clone(),
+                    activity_date: metrics.date,
+                    laps,
+                    lap_count,
+                    best_time,
+                    best_pace,
+                    avg_time,
+                    avg_pace,
+                    direction,
+                    section_distance,
+                })
+            })
+            .collect();
+
+        // Sort by date
+        records.sort_by_key(|r| r.activity_date);
+
+        // Find best record (fastest time)
+        let best_record = records
+            .iter()
+            .min_by(|a, b| {
+                a.best_time
+                    .partial_cmp(&b.best_time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned();
+
+        SectionPerformanceResult {
+            records,
+            best_record,
+        }
     }
 
     /// Get route performances for all activities in a group.
@@ -1907,6 +2257,12 @@ impl PersistentRouteEngine {
 
     /// Get engine statistics.
     pub fn stats(&self) -> PersistentEngineStats {
+        // Count GPS tracks in database
+        let gps_track_count: u32 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM gps_tracks", [], |row| row.get(0))
+            .unwrap_or(0);
+
         PersistentEngineStats {
             activity_count: self.activity_metadata.len() as u32,
             signature_cache_size: self.signature_cache.len() as u32,
@@ -1915,6 +2271,7 @@ impl PersistentRouteEngine {
             section_count: self.sections.len() as u32,
             groups_dirty: self.groups_dirty,
             sections_dirty: self.sections_dirty,
+            gps_track_count,
         }
     }
 }
@@ -1931,6 +2288,7 @@ pub struct PersistentEngineStats {
     pub section_count: u32,
     pub groups_dirty: bool,
     pub sections_dirty: bool,
+    pub gps_track_count: u32,
 }
 
 // ============================================================================
@@ -2212,6 +2570,35 @@ pub mod persistent_engine_ffi {
         });
     }
 
+    /// Set time streams for activities from flat buffer.
+    /// Time streams are cumulative seconds at each GPS point, used for section performance calculations.
+    /// Parameters:
+    /// - activity_ids: Vec of activity IDs
+    /// - all_times: Flat array of all time values concatenated
+    /// - offsets: Start offset for each activity's times in all_times (length = activity_ids.len() + 1)
+    #[uniffi::export]
+    pub fn persistent_engine_set_time_streams_flat(
+        activity_ids: Vec<String>,
+        all_times: Vec<u32>,
+        offsets: Vec<u32>,
+    ) {
+        with_persistent_engine(|e| {
+            e.set_time_streams_flat(&activity_ids, &all_times, &offsets);
+        });
+    }
+
+    /// Get section performances as JSON.
+    /// Returns accurate time-based section traversal data.
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_performances_json(section_id: String) -> String {
+        with_persistent_engine(|e| {
+            let result = e.get_section_performances(&section_id);
+            serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"records":[],"best_record":null}"#.to_string())
+        })
+        .unwrap_or_else(|| r#"{"records":[],"best_record":null}"#.to_string())
+    }
+
     /// Get route performances as JSON.
     #[uniffi::export]
     pub fn persistent_engine_get_route_performances_json(
@@ -2349,6 +2736,27 @@ pub mod persistent_engine_ffi {
                 *handle_guard = None;
 
                 if applied.is_some() {
+                    // Also match custom sections against all activities
+                    with_persistent_engine(|e| {
+                        let custom_sections = e.get_custom_sections();
+                        if !custom_sections.is_empty() {
+                            let activity_ids = e.get_activity_ids();
+                            let config = crate::CustomSectionMatchConfig::default();
+                            info!(
+                                "[PersistentEngine] Matching {} custom sections against {} activities",
+                                custom_sections.len(),
+                                activity_ids.len()
+                            );
+                            for section in &custom_sections {
+                                e.match_custom_section_against_activities(
+                                    &section.id,
+                                    &activity_ids,
+                                    &config,
+                                );
+                            }
+                        }
+                    });
+
                     info!("[PersistentEngine] Section detection complete");
                     "complete".to_string()
                 } else {
@@ -2359,6 +2767,24 @@ pub mod persistent_engine_ffi {
                 // Still running
                 "running".to_string()
             }
+        }
+    }
+
+    /// Get current section detection progress.
+    /// Returns JSON with format: {"phase": "finding_overlaps", "completed": 45, "total": 120}
+    /// Returns empty JSON "{}" if no detection is running.
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_detection_progress() -> String {
+        let handle_guard = SECTION_DETECTION_HANDLE.lock().unwrap();
+
+        if let Some(handle) = handle_guard.as_ref() {
+            let (phase, completed, total) = handle.get_progress();
+            format!(
+                r#"{{"phase":"{}","completed":{},"total":{}}}"#,
+                phase, completed, total
+            )
+        } else {
+            "{}".to_string()
         }
     }
 
@@ -2387,7 +2813,9 @@ pub mod persistent_engine_ffi {
             }
         };
 
-        with_persistent_engine(|e| match e.add_custom_section(&section) {
+        let section_id = section.id.clone();
+
+        let added = with_persistent_engine(|e| match e.add_custom_section(&section) {
             Ok(success) => {
                 info!("[PersistentEngine] Added custom section: {}", section.id);
                 success
@@ -2397,7 +2825,30 @@ pub mod persistent_engine_ffi {
                 false
             }
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+        // If section was added successfully, immediately match it against all activities
+        if added {
+            with_persistent_engine(|e| {
+                let activity_ids = e.get_activity_ids();
+                if !activity_ids.is_empty() {
+                    let config = crate::CustomSectionMatchConfig::default();
+                    let matches = e.match_custom_section_against_activities(
+                        &section_id,
+                        &activity_ids,
+                        &config,
+                    );
+                    info!(
+                        "[PersistentEngine] Matched custom section {} against {} activities, found {} matches",
+                        section_id,
+                        activity_ids.len(),
+                        matches.len()
+                    );
+                }
+            });
+        }
+
+        added
     }
 
     /// Remove a custom section.

@@ -247,3 +247,139 @@ pub fn determine_direction_by_endpoints(
         "same".to_string()
     }
 }
+
+/// Calculate fine-grained match percentage using checkpoint sampling.
+///
+/// This is more accurate than pure AMD for detecting localized divergences,
+/// while remaining efficient O(k) for mobile devices.
+///
+/// The function samples 9 evenly spaced checkpoints along both routes BY DISTANCE
+/// (not by array index) and compares the geographic distance at each checkpoint.
+/// Middle positions (30-70%) are weighted more heavily since divergences typically
+/// occur in the middle of routes that share start/end points.
+///
+/// # Returns
+/// - 100% if all checkpoints are within `perfect_threshold`
+/// - Lower percentages when checkpoints diverge significantly
+///
+/// # Arguments
+/// * `route1` - First route points
+/// * `route2` - Second route points (typically the representative/reference)
+/// * `config` - Match configuration with thresholds
+pub fn calculate_checkpoint_match(
+    route1: &[GpsPoint],
+    route2: &[GpsPoint],
+    config: &MatchConfig,
+) -> f64 {
+    if route1.len() < 2 || route2.len() < 2 {
+        return 0.0;
+    }
+
+    // Calculate cumulative distances for both routes
+    let dist1 = cumulative_distances(route1);
+    let dist2 = cumulative_distances(route2);
+
+    let total_dist1 = *dist1.last().unwrap_or(&0.0);
+    let total_dist2 = *dist2.last().unwrap_or(&0.0);
+
+    if total_dist1 < 1.0 || total_dist2 < 1.0 {
+        return 0.0;
+    }
+
+    // 9 evenly spaced checkpoints by distance (efficient: O(9) comparisons)
+    let positions: [f64; 9] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+
+    let mut total_score = 0.0;
+    let mut weight_sum = 0.0;
+
+    for pos in positions {
+        // Find point at this percentage of DISTANCE along each route
+        let target_dist1 = total_dist1 * pos;
+        let target_dist2 = total_dist2 * pos;
+
+        let p1 = point_at_distance(route1, &dist1, target_dist1);
+        let p2 = point_at_distance(route2, &dist2, target_dist2);
+
+        let dist = haversine_distance(&p1, &p2);
+
+        // Weight middle positions more heavily (they're more likely to diverge)
+        // This catches the "same start/end but different middle" pattern
+        let weight = if (0.3..=0.7).contains(&pos) { 1.5 } else { 1.0 };
+
+        // Convert distance to score (0-100 per checkpoint)
+        let score = if dist <= config.perfect_threshold {
+            100.0
+        } else if dist >= config.zero_threshold {
+            0.0
+        } else {
+            100.0
+                * (1.0
+                    - (dist - config.perfect_threshold)
+                        / (config.zero_threshold - config.perfect_threshold))
+        };
+
+        total_score += score * weight;
+        weight_sum += weight;
+    }
+
+    total_score / weight_sum
+}
+
+/// Calculate cumulative distances along a route.
+/// Returns a vector where dist[i] is the distance from start to point i.
+fn cumulative_distances(points: &[GpsPoint]) -> Vec<f64> {
+    let mut distances = Vec::with_capacity(points.len());
+    distances.push(0.0);
+
+    for i in 1..points.len() {
+        let prev_dist = distances[i - 1];
+        let segment_dist = haversine_distance(&points[i - 1], &points[i]);
+        distances.push(prev_dist + segment_dist);
+    }
+
+    distances
+}
+
+/// Find the point at a specific distance along the route.
+/// Interpolates between points if the exact distance falls between two points.
+fn point_at_distance(points: &[GpsPoint], cumulative: &[f64], target_dist: f64) -> GpsPoint {
+    if points.is_empty() {
+        return GpsPoint::new(0.0, 0.0);
+    }
+    if target_dist <= 0.0 {
+        return points[0];
+    }
+
+    let total_dist = *cumulative.last().unwrap_or(&0.0);
+    if target_dist >= total_dist {
+        return *points.last().unwrap();
+    }
+
+    // Binary search for the segment containing target_dist
+    let idx = match cumulative.binary_search_by(|d| d.partial_cmp(&target_dist).unwrap()) {
+        Ok(i) => return points[i], // Exact match
+        Err(i) => i.saturating_sub(1),
+    };
+
+    if idx >= points.len() - 1 {
+        return *points.last().unwrap();
+    }
+
+    // Interpolate between points[idx] and points[idx+1]
+    let seg_start_dist = cumulative[idx];
+    let seg_end_dist = cumulative[idx + 1];
+    let seg_length = seg_end_dist - seg_start_dist;
+
+    if seg_length < 0.001 {
+        return points[idx];
+    }
+
+    let ratio = (target_dist - seg_start_dist) / seg_length;
+    let p1 = &points[idx];
+    let p2 = &points[idx + 1];
+
+    GpsPoint::new(
+        p1.latitude + ratio * (p2.latitude - p1.latitude),
+        p1.longitude + ratio * (p2.longitude - p1.longitude),
+    )
+}

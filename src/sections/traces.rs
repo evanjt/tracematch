@@ -75,49 +75,19 @@ fn extract_activity_trace(
         sequences.push(current_sequence);
     }
 
-    // Merge all sequences instead of just returning the longest
-    // This captures both forward and reverse passes over the section
+    // Return only the FIRST (longest) sequence to avoid "straight line" artifacts
+    // When multiple passes are merged, the LineString draws a closing line from
+    // the end of pass 1 to start of pass 2, creating an unwanted straight line.
+    // Each pass should be treated as a separate lap, handled at the UI layer.
     if sequences.is_empty() {
         return Vec::new();
     }
 
-    // If there's only one sequence, return it
-    if sequences.len() == 1 {
-        return sequences.into_iter().next().unwrap();
-    }
-
-    // Multiple sequences - merge them all
-    // Sort sequences by their first point's position along the section
-    // This helps visualization show the correct order
-    let section_tree = build_rtree(section_polyline);
-
-    // For each sequence, find where it starts on the section
-    let mut sequence_with_position: Vec<(usize, Vec<GpsPoint>)> = sequences
+    // Return the longest sequence (most representative of the actual path)
+    sequences
         .into_iter()
-        .map(|seq| {
-            let start_pos = if let Some(first) = seq.first() {
-                let query = [first.latitude, first.longitude];
-                section_tree
-                    .nearest_neighbor(&query)
-                    .map(|n| n.idx)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            (start_pos, seq)
-        })
-        .collect();
-
-    // Sort by position on section
-    sequence_with_position.sort_by_key(|(pos, _)| *pos);
-
-    // Concatenate all sequences
-    let mut merged: Vec<GpsPoint> = Vec::new();
-    for (_, seq) in sequence_with_position {
-        merged.extend(seq);
-    }
-
-    merged
+        .max_by_key(|seq| seq.len())
+        .unwrap_or_default()
 }
 
 /// Extract activity traces for all activities in a section.
