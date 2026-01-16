@@ -858,3 +858,167 @@ fn test_many_points_per_route() {
         "Should simplify to manageable size"
     );
 }
+
+// ============================================================================
+// Custom Section JSON Serialization Tests
+// ============================================================================
+
+/// Verify that CustomSection serializes to camelCase JSON (matches TypeScript expectations)
+#[test]
+fn test_custom_section_json_uses_camel_case() {
+    use tracematch::{CustomSection, GpsPoint};
+
+    let section = CustomSection {
+        id: "custom_123".to_string(),
+        name: "Test Section".to_string(),
+        polyline: vec![GpsPoint::new(51.5, -0.1)],
+        source_activity_id: "act_456".to_string(),
+        start_index: 10,
+        end_index: 50,
+        sport_type: "Ride".to_string(),
+        distance_meters: 1234.5,
+        created_at: "2024-01-01T00:00:00Z".to_string(),
+    };
+
+    let json = serde_json::to_string(&section).unwrap();
+
+    // Verify camelCase field names (matches TypeScript expectations)
+    assert!(
+        json.contains("sourceActivityId"),
+        "should use camelCase for sourceActivityId"
+    );
+    assert!(
+        json.contains("startIndex"),
+        "should use camelCase for startIndex"
+    );
+    assert!(
+        json.contains("endIndex"),
+        "should use camelCase for endIndex"
+    );
+    assert!(
+        json.contains("sportType"),
+        "should use camelCase for sportType"
+    );
+    assert!(
+        json.contains("distanceMeters"),
+        "should use camelCase for distanceMeters"
+    );
+    assert!(
+        json.contains("createdAt"),
+        "should use camelCase for createdAt"
+    );
+
+    // Verify it does NOT contain snake_case
+    assert!(
+        !json.contains("source_activity_id"),
+        "should not use snake_case"
+    );
+    assert!(!json.contains("start_index"), "should not use snake_case");
+    assert!(!json.contains("end_index"), "should not use snake_case");
+    assert!(!json.contains("sport_type"), "should not use snake_case");
+    assert!(
+        !json.contains("distance_meters"),
+        "should not use snake_case"
+    );
+    assert!(!json.contains("created_at"), "should not use snake_case");
+}
+
+/// Verify that CustomSection can deserialize from camelCase JSON (as TypeScript sends it)
+#[test]
+fn test_custom_section_deserialize_from_camel_case() {
+    use tracematch::CustomSection;
+
+    // JSON as TypeScript would send it
+    let json = r#"{
+        "id": "custom_123",
+        "name": "Test Section",
+        "polyline": [{"latitude": 51.5, "longitude": -0.1}],
+        "sourceActivityId": "act_456",
+        "startIndex": 10,
+        "endIndex": 50,
+        "sportType": "Ride",
+        "distanceMeters": 1234.5,
+        "createdAt": "2024-01-01T00:00:00Z"
+    }"#;
+
+    let section: CustomSection =
+        serde_json::from_str(json).expect("should deserialize camelCase JSON");
+    assert_eq!(section.source_activity_id, "act_456");
+    assert_eq!(section.start_index, 10);
+    assert_eq!(section.end_index, 50);
+    assert_eq!(section.sport_type, "Ride");
+    assert_eq!(section.distance_meters, 1234.5);
+    assert_eq!(section.created_at, "2024-01-01T00:00:00Z");
+}
+
+/// Verify that CustomSectionMatch serializes to camelCase JSON
+#[test]
+fn test_custom_section_match_json_uses_camel_case() {
+    use tracematch::CustomSectionMatch;
+
+    let match_result = CustomSectionMatch {
+        activity_id: "act_789".to_string(),
+        start_index: 100,
+        end_index: 200,
+        direction: "same".to_string(),
+        distance_meters: 500.0,
+    };
+
+    let json = serde_json::to_string(&match_result).unwrap();
+
+    // Verify camelCase field names
+    assert!(
+        json.contains("activityId"),
+        "should use camelCase for activityId"
+    );
+    assert!(
+        json.contains("startIndex"),
+        "should use camelCase for startIndex"
+    );
+    assert!(
+        json.contains("endIndex"),
+        "should use camelCase for endIndex"
+    );
+    assert!(
+        json.contains("distanceMeters"),
+        "should use camelCase for distanceMeters"
+    );
+
+    // Verify it does NOT contain snake_case
+    assert!(!json.contains("activity_id"), "should not use snake_case");
+    assert!(!json.contains("start_index"), "should not use snake_case");
+    assert!(
+        !json.contains("distance_meters"),
+        "should not use snake_case"
+    );
+}
+
+/// Verify that CustomSectionMatchConfig serializes to camelCase JSON
+#[test]
+fn test_custom_section_match_config_json_uses_camel_case() {
+    use tracematch::CustomSectionMatchConfig;
+
+    let config = CustomSectionMatchConfig {
+        proximity_threshold: 50.0,
+        min_coverage: 0.8,
+    };
+
+    let json = serde_json::to_string(&config).unwrap();
+
+    // Verify camelCase field names
+    assert!(
+        json.contains("proximityThreshold"),
+        "should use camelCase for proximityThreshold"
+    );
+    assert!(
+        json.contains("minCoverage"),
+        "should use camelCase for minCoverage"
+    );
+
+    // Verify it does NOT contain snake_case
+    assert!(
+        !json.contains("proximity_threshold"),
+        "should not use snake_case"
+    );
+    assert!(!json.contains("min_coverage"), "should not use snake_case");
+}

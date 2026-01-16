@@ -641,6 +641,7 @@ pub struct SectionPerformanceResult {
 
 /// A user-created custom section definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSection {
     /// Unique identifier (e.g., "custom_1234567890_abc123")
@@ -665,6 +666,7 @@ pub struct CustomSection {
 
 /// A match between a custom section and an activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSectionMatch {
     /// Activity ID that matched the section
@@ -681,6 +683,7 @@ pub struct CustomSectionMatch {
 
 /// Configuration for custom section matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSectionMatchConfig {
     /// Maximum distance in meters between section and activity points (default: 50m)
