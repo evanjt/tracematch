@@ -95,63 +95,86 @@ fn compute_fold_ratio(polyline: &[GpsPoint], threshold: f64) -> f64 {
     close_count as f64 / third as f64
 }
 
+/// Process a single section for fold splitting.
+/// Returns a vec of 1-2 sections (or original if no split).
+fn process_fold_section(section: FrequentSection, config: &SectionConfig) -> Vec<FrequentSection> {
+    let fold_ratio = compute_fold_ratio(&section.polyline, config.proximity_threshold);
+
+    if fold_ratio > 0.5 {
+        // This section folds back on itself - split it
+        if let Some(fold_idx) = detect_fold_point(&section.polyline, config.proximity_threshold) {
+            let mut result = Vec::new();
+
+            // Create outbound section (start to fold point)
+            let outbound_polyline = section.polyline[..fold_idx].to_vec();
+            let outbound_length = calculate_route_distance(&outbound_polyline);
+
+            if outbound_length >= config.min_section_length {
+                let mut outbound = section.clone();
+                outbound.id = format!("{}_out", section.id);
+                outbound.polyline = outbound_polyline;
+                outbound.distance_meters = outbound_length;
+                // Update activity traces to only include outbound portion
+                outbound.activity_traces = HashMap::new(); // Will be recomputed
+                result.push(outbound);
+            }
+
+            // Create return section (fold point to end)
+            let return_polyline = section.polyline[fold_idx..].to_vec();
+            let return_length = calculate_route_distance(&return_polyline);
+
+            if return_length >= config.min_section_length {
+                let mut return_section = section.clone();
+                return_section.id = format!("{}_ret", section.id);
+                return_section.polyline = return_polyline;
+                return_section.distance_meters = return_length;
+                return_section.activity_traces = HashMap::new();
+                result.push(return_section);
+            }
+
+            info!(
+                "[Sections] Split folding section {} at index {} (fold_ratio={:.2})",
+                section.id, fold_idx, fold_ratio
+            );
+
+            if result.is_empty() {
+                // Both parts were too short, keep original
+                vec![section]
+            } else {
+                result
+            }
+        } else {
+            // Couldn't find fold point, keep original
+            vec![section]
+        }
+    } else {
+        // Not folding, keep as-is
+        vec![section]
+    }
+}
+
 /// Split sections that fold back on themselves into separate one-way sections.
 /// For out-and-back routes, this creates two sections: outbound and return.
 pub fn split_folding_sections(
     sections: Vec<FrequentSection>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    let mut result = Vec::new();
-
-    for section in sections {
-        let fold_ratio = compute_fold_ratio(&section.polyline, config.proximity_threshold);
-
-        if fold_ratio > 0.5 {
-            // This section folds back on itself - split it
-            if let Some(fold_idx) = detect_fold_point(&section.polyline, config.proximity_threshold)
-            {
-                // Create outbound section (start to fold point)
-                let outbound_polyline = section.polyline[..fold_idx].to_vec();
-                let outbound_length = calculate_route_distance(&outbound_polyline);
-
-                if outbound_length >= config.min_section_length {
-                    let mut outbound = section.clone();
-                    outbound.id = format!("{}_out", section.id);
-                    outbound.polyline = outbound_polyline;
-                    outbound.distance_meters = outbound_length;
-                    // Update activity traces to only include outbound portion
-                    outbound.activity_traces = HashMap::new(); // Will be recomputed
-                    result.push(outbound);
-                }
-
-                // Create return section (fold point to end)
-                let return_polyline = section.polyline[fold_idx..].to_vec();
-                let return_length = calculate_route_distance(&return_polyline);
-
-                if return_length >= config.min_section_length {
-                    let mut return_section = section.clone();
-                    return_section.id = format!("{}_ret", section.id);
-                    return_section.polyline = return_polyline;
-                    return_section.distance_meters = return_length;
-                    return_section.activity_traces = HashMap::new();
-                    result.push(return_section);
-                }
-
-                info!(
-                    "[Sections] Split folding section {} at index {} (fold_ratio={:.2})",
-                    section.id, fold_idx, fold_ratio
-                );
-            } else {
-                // Couldn't find fold point, keep original
-                result.push(section);
-            }
-        } else {
-            // Not folding, keep as-is
-            result.push(section);
-        }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        sections
+            .into_par_iter()
+            .flat_map(|section| process_fold_section(section, config))
+            .collect()
     }
 
-    result
+    #[cfg(not(feature = "parallel"))]
+    {
+        sections
+            .into_iter()
+            .flat_map(|section| process_fold_section(section, config))
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -183,6 +206,93 @@ const MIN_HEADING_SPLIT_LENGTH: f64 = 300.0;
 /// rarely improves quality. Reference: https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf
 const MIN_SECTION_FOR_SPLITTING: f64 = 500.0;
 
+/// Process a single section for heading-based splitting.
+fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
+    let polyline = &section.polyline;
+
+    // Guard 1: Skip splitting sections that are already short
+    // Based on MDL principle - splitting short sections rarely improves quality
+    if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
+        return vec![section];
+    }
+
+    // Need at least enough points to compute windows
+    if polyline.len() < 10 {
+        return vec![section];
+    }
+
+    // Find split points
+    let split_indices = find_heading_inflection_points(polyline);
+
+    if split_indices.is_empty() {
+        return vec![section];
+    }
+
+    // Split the section at each inflection point
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut start_idx = 0;
+
+    for &split_idx in &split_indices {
+        if split_idx > start_idx {
+            segments.push((start_idx, split_idx));
+        }
+        start_idx = split_idx;
+    }
+
+    // Add final segment
+    if start_idx < polyline.len() {
+        segments.push((start_idx, polyline.len()));
+    }
+
+    // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
+    // This prevents 200m → 100m + 100m type splits that create tiny pieces
+    let segment_lengths: Vec<f64> = segments
+        .iter()
+        .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
+        .collect();
+    let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
+    let split_ratio = min_segment_length / section.distance_meters;
+
+    if split_ratio < 0.4 && segments.len() > 1 {
+        // Splitting would create unbalanced fragments - keep original
+        return vec![section];
+    }
+
+    // Create new sections from segments
+    let mut result = Vec::new();
+    let mut split_count = 0;
+    for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
+        let seg_polyline = polyline[seg_start..seg_end].to_vec();
+        let seg_length = segment_lengths[idx];
+
+        if seg_length >= MIN_HEADING_SPLIT_LENGTH && seg_polyline.len() >= 3 {
+            let mut new_section = section.clone();
+            new_section.id = format!("{}_h{}", section.id, split_count);
+            new_section.polyline = seg_polyline;
+            new_section.distance_meters = seg_length;
+            new_section.activity_traces = HashMap::new();
+            result.push(new_section);
+            split_count += 1;
+        }
+    }
+
+    if split_count > 1 {
+        info!(
+            "[Sections] Split {} at {} heading inflection points -> {} segments",
+            section.id,
+            split_indices.len(),
+            split_count
+        );
+    }
+
+    if result.is_empty() {
+        // No valid splits produced, keep original
+        vec![section]
+    } else {
+        result
+    }
+}
+
 /// Split sections at sustained heading inflection points.
 ///
 /// A section is split where direction changes by >= 60° AND the new direction
@@ -199,94 +309,22 @@ pub fn split_at_heading_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    let mut result = Vec::new();
-
-    for section in sections {
-        let polyline = &section.polyline;
-
-        // Guard 1: Skip splitting sections that are already short
-        // Based on MDL principle - splitting short sections rarely improves quality
-        if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
-            result.push(section);
-            continue;
-        }
-
-        // Need at least enough points to compute windows
-        if polyline.len() < 10 {
-            result.push(section);
-            continue;
-        }
-
-        // Find split points
-        let split_indices = find_heading_inflection_points(polyline);
-
-        if split_indices.is_empty() {
-            result.push(section);
-            continue;
-        }
-
-        // Split the section at each inflection point
-        let mut segments: Vec<(usize, usize)> = Vec::new();
-        let mut start_idx = 0;
-
-        for &split_idx in &split_indices {
-            if split_idx > start_idx {
-                segments.push((start_idx, split_idx));
-            }
-            start_idx = split_idx;
-        }
-
-        // Add final segment
-        if start_idx < polyline.len() {
-            segments.push((start_idx, polyline.len()));
-        }
-
-        // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
-        // This prevents 200m → 100m + 100m type splits that create tiny pieces
-        let segment_lengths: Vec<f64> = segments
-            .iter()
-            .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
-            .collect();
-        let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
-        let split_ratio = min_segment_length / section.distance_meters;
-
-        if split_ratio < 0.4 && segments.len() > 1 {
-            // Splitting would create unbalanced fragments - keep original
-            result.push(section);
-            continue;
-        }
-
-        // Create new sections from segments
-        let mut split_count = 0;
-        for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
-            let seg_polyline = polyline[seg_start..seg_end].to_vec();
-            let seg_length = segment_lengths[idx];
-
-            if seg_length >= MIN_HEADING_SPLIT_LENGTH && seg_polyline.len() >= 3 {
-                let mut new_section = section.clone();
-                new_section.id = format!("{}_h{}", section.id, split_count);
-                new_section.polyline = seg_polyline;
-                new_section.distance_meters = seg_length;
-                new_section.activity_traces = HashMap::new();
-                result.push(new_section);
-                split_count += 1;
-            }
-        }
-
-        if split_count > 1 {
-            info!(
-                "[Sections] Split {} at {} heading inflection points -> {} segments",
-                section.id,
-                split_indices.len(),
-                split_count
-            );
-        } else if split_count == 0 {
-            // No valid splits produced, keep original
-            result.push(section);
-        }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        sections
+            .into_par_iter()
+            .flat_map(process_heading_section)
+            .collect()
     }
 
-    result
+    #[cfg(not(feature = "parallel"))]
+    {
+        sections
+            .into_iter()
+            .flat_map(process_heading_section)
+            .collect()
+    }
 }
 
 /// Find indices where there's a sustained heading change.
@@ -395,6 +433,93 @@ const GRADIENT_WINDOW_METERS: f64 = 75.0;
 /// Keeps sections meaningful - no tiny fragments.
 const MIN_GRADIENT_SPLIT_LENGTH: f64 = 300.0;
 
+/// Process a single section for gradient-based splitting.
+fn process_gradient_section(section: FrequentSection) -> Vec<FrequentSection> {
+    let polyline = &section.polyline;
+
+    // Guard 1: Skip splitting sections that are already short
+    // Based on MDL principle - splitting short sections rarely improves quality
+    if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
+        return vec![section];
+    }
+
+    // Check if we have elevation data
+    let has_elevation = polyline.iter().any(|p| p.elevation.is_some());
+    if !has_elevation || polyline.len() < 10 {
+        return vec![section];
+    }
+
+    // Find gradient inflection points
+    let split_indices = find_gradient_inflection_points(polyline);
+
+    if split_indices.is_empty() {
+        return vec![section];
+    }
+
+    // Split the section at each inflection point
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut start_idx = 0;
+
+    for &split_idx in &split_indices {
+        if split_idx > start_idx {
+            segments.push((start_idx, split_idx));
+        }
+        start_idx = split_idx;
+    }
+
+    // Add final segment
+    if start_idx < polyline.len() {
+        segments.push((start_idx, polyline.len()));
+    }
+
+    // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
+    // This prevents 200m → 100m + 100m type splits that create tiny pieces
+    let segment_lengths: Vec<f64> = segments
+        .iter()
+        .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
+        .collect();
+    let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
+    let split_ratio = min_segment_length / section.distance_meters;
+
+    if split_ratio < 0.4 && segments.len() > 1 {
+        // Splitting would create unbalanced fragments - keep original
+        return vec![section];
+    }
+
+    // Create new sections from segments
+    let mut result = Vec::new();
+    let mut split_count = 0;
+    for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
+        let seg_polyline = polyline[seg_start..seg_end].to_vec();
+        let seg_length = segment_lengths[idx];
+
+        if seg_length >= MIN_GRADIENT_SPLIT_LENGTH && seg_polyline.len() >= 3 {
+            let mut new_section = section.clone();
+            new_section.id = format!("{}_g{}", section.id, split_count);
+            new_section.polyline = seg_polyline;
+            new_section.distance_meters = seg_length;
+            new_section.activity_traces = HashMap::new();
+            result.push(new_section);
+            split_count += 1;
+        }
+    }
+
+    if split_count > 1 {
+        info!(
+            "[Sections] Split {} at {} gradient inflection points -> {} segments",
+            section.id,
+            split_indices.len(),
+            split_count
+        );
+    }
+
+    if result.is_empty() {
+        vec![section]
+    } else {
+        result
+    }
+}
+
 /// Split sections at sustained gradient changes.
 ///
 /// A section is split where gradient changes significantly (flat→uphill,
@@ -410,94 +535,22 @@ pub fn split_at_gradient_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    let mut result = Vec::new();
-
-    for section in sections {
-        let polyline = &section.polyline;
-
-        // Guard 1: Skip splitting sections that are already short
-        // Based on MDL principle - splitting short sections rarely improves quality
-        if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
-            result.push(section);
-            continue;
-        }
-
-        // Check if we have elevation data
-        let has_elevation = polyline.iter().any(|p| p.elevation.is_some());
-        if !has_elevation || polyline.len() < 10 {
-            result.push(section);
-            continue;
-        }
-
-        // Find gradient inflection points
-        let split_indices = find_gradient_inflection_points(polyline);
-
-        if split_indices.is_empty() {
-            result.push(section);
-            continue;
-        }
-
-        // Split the section at each inflection point
-        let mut segments: Vec<(usize, usize)> = Vec::new();
-        let mut start_idx = 0;
-
-        for &split_idx in &split_indices {
-            if split_idx > start_idx {
-                segments.push((start_idx, split_idx));
-            }
-            start_idx = split_idx;
-        }
-
-        // Add final segment
-        if start_idx < polyline.len() {
-            segments.push((start_idx, polyline.len()));
-        }
-
-        // Guard 2: Check ratio - don't split if smallest fragment < 40% of original
-        // This prevents 200m → 100m + 100m type splits that create tiny pieces
-        let segment_lengths: Vec<f64> = segments
-            .iter()
-            .map(|&(s, e)| calculate_route_distance(&polyline[s..e]))
-            .collect();
-        let min_segment_length = segment_lengths.iter().cloned().fold(f64::MAX, f64::min);
-        let split_ratio = min_segment_length / section.distance_meters;
-
-        if split_ratio < 0.4 && segments.len() > 1 {
-            // Splitting would create unbalanced fragments - keep original
-            result.push(section);
-            continue;
-        }
-
-        // Create new sections from segments
-        let mut split_count = 0;
-        for (idx, &(seg_start, seg_end)) in segments.iter().enumerate() {
-            let seg_polyline = polyline[seg_start..seg_end].to_vec();
-            let seg_length = segment_lengths[idx];
-
-            if seg_length >= MIN_GRADIENT_SPLIT_LENGTH && seg_polyline.len() >= 3 {
-                let mut new_section = section.clone();
-                new_section.id = format!("{}_g{}", section.id, split_count);
-                new_section.polyline = seg_polyline;
-                new_section.distance_meters = seg_length;
-                new_section.activity_traces = HashMap::new();
-                result.push(new_section);
-                split_count += 1;
-            }
-        }
-
-        if split_count > 1 {
-            info!(
-                "[Sections] Split {} at {} gradient inflection points -> {} segments",
-                section.id,
-                split_indices.len(),
-                split_count
-            );
-        } else if split_count == 0 {
-            result.push(section);
-        }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        sections
+            .into_par_iter()
+            .flat_map(process_gradient_section)
+            .collect()
     }
 
-    result
+    #[cfg(not(feature = "parallel"))]
+    {
+        sections
+            .into_iter()
+            .flat_map(process_gradient_section)
+            .collect()
+    }
 }
 
 /// Find indices where there's a sustained gradient change.
@@ -593,6 +646,20 @@ pub fn merge_nearby_sections(
     // Sort by visit count descending - keep the most visited version
     sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
 
+    // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
+    #[cfg(feature = "parallel")]
+    let rtrees: Vec<RTree<IndexedPoint>> = {
+        use rayon::prelude::*;
+        sections
+            .par_iter()
+            .map(|s| build_rtree(&s.polyline))
+            .collect()
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let rtrees: Vec<RTree<IndexedPoint>> =
+        sections.iter().map(|s| build_rtree(&s.polyline)).collect();
+
     let mut keep: Vec<bool> = vec![true; sections.len()];
 
     // Use a very generous threshold for merging nearby sections
@@ -605,7 +672,7 @@ pub fn merge_nearby_sections(
         }
 
         let section_i = &sections[i];
-        let tree_i = build_rtree(&section_i.polyline);
+        let tree_i = &rtrees[i]; // Use pre-computed R-tree (O(1) lookup)
 
         for j in (i + 1)..sections.len() {
             if !keep[j] {
@@ -622,11 +689,11 @@ pub fn merge_nearby_sections(
 
             // Check forward containment with generous threshold
             let forward_containment =
-                compute_containment(&section_j.polyline, &tree_i, merge_threshold);
+                compute_containment(&section_j.polyline, tree_i, merge_threshold);
 
             // Check reverse containment
             let reversed_j: Vec<GpsPoint> = section_j.polyline.iter().rev().cloned().collect();
-            let reverse_containment = compute_containment(&reversed_j, &tree_i, merge_threshold);
+            let reverse_containment = compute_containment(&reversed_j, tree_i, merge_threshold);
 
             let max_containment = forward_containment.max(reverse_containment);
 
@@ -1023,6 +1090,20 @@ pub fn remove_overlapping_sections(
         },
     );
 
+    // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
+    #[cfg(feature = "parallel")]
+    let rtrees: Vec<RTree<IndexedPoint>> = {
+        use rayon::prelude::*;
+        sections
+            .par_iter()
+            .map(|s| build_rtree(&s.polyline))
+            .collect()
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let rtrees: Vec<RTree<IndexedPoint>> =
+        sections.iter().map(|s| build_rtree(&s.polyline)).collect();
+
     // Compute which sections are loops (protected from removal)
     let is_loop: Vec<bool> = sections
         .iter()
@@ -1039,7 +1120,7 @@ pub fn remove_overlapping_sections(
         }
 
         let section_i = &sections[i];
-        let tree_i = build_rtree(&section_i.polyline);
+        let tree_i = &rtrees[i]; // Use pre-computed R-tree (O(1) lookup)
 
         for j in (i + 1)..sections.len() {
             if !keep[j] {
@@ -1047,13 +1128,13 @@ pub fn remove_overlapping_sections(
             }
 
             let section_j = &sections[j];
-            let tree_j = build_rtree(&section_j.polyline);
+            let tree_j = &rtrees[j]; // Use pre-computed R-tree (O(1) lookup)
 
             // Check mutual containment
             let j_in_i =
-                compute_containment(&section_j.polyline, &tree_i, config.proximity_threshold);
+                compute_containment(&section_j.polyline, tree_i, config.proximity_threshold);
             let i_in_j =
-                compute_containment(&section_i.polyline, &tree_j, config.proximity_threshold);
+                compute_containment(&section_i.polyline, tree_j, config.proximity_threshold);
 
             // If j is largely contained in i (j is the longer one since we sorted by length)
             // j should be removed because i is the more specific section
@@ -1390,14 +1471,22 @@ pub fn split_high_variance_sections(
     track_map: &HashMap<String, Vec<GpsPoint>>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    let mut result = Vec::new();
-
-    for section in sections {
-        let split = split_section_by_density(section, track_map, config);
-        result.extend(split);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        sections
+            .into_par_iter()
+            .flat_map(|section| split_section_by_density(section, track_map, config))
+            .collect()
     }
 
-    result
+    #[cfg(not(feature = "parallel"))]
+    {
+        sections
+            .into_iter()
+            .flat_map(|section| split_section_by_density(section, track_map, config))
+            .collect()
+    }
 }
 
 // =============================================================================

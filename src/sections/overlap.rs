@@ -184,11 +184,19 @@ pub fn cluster_overlaps(
     clusters
 }
 
-/// Check if two polylines overlap geometrically
+/// Check if two polylines overlap geometrically (using R-tree for O(log n) lookups).
 fn overlaps_match(poly_a: &[GpsPoint], poly_b: &[GpsPoint], threshold: f64) -> bool {
+    use super::rtree::build_rtree;
+    use rstar::PointDistance;
+
     if poly_a.is_empty() || poly_b.is_empty() {
         return false;
     }
+
+    // Build R-tree for poly_b (O(n log n)) - enables O(log n) nearest neighbor queries
+    let tree_b = build_rtree(poly_b);
+    let threshold_deg = threshold / 111_000.0;
+    let threshold_deg_sq = threshold_deg * threshold_deg;
 
     // Sample points from poly_a and check how many are close to poly_b
     let sample_count = 10.min(poly_a.len());
@@ -197,15 +205,13 @@ fn overlaps_match(poly_a: &[GpsPoint], poly_b: &[GpsPoint], threshold: f64) -> b
 
     for i in (0..poly_a.len()).step_by(step.max(1)).take(sample_count) {
         let point = &poly_a[i];
-        // Find min distance to poly_b
-        let min_dist = poly_b
-            .iter()
-            .map(|p| haversine_distance(point, p))
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(f64::MAX);
+        let query = [point.latitude, point.longitude];
 
-        if min_dist <= threshold {
-            matches += 1;
+        // Use R-tree for O(log n) nearest neighbor lookup instead of O(n) linear scan
+        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
+            if nearest.distance_2(&query) <= threshold_deg_sq {
+                matches += 1;
+            }
         }
     }
 

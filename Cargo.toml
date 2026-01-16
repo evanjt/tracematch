@@ -56,9 +56,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 iai-callgrind = "0.14"
 
-# [[bench]]
-# name = "route_benchmarks"
-# harness = false
+[[bench]]
+name = "section_detection"
+harness = false
 
 [[bench]]
 name = "iai_benchmarks"
