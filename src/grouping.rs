@@ -3,7 +3,7 @@
 //! This module provides functionality to group similar routes together
 //! using spatial indexing and Union-Find for efficient grouping.
 
-use rstar::{RTree, AABB};
+use rstar::{AABB, RTree};
 use std::collections::HashMap;
 
 use crate::geo_utils::haversine_distance;
@@ -197,10 +197,10 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
 
             if let Some(sig2) = sig_map.get(bounds.activity_id.as_str()) {
                 // Only group if match exists AND passes strict grouping criteria
-                if let Some(match_result) = compare_routes(sig1, sig2, config) {
-                    if should_group_routes(sig1, sig2, &match_result, config) {
-                        uf.union(&sig1.activity_id, &bounds.activity_id);
-                    }
+                if let Some(match_result) = compare_routes(sig1, sig2, config)
+                    && should_group_routes(sig1, sig2, &match_result, config)
+                {
+                    uf.union(&sig1.activity_id, &bounds.activity_id);
                 }
             }
         }

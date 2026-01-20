@@ -4,8 +4,8 @@
 //! to all other traces. This ensures we return REAL GPS points, not artificial interpolations.
 
 use super::overlap::OverlapCluster;
-use crate::geo_utils::haversine_distance;
 use crate::GpsPoint;
+use crate::geo_utils::haversine_distance;
 
 /// Select the medoid trace from a cluster.
 /// The medoid is the actual GPS trace with minimum total AMD to all other traces.

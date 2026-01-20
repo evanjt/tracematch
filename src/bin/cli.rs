@@ -9,17 +9,17 @@
 //! are being matched and grouped.
 
 use clap::{Parser, Subcommand};
-use gpx::{read, Gpx};
+use gpx::{Gpx, read};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use tracematch::{
+    GpsPoint, MatchConfig, RouteGroup, RouteSignature,
     grouping::group_signatures,
     sections::{
-        detect_sections_multiscale, detect_sections_optimized, FrequentSection, SectionConfig,
+        FrequentSection, SectionConfig, detect_sections_multiscale, detect_sections_optimized,
     },
-    GpsPoint, MatchConfig, RouteGroup, RouteSignature,
 };
 
 #[derive(Parser)]

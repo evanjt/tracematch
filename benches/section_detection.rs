@@ -5,11 +5,11 @@
 //! These benchmarks measure the real-world performance of section detection
 //! with varying numbers of activities.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracematch::{detect_sections_multiscale, GpsPoint, RouteGroup, SectionConfig};
+use tracematch::{GpsPoint, RouteGroup, SectionConfig, detect_sections_multiscale};
 
 /// Load GPS points from a trimmed activity JSON file.
 fn load_trimmed_activity(path: &Path) -> Option<Vec<GpsPoint>> {

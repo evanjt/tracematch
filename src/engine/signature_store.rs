@@ -118,13 +118,12 @@ impl SignatureStore {
         let dirty_ids: Vec<String> = self.dirty.drain().collect();
 
         for id in dirty_ids {
-            if let Some(activity) = store.get(&id) {
-                if let Some(sig) =
+            if let Some(activity) = store.get(&id)
+                && let Some(sig) =
                     RouteSignature::from_points(&activity.id, &activity.coords, config)
-                {
-                    self.signatures.insert(id.clone(), sig);
-                    self.newly_computed.insert(id);
-                }
+            {
+                self.signatures.insert(id.clone(), sig);
+                self.newly_computed.insert(id);
             }
         }
     }
@@ -138,13 +137,12 @@ impl SignatureStore {
     ) -> Option<&RouteSignature> {
         // Compute if dirty
         if self.dirty.contains(id) {
-            if let Some(activity) = store.get(id) {
-                if let Some(sig) =
+            if let Some(activity) = store.get(id)
+                && let Some(sig) =
                     RouteSignature::from_points(&activity.id, &activity.coords, config)
-                {
-                    self.signatures.insert(id.to_string(), sig);
-                    self.newly_computed.insert(id.to_string());
-                }
+            {
+                self.signatures.insert(id.to_string(), sig);
+                self.newly_computed.insert(id.to_string());
             }
             self.dirty.remove(id);
         }

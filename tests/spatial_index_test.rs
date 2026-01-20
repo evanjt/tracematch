@@ -2,7 +2,7 @@
 //!
 //! Tests extracted from src/engine/spatial_index.rs
 
-use tracematch::{engine::SpatialIndex, GpsPoint};
+use tracematch::{GpsPoint, engine::SpatialIndex};
 
 fn sample_coords_london() -> Vec<GpsPoint> {
     (0..10)

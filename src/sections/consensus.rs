@@ -9,7 +9,7 @@
 //! 3. Compute weighted centroid of nearby points
 //! 4. Track observation density for confidence scoring
 
-use super::rtree::{build_rtree, IndexedPoint};
+use super::rtree::{IndexedPoint, build_rtree};
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
 

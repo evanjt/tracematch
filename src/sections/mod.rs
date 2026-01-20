@@ -49,7 +49,7 @@ use crate::persistence::SectionDetectionProgress;
 pub(crate) use consensus::compute_consensus_polyline;
 pub(crate) use medoid::select_medoid;
 pub(crate) use overlap::{
-    cluster_overlaps, find_full_track_overlap, FullTrackOverlap, OverlapCluster,
+    FullTrackOverlap, OverlapCluster, cluster_overlaps, find_full_track_overlap,
 };
 pub(crate) use portions::compute_activity_portions;
 pub(crate) use postprocess::{
@@ -57,19 +57,19 @@ pub(crate) use postprocess::{
     merge_nearby_sections, remove_overlapping_sections, split_at_gradient_changes,
     split_at_heading_changes, split_folding_sections, split_high_variance_sections,
 };
-pub(crate) use rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
+pub(crate) use rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
 pub(crate) use traces::extract_all_activity_traces;
 
 // Re-export evolution functions for public API
 pub use evolution::{
-    merge_overlapping_sections, update_section_with_new_traces, SectionUpdateResult,
+    SectionUpdateResult, merge_overlapping_sections, update_section_with_new_traces,
 };
 
 // Re-export optimized detection functions
 pub use optimized::{
-    detect_sections_incremental, detect_sections_optimized, find_sections_in_route,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
-    IncrementalResult, SectionMatch, SplitResult,
+    IncrementalResult, SectionMatch, SplitResult, detect_sections_incremental,
+    detect_sections_optimized, find_sections_in_route, recalculate_section_polyline,
+    split_section_at_index, split_section_at_point,
 };
 
 /// Compute initial stability score from consensus metrics.
@@ -882,28 +882,28 @@ fn process_scale_preset(
             for (idx, cluster) in potential.into_iter().enumerate() {
                 // Only include clusters with 1-2 activities
                 let activity_count = cluster.activity_ids.len();
-                if activity_count >= 1 && activity_count < preset.min_activities as usize {
-                    if let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster)) {
-                        if !rep_polyline.is_empty() {
-                            let distance = calculate_route_distance(&rep_polyline);
-                            if distance >= preset.min_length && distance <= preset.max_length {
-                                scale_potentials.push(PotentialSection {
-                                    id: format!(
-                                        "pot_{}_{}_{}",
-                                        preset.name,
-                                        sport_type.to_lowercase(),
-                                        idx
-                                    ),
-                                    sport_type: sport_type.to_string(),
-                                    polyline: rep_polyline,
-                                    activity_ids: cluster.activity_ids.into_iter().collect(),
-                                    visit_count: activity_count as u32,
-                                    distance_meters: distance,
-                                    confidence: 0.3 + (activity_count as f64 * 0.2), // 0.5 for 1, 0.7 for 2
-                                    scale: preset.name.clone(),
-                                });
-                            }
-                        }
+                if activity_count >= 1
+                    && activity_count < preset.min_activities as usize
+                    && let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster))
+                    && !rep_polyline.is_empty()
+                {
+                    let distance = calculate_route_distance(&rep_polyline);
+                    if distance >= preset.min_length && distance <= preset.max_length {
+                        scale_potentials.push(PotentialSection {
+                            id: format!(
+                                "pot_{}_{}_{}",
+                                preset.name,
+                                sport_type.to_lowercase(),
+                                idx
+                            ),
+                            sport_type: sport_type.to_string(),
+                            polyline: rep_polyline,
+                            activity_ids: cluster.activity_ids.into_iter().collect(),
+                            visit_count: activity_count as u32,
+                            distance_meters: distance,
+                            confidence: 0.3 + (activity_count as f64 * 0.2), // 0.5 for 1, 0.7 for 2
+                            scale: preset.name.clone(),
+                        });
                     }
                 }
             }
@@ -1393,29 +1393,29 @@ pub fn detect_sections_multiscale_with_progress(
                 for (idx, cluster) in potential.into_iter().enumerate() {
                     // Only include clusters with 1-2 activities
                     let activity_count = cluster.activity_ids.len();
-                    if activity_count >= 1 && activity_count < preset.min_activities as usize {
-                        if let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster)) {
-                            if !rep_polyline.is_empty() {
-                                let distance = calculate_route_distance(&rep_polyline);
-                                if distance >= preset.min_length && distance <= preset.max_length {
-                                    all_potentials.push(PotentialSection {
-                                        id: format!(
-                                            "pot_{}_{}_{}",
-                                            preset.name,
-                                            sport_type.to_lowercase(),
-                                            idx
-                                        ),
-                                        sport_type: sport_type.to_string(),
-                                        polyline: rep_polyline,
-                                        activity_ids: cluster.activity_ids.into_iter().collect(),
-                                        visit_count: activity_count as u32,
-                                        distance_meters: distance,
-                                        confidence: 0.3 + (activity_count as f64 * 0.2),
-                                        scale: preset.name.clone(),
-                                    });
-                                    scale_potentials += 1;
-                                }
-                            }
+                    if activity_count >= 1
+                        && activity_count < preset.min_activities as usize
+                        && let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster))
+                        && !rep_polyline.is_empty()
+                    {
+                        let distance = calculate_route_distance(&rep_polyline);
+                        if distance >= preset.min_length && distance <= preset.max_length {
+                            all_potentials.push(PotentialSection {
+                                id: format!(
+                                    "pot_{}_{}_{}",
+                                    preset.name,
+                                    sport_type.to_lowercase(),
+                                    idx
+                                ),
+                                sport_type: sport_type.to_string(),
+                                polyline: rep_polyline,
+                                activity_ids: cluster.activity_ids.into_iter().collect(),
+                                visit_count: activity_count as u32,
+                                distance_meters: distance,
+                                confidence: 0.3 + (activity_count as f64 * 0.2),
+                                scale: preset.name.clone(),
+                            });
+                            scale_potentials += 1;
                         }
                     }
                 }
@@ -1592,10 +1592,10 @@ fn compute_polyline_containment_with_rtree(
     let mut contained_count = 0;
     for point_a in polyline_a {
         let query = [point_a.latitude, point_a.longitude];
-        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
-            if nearest.distance_2(&query) <= threshold_deg_sq {
-                contained_count += 1;
-            }
+        if let Some(nearest) = tree_b.nearest_neighbor(&query)
+            && nearest.distance_2(&query) <= threshold_deg_sq
+        {
+            contained_count += 1;
         }
     }
 

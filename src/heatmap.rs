@@ -352,14 +352,13 @@ pub fn generate_heatmap(
 
         for point in &sig.points {
             // Skip points outside bounds if specified
-            if let Some(bounds) = &config.bounds {
-                if point.latitude < bounds.min_lat
+            if let Some(bounds) = &config.bounds
+                && (point.latitude < bounds.min_lat
                     || point.latitude > bounds.max_lat
                     || point.longitude < bounds.min_lng
-                    || point.longitude > bounds.max_lng
-                {
-                    continue;
-                }
+                    || point.longitude > bounds.max_lng)
+            {
+                continue;
             }
 
             grid.add_point(

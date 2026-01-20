@@ -40,6 +40,21 @@ if let (Some(s1), Some(s2)) = (sig1, sig2) {
 }
 ```
 
+## References
+
+Section detection:
+- **TRACLUS** (Lee, Han, Whang, SIGMOD 2007) - MDL-based trajectory partitioning ([paper](https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf))
+- **TS-MF** (Xu et al., 2022) - Trajectory segmentation and mergence ([paper](https://www.hindawi.com/journals/wcmc/2022/9540944/))
+- **Graph-based trajectory clustering** (Hwang et al., 2013) - Network-constrained clustering ([paper](https://arxiv.org/abs/1310.5249))
+- **GPS segment averaging** (MDPI 2019) - Consensus polyline computation ([paper](https://mdpi.com/2076-3417/9/22/4899/htm))
+
+Foundational algorithms:
+- **R\*-tree** (Beckmann et al., SIGMOD 1990) - Spatial indexing ([paper](https://dl.acm.org/doi/10.1145/93597.98741))
+- **Union-Find** (Tarjan, 1975) - Disjoint set clustering ([paper](https://dl.acm.org/doi/10.1145/321879.321884))
+- **Douglas-Peucker** (Douglas & Peucker, 1973) - Line simplification ([paper](https://doi.org/10.3138/FM57-6770-U75U-7727))
+- **Medoid/k-medoids** (Kaufman & Rousseeuw, 1987) - Representative selection
+- **Haversine formula** - Great-circle distance ([Wikipedia](https://en.wikipedia.org/wiki/Haversine_formula))
+
 ## License
 
 Apache-2.0

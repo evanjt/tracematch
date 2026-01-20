@@ -110,23 +110,19 @@ pub use crate::group_incremental;
 // Section Detection
 // =============================================================================
 
-/// Main section detection function
-pub use crate::sections::detect_sections_from_tracks;
 /// Detected frequently-traveled section
 pub use crate::sections::FrequentSection;
 /// Configuration for section detection
 pub use crate::sections::SectionConfig;
 /// Activity's portion of a section
 pub use crate::sections::SectionPortion;
+/// Main section detection function
+pub use crate::sections::detect_sections_from_tracks;
 
 // =============================================================================
 // Heatmap Generation
 // =============================================================================
 
-/// Generate heatmap from signatures
-pub use crate::heatmap::generate_heatmap;
-/// Query cell at location
-pub use crate::heatmap::query_heatmap_cell;
 /// Activity metadata for heatmap
 pub use crate::heatmap::ActivityHeatmapData;
 /// Cell query result
@@ -141,6 +137,10 @@ pub use crate::heatmap::HeatmapConfig;
 pub use crate::heatmap::HeatmapResult;
 /// Route reference in a cell
 pub use crate::heatmap::RouteRef;
+/// Generate heatmap from signatures
+pub use crate::heatmap::generate_heatmap;
+/// Query cell at location
+pub use crate::heatmap::query_heatmap_cell;
 
 // =============================================================================
 // Line Simplification
@@ -170,7 +170,7 @@ pub use crate::heatmap::RouteRef;
 /// let simplified = douglas_peucker(&track, 0.0001);
 /// ```
 pub fn douglas_peucker(points: &[crate::GpsPoint], tolerance: f64) -> Vec<crate::GpsPoint> {
-    use geo::{algorithm::simplify::Simplify, Coord, LineString};
+    use geo::{Coord, LineString, algorithm::simplify::Simplify};
 
     if points.len() < 2 {
         return points.to_vec();

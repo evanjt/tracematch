@@ -496,7 +496,7 @@ impl ModularRouteEngine {
                     performances: vec![],
                     best: None,
                     current_rank: None,
-                }
+                };
             }
         };
 
@@ -593,7 +593,7 @@ impl ModularRouteEngine {
                 return SectionPerformanceResult {
                     records: vec![],
                     best_record: None,
-                }
+                };
             }
         };
 

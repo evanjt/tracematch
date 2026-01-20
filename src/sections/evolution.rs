@@ -11,12 +11,12 @@
 //! - New observations contribute less as section matures
 
 use super::{
-    compute_consensus_polyline, compute_initial_stability, FrequentSection, SectionConfig,
-    SectionPortion,
+    FrequentSection, SectionConfig, SectionPortion, compute_consensus_polyline,
+    compute_initial_stability,
 };
+use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
-use crate::GpsPoint;
 use log::info;
 use std::collections::HashMap;
 

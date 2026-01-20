@@ -2,7 +2,7 @@
 //!
 //! Tests extracted from src/engine/activity_store.rs
 
-use tracematch::{engine::ActivityStore, GpsPoint};
+use tracematch::{GpsPoint, engine::ActivityStore};
 
 fn sample_coords() -> Vec<GpsPoint> {
     (0..10)

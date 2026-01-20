@@ -6,11 +6,11 @@
 //! - GPS Segment Averaging (MDPI 2019)
 //!   https://mdpi.com/2076-3417/9/22/4899/htm
 
-use super::rtree::{build_rtree, IndexedPoint};
+use super::rtree::{IndexedPoint, build_rtree};
 use super::{FrequentSection, SectionConfig};
+use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
-use crate::GpsPoint;
 use log::info;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;
@@ -85,10 +85,10 @@ fn compute_fold_ratio(polyline: &[GpsPoint], threshold: f64) -> f64 {
     for point in last_third.iter().rev() {
         // Reversed order for out-and-back
         let query = [point.latitude, point.longitude];
-        if let Some(nearest) = first_tree.nearest_neighbor(&query) {
-            if nearest.distance_2(&query) <= threshold_deg_sq {
-                close_count += 1;
-            }
+        if let Some(nearest) = first_tree.nearest_neighbor(&query)
+            && nearest.distance_2(&query) <= threshold_deg_sq
+        {
+            close_count += 1;
         }
     }
 
@@ -709,7 +709,11 @@ pub fn merge_nearby_sections(
 
                 info!(
                     "[Sections] Merged nearby {} section {} into {} ({:.0}% overlap @ {}m threshold)",
-                    direction, section_j.id, section_i.id, max_containment * 100.0, merge_threshold as i32
+                    direction,
+                    section_j.id,
+                    section_i.id,
+                    max_containment * 100.0,
+                    merge_threshold as i32
                 );
             }
         }
@@ -1038,9 +1042,13 @@ fn merge_short_fragments(
 
                 info!(
                     "[Sections] Merged fragments {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
-                    section_i.id, section_j.id, merged_section.id,
-                    section_i.distance_meters, section_j.distance_meters,
-                    merged_distance, gap
+                    section_i.id,
+                    section_j.id,
+                    merged_section.id,
+                    section_i.distance_meters,
+                    section_j.distance_meters,
+                    merged_distance,
+                    gap
                 );
 
                 result.push(merged_section);
@@ -1221,10 +1229,10 @@ fn compute_containment(poly_a: &[GpsPoint], tree_b: &RTree<IndexedPoint>, thresh
 
     for point in poly_a {
         let query = [point.latitude, point.longitude];
-        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
-            if nearest.distance_2(&query) <= threshold_deg_sq {
-                contained_points += 1;
-            }
+        if let Some(nearest) = tree_b.nearest_neighbor(&query)
+            && nearest.distance_2(&query) <= threshold_deg_sq
+        {
+            contained_points += 1;
         }
     }
 
@@ -1401,10 +1409,10 @@ fn split_section_by_density(
 
                 for point in track {
                     let query = [point.latitude, point.longitude];
-                    if let Some(nearest) = split_tree.nearest_neighbor(&query) {
-                        if nearest.distance_2(&query) <= threshold_deg_sq {
-                            overlap_points.push(*point);
-                        }
+                    if let Some(nearest) = split_tree.nearest_neighbor(&query)
+                        && nearest.distance_2(&query) <= threshold_deg_sq
+                    {
+                        overlap_points.push(*point);
                     }
                 }
 
@@ -1591,11 +1599,11 @@ fn trim_to_unclaimed(
         let query = [point.latitude, point.longitude];
 
         for tree in claimed_trees {
-            if let Some(nearest) = tree.nearest_neighbor(&query) {
-                if nearest.distance_2(&query) <= threshold_deg_sq {
-                    unclaimed_mask[point_idx] = false;
-                    break;
-                }
+            if let Some(nearest) = tree.nearest_neighbor(&query)
+                && nearest.distance_2(&query) <= threshold_deg_sq
+            {
+                unclaimed_mask[point_idx] = false;
+                break;
             }
         }
     }

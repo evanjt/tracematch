@@ -14,16 +14,17 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::rtree::{bounds_overlap_tracks, build_rtree, IndexedPoint};
+use super::rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
 use super::{
-    cluster_overlaps, compute_consensus_polyline, compute_initial_stability, consolidate_fragments,
-    extract_all_activity_traces, filter_low_quality_sections, make_sections_exclusive,
-    merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
-    split_at_heading_changes, FrequentSection, FullTrackOverlap, SectionConfig,
+    FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps, compute_consensus_polyline,
+    compute_initial_stability, consolidate_fragments, extract_all_activity_traces,
+    filter_low_quality_sections, make_sections_exclusive, merge_nearby_sections,
+    remove_overlapping_sections, select_medoid, split_at_gradient_changes,
+    split_at_heading_changes,
 };
+use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
-use crate::GpsPoint;
 use log::info;
 use rstar::{PointDistance, RTree};
 use std::collections::{HashMap, HashSet};
