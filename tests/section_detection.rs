@@ -695,3 +695,91 @@ fn test_investigate_start_section() {
     // The test should pass - we're investigating, not asserting specific behavior
     // If A1-A4 share a START section, we expect to find it in start_tracks
 }
+
+// ============================================================================
+// LINESTRING VALIDITY TESTS
+// ============================================================================
+
+#[test]
+fn test_no_sparse_linestrings_in_output() {
+    // All sections must have at least 2 points in their polyline.
+    // A LineString with fewer than 2 points is invalid and would cause
+    // rendering errors in GeoJSON consumers.
+
+    let tracks = load_all_fixtures();
+    let sport_types = create_sport_types(&tracks);
+
+    // Test single-scale detection
+    let config = SectionConfig {
+        min_section_length: 100.0,
+        max_section_length: 5000.0,
+        min_activities: 2,
+        proximity_threshold: 50.0,
+        ..SectionConfig::default()
+    };
+
+    let sections = detect_sections_from_tracks(&tracks, &sport_types, &[], &config);
+
+    for section in &sections {
+        assert!(
+            section.polyline.len() >= 2,
+            "Section {} has sparse polyline ({} points) - LineString requires at least 2 points",
+            section.id,
+            section.polyline.len()
+        );
+    }
+
+    // Test multi-scale detection
+    let multiscale_config = SectionConfig {
+        proximity_threshold: 50.0,
+        cluster_tolerance: 100.0,
+        scale_presets: vec![
+            ScalePreset {
+                name: "short".to_string(),
+                min_length: 100.0,
+                max_length: 500.0,
+                min_activities: 2,
+            },
+            ScalePreset {
+                name: "medium".to_string(),
+                min_length: 400.0,
+                max_length: 1500.0,
+                min_activities: 2,
+            },
+            ScalePreset {
+                name: "long".to_string(),
+                min_length: 1000.0,
+                max_length: 5000.0,
+                min_activities: 2,
+            },
+        ],
+        include_potentials: true,
+        ..SectionConfig::default()
+    };
+
+    let result = detect_sections_multiscale(&tracks, &sport_types, &[], &multiscale_config);
+
+    for section in &result.sections {
+        assert!(
+            section.polyline.len() >= 2,
+            "Multi-scale section {} has sparse polyline ({} points)",
+            section.id,
+            section.polyline.len()
+        );
+    }
+
+    for potential in &result.potentials {
+        assert!(
+            potential.polyline.len() >= 2,
+            "Potential section {} has sparse polyline ({} points)",
+            potential.id,
+            potential.polyline.len()
+        );
+    }
+
+    println!(
+        "Verified {} sections and {} potentials have valid LineStrings (>= 2 points)",
+        sections.len() + result.sections.len(),
+        result.potentials.len()
+    );
+}
