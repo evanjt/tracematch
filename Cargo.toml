@@ -1,6 +1,6 @@
 [package]
 name = "tracematch"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 authors = ["Evan Thomas <evan@evanjt.com>"]
 license = "Apache-2.0"
