@@ -381,15 +381,32 @@ pub fn ffi_detect_sections_multiscale(
 
     let result = crate::sections::detect_sections_multiscale(&tracks, &sport_map, &groups, &config);
 
+    // Filter out sparse sections - a valid LineString requires at least 2 points
+    // This is defense-in-depth (creation-time validation also exists in mod.rs)
+    let filtered_sections: Vec<_> = result
+        .sections
+        .into_iter()
+        .filter(|s| s.polyline.len() >= 2)
+        .collect();
+    let filtered_potentials: Vec<_> = result
+        .potentials
+        .into_iter()
+        .filter(|p| p.polyline.len() >= 2)
+        .collect();
+
     let elapsed = start.elapsed();
     info!(
         "[RouteMatcherRust] Multi-scale detection: {} sections, {} potentials in {:?}",
-        result.sections.len(),
-        result.potentials.len(),
+        filtered_sections.len(),
+        filtered_potentials.len(),
         elapsed
     );
 
-    result
+    crate::MultiScaleSectionResult {
+        sections: filtered_sections,
+        potentials: filtered_potentials,
+        stats: result.stats,
+    }
 }
 
 /// Optimized section detection using downsampling and grid partitioning.
@@ -443,14 +460,21 @@ pub fn ffi_detect_sections_optimized(
 
     let result = crate::sections::detect_sections_optimized(&tracks, &sport_map, &config);
 
+    // Filter out sparse sections - a valid LineString requires at least 2 points
+    // This is defense-in-depth (creation-time validation also exists in mod.rs)
+    let filtered: Vec<_> = result
+        .into_iter()
+        .filter(|s| s.polyline.len() >= 2)
+        .collect();
+
     let elapsed = start.elapsed();
     info!(
         "[RouteMatcherRust] Optimized detection: {} sections in {:?}",
-        result.len(),
+        filtered.len(),
         elapsed
     );
 
-    result
+    filtered
 }
 
 // ============================================================================

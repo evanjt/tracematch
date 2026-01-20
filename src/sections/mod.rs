@@ -414,6 +414,11 @@ fn process_cluster(
         config.proximity_threshold,
     );
 
+    // Reject sparse sections - a valid LineString requires at least 2 points
+    if consensus.polyline.len() < 2 {
+        return None;
+    }
+
     // Use consensus polyline and update distance
     let consensus_distance = calculate_route_distance(&consensus.polyline);
 
