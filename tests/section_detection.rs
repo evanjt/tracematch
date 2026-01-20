@@ -12,8 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use tracematch::{
-    detect_sections_from_tracks, detect_sections_multiscale, group_signatures, GpsPoint,
-    MatchConfig, RouteSignature, ScalePreset, SectionConfig,
+    GpsPoint, MatchConfig, RouteSignature, ScalePreset, SectionConfig, detect_sections_from_tracks,
+    detect_sections_multiscale, group_signatures,
 };
 
 /// Load a GPS trace from a fixture file.

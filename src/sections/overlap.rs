@@ -1,9 +1,9 @@
 //! Full track overlap detection and clustering.
 
-use super::rtree::IndexedPoint;
 use super::SectionConfig;
-use crate::geo_utils::{compute_center, haversine_distance};
+use super::rtree::IndexedPoint;
 use crate::GpsPoint;
+use crate::geo_utils::{compute_center, haversine_distance};
 use rstar::{PointDistance, RTree};
 use std::collections::HashSet;
 
@@ -79,14 +79,15 @@ pub fn find_full_track_overlap(
                 }
             } else {
                 // Gap - check if current sequence is substantial
-                if let Some(start_a) = current_start_a {
-                    if current_length >= config.min_section_length && current_length > best_length {
-                        best_start_a = Some(start_a);
-                        best_end_a = i;
-                        best_min_b = current_min_b;
-                        best_max_b = current_max_b;
-                        best_length = current_length;
-                    }
+                if let Some(start_a) = current_start_a
+                    && current_length >= config.min_section_length
+                    && current_length > best_length
+                {
+                    best_start_a = Some(start_a);
+                    best_end_a = i;
+                    best_min_b = current_min_b;
+                    best_max_b = current_max_b;
+                    best_length = current_length;
                 }
                 current_start_a = None;
                 current_length = 0.0;
@@ -97,14 +98,15 @@ pub fn find_full_track_overlap(
     }
 
     // Check final sequence
-    if let Some(start_a) = current_start_a {
-        if current_length >= config.min_section_length && current_length > best_length {
-            best_start_a = Some(start_a);
-            best_end_a = track_a.len();
-            best_min_b = current_min_b;
-            best_max_b = current_max_b;
-            // best_length not needed after this point
-        }
+    if let Some(start_a) = current_start_a
+        && current_length >= config.min_section_length
+        && current_length > best_length
+    {
+        best_start_a = Some(start_a);
+        best_end_a = track_a.len();
+        best_min_b = current_min_b;
+        best_max_b = current_max_b;
+        // best_length not needed after this point
     }
 
     // Build result if we found a substantial overlap
@@ -208,10 +210,10 @@ fn overlaps_match(poly_a: &[GpsPoint], poly_b: &[GpsPoint], threshold: f64) -> b
         let query = [point.latitude, point.longitude];
 
         // Use R-tree for O(log n) nearest neighbor lookup instead of O(n) linear scan
-        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
-            if nearest.distance_2(&query) <= threshold_deg_sq {
-                matches += 1;
-            }
+        if let Some(nearest) = tree_b.nearest_neighbor(&query)
+            && nearest.distance_2(&query) <= threshold_deg_sq
+        {
+            matches += 1;
         }
     }
 

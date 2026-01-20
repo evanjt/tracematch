@@ -35,16 +35,16 @@ use std::sync::Arc;
 use std::thread;
 
 #[cfg(feature = "persistence")]
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 #[cfg(feature = "persistence")]
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{AABB, RTree, RTreeObject};
 
 #[cfg(feature = "persistence")]
 use crate::{
-    geo_utils, ActivityMatchInfo, ActivityMetrics, Bounds, FrequentSection, GpsPoint, MatchConfig,
-    RouteGroup, RoutePerformance, RoutePerformanceResult, RouteSignature, SectionConfig,
-    SectionLap, SectionPerformanceRecord, SectionPerformanceResult,
+    ActivityMatchInfo, ActivityMetrics, Bounds, FrequentSection, GpsPoint, MatchConfig, RouteGroup,
+    RoutePerformance, RoutePerformanceResult, RouteSignature, SectionConfig, SectionLap,
+    SectionPerformanceRecord, SectionPerformanceResult, geo_utils,
 };
 
 #[cfg(feature = "persistence")]
@@ -2029,7 +2029,7 @@ impl PersistentRouteEngine {
                 return SectionPerformanceResult {
                     records: vec![],
                     best_record: None,
-                }
+                };
             }
         };
 
@@ -2148,7 +2148,7 @@ impl PersistentRouteEngine {
                 return SectionPerformanceResult {
                     records: vec![],
                     best_record: None,
-                }
+                };
             }
         };
 
@@ -2260,7 +2260,7 @@ impl PersistentRouteEngine {
                     performances: vec![],
                     best: None,
                     current_rank: None,
-                }
+                };
             }
         };
 

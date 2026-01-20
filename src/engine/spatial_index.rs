@@ -2,7 +2,7 @@
 //!
 //! Uses an R-tree to efficiently query activities by geographic bounds.
 
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{AABB, RTree, RTreeObject};
 
 use crate::Bounds;
 

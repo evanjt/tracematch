@@ -1,8 +1,8 @@
 //! R-tree indexed point types and spatial query utilities.
 
-use crate::geo_utils::{bounds_overlap, compute_bounds};
 use crate::GpsPoint;
-use rstar::{PointDistance, RTree, RTreeObject, AABB};
+use crate::geo_utils::{bounds_overlap, compute_bounds};
+use rstar::{AABB, PointDistance, RTree, RTreeObject};
 
 /// A GPS point with its index for R-tree queries
 #[derive(Debug, Clone, Copy)]

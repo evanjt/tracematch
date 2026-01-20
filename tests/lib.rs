@@ -1,6 +1,6 @@
 //! Tests for lib.rs core types and functions
 
-use tracematch::{compare_routes, group_signatures, GpsPoint, MatchConfig, RouteSignature};
+use tracematch::{GpsPoint, MatchConfig, RouteSignature, compare_routes, group_signatures};
 
 fn sample_route() -> Vec<GpsPoint> {
     vec![

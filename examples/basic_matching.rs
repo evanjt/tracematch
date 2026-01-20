@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example basic_matching
 
-use tracematch::{compare_routes, GpsPoint, MatchConfig, RouteSignature};
+use tracematch::{GpsPoint, MatchConfig, RouteSignature, compare_routes};
 
 fn main() {
     // Create two sample routes (London area)

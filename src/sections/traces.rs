@@ -3,7 +3,7 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::rtree::{build_rtree, IndexedPoint};
+use super::rtree::{IndexedPoint, build_rtree};
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;

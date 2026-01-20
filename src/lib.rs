@@ -40,8 +40,8 @@
 //! }
 //! ```
 
-use geo::{algorithm::simplify::Simplify, Coord, LineString};
-use rstar::{RTreeObject, AABB};
+use geo::{Coord, LineString, algorithm::simplify::Simplify};
+use rstar::{AABB, RTreeObject};
 use serde::{Deserialize, Serialize};
 
 // Unified error handling
@@ -83,20 +83,13 @@ pub use engine::{
 pub mod persistence;
 #[cfg(feature = "persistence")]
 pub use persistence::{
-    with_persistent_engine, PersistentEngineStats, PersistentRouteEngine, SectionDetectionHandle,
-    PERSISTENT_ENGINE,
+    PERSISTENT_ENGINE, PersistentEngineStats, PersistentRouteEngine, SectionDetectionHandle,
+    with_persistent_engine,
 };
 
 // Frequent sections detection (medoid-based algorithm for smooth polylines)
 pub mod sections;
 pub use sections::{
-    detect_sections_from_tracks,
-    detect_sections_multiscale,
-    // New section manipulation functions
-    find_sections_in_route,
-    recalculate_section_polyline,
-    split_section_at_index,
-    split_section_at_point,
     DetectionStats,
     FrequentSection,
     MultiScaleSectionResult,
@@ -107,13 +100,20 @@ pub use sections::{
     SectionMatch,
     SectionPortion,
     SplitResult,
+    detect_sections_from_tracks,
+    detect_sections_multiscale,
+    // New section manipulation functions
+    find_sections_in_route,
+    recalculate_section_polyline,
+    split_section_at_index,
+    split_section_at_point,
 };
 
 // Heatmap generation module
 pub mod heatmap;
 pub use heatmap::{
-    generate_heatmap, query_heatmap_cell, ActivityHeatmapData, CellQueryResult, HeatmapBounds,
-    HeatmapCell, HeatmapConfig, HeatmapResult, RouteRef,
+    ActivityHeatmapData, CellQueryResult, HeatmapBounds, HeatmapCell, HeatmapConfig, HeatmapResult,
+    RouteRef, generate_heatmap, query_heatmap_cell,
 };
 
 // HTTP client for activity fetching from intervals.icu

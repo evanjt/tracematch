@@ -332,11 +332,7 @@ pub fn calculate_bearing(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
 #[inline]
 pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
     let diff = (b1 - b2).abs();
-    if diff > 180.0 {
-        360.0 - diff
-    } else {
-        diff
-    }
+    if diff > 180.0 { 360.0 - diff } else { diff }
 }
 
 /// Calculate the circular mean of a set of bearings.

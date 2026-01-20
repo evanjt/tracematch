@@ -2,7 +2,7 @@
 //!
 //! Tests extracted from src/engine/signature_store.rs
 
-use tracematch::{engine::SignatureStore, GpsPoint, MatchConfig};
+use tracematch::{GpsPoint, MatchConfig, engine::SignatureStore};
 
 fn sample_coords() -> Vec<GpsPoint> {
     (0..10)

@@ -5,7 +5,7 @@
 //! not via direct FFI calls. The FFI layer is optimized for section detection,
 //! heatmap generation, and bulk GPS data fetching.
 
-use tracematch::{ffi::default_scale_presets, GpsPoint, RouteGroup, SectionConfig};
+use tracematch::{RouteGroup, SectionConfig, ffi::default_scale_presets};
 
 // ============================================================================
 // Scale Preset Tests

@@ -4,7 +4,7 @@
 //! to Kotlin and Swift. All FFI functions are prefixed with `ffi_` to avoid
 //! naming conflicts with the internal API.
 
-use crate::{init_logging, GpsPoint, RouteGroup, RouteSignature};
+use crate::{GpsPoint, RouteGroup, RouteSignature, init_logging};
 use log::info;
 
 // ============================================================================
@@ -189,10 +189,50 @@ pub struct FfiActivityMapResult {
     pub error: Option<String>,
 }
 
+/// Fetch map data for multiple activities.
+///
+/// The auth_header should be a pre-formatted Authorization header value:
+/// - For API key auth: "Basic {base64(API_KEY:key)}"
+/// - For OAuth: "Bearer {access_token}"
+#[cfg(feature = "http")]
+#[uniffi::export]
+pub fn fetch_activity_maps(
+    auth_header: String,
+    activity_ids: Vec<String>,
+) -> Vec<FfiActivityMapResult> {
+    init_logging();
+    info!(
+        "[RouteMatcherRust] fetch_activity_maps called for {} activities",
+        activity_ids.len()
+    );
+
+    let results = crate::http::fetch_activity_maps_sync(auth_header, activity_ids, None);
+
+    // Convert to FFI-friendly format (flat arrays)
+    results
+        .into_iter()
+        .map(|r| FfiActivityMapResult {
+            activity_id: r.activity_id,
+            bounds: r
+                .bounds
+                .map_or(vec![], |b| vec![b.ne[0], b.ne[1], b.sw[0], b.sw[1]]),
+            latlngs: r.latlngs.map_or(vec![], |coords| {
+                coords.into_iter().flat_map(|p| vec![p[0], p[1]]).collect()
+            }),
+            success: r.success,
+            error: r.error,
+        })
+        .collect()
+}
+
 /// Fetch map data with real-time progress callbacks.
 ///
 /// Same as fetch_activity_maps but calls the progress callback after each
 /// activity is fetched, allowing the UI to show real-time progress.
+///
+/// NOTE: The callback is invoked from tokio worker threads. This may cause
+/// crashes with some FFI runtimes (like React Native's Hermes) that aren't
+/// thread-safe. Use fetch_activity_maps without callback if you experience crashes.
 ///
 /// The auth_header should be a pre-formatted Authorization header value:
 /// - For API key auth: "Basic {base64(API_KEY:key)}"

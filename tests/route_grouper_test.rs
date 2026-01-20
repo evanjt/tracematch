@@ -2,7 +2,7 @@
 //!
 //! Tests extracted from src/engine/route_grouper.rs
 
-use tracematch::{engine::RouteGrouper, GpsPoint, MatchConfig};
+use tracematch::{GpsPoint, MatchConfig, engine::RouteGrouper};
 
 fn sample_coords() -> Vec<GpsPoint> {
     (0..10)

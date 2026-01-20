@@ -8,8 +8,8 @@
 
 use std::path::Path;
 use tracematch::{
-    find_sections_in_route, recalculate_section_polyline, split_section_at_index,
-    split_section_at_point, FrequentSection, GpsPoint, SectionConfig,
+    FrequentSection, GpsPoint, SectionConfig, find_sections_in_route, recalculate_section_polyline,
+    split_section_at_index, split_section_at_point,
 };
 
 /// Load GPX file and extract GPS points

@@ -1,10 +1,10 @@
 //! Activity portion computation for pace comparison.
 
 use super::overlap::OverlapCluster;
-use super::rtree::{build_rtree, IndexedPoint};
+use super::rtree::{IndexedPoint, build_rtree};
 use super::{SectionConfig, SectionPortion};
-use crate::matching::calculate_route_distance;
 use crate::GpsPoint;
+use crate::matching::calculate_route_distance;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;
 
