@@ -462,6 +462,7 @@ impl Default for MatchConfig {
 
 /// A group of similar routes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RouteGroup {
     /// Unique identifier for this group (typically the first activity ID)
@@ -518,6 +519,7 @@ pub struct GroupingResult {
 /// Activity metadata for performance calculations.
 /// Stores the non-GPS data needed for performance comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ActivityMetrics {
     pub activity_id: String,
@@ -542,6 +544,7 @@ pub struct ActivityMetrics {
 
 /// A single performance point for route comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RoutePerformance {
     pub activity_id: String,
@@ -572,6 +575,7 @@ pub struct RoutePerformance {
 
 /// Complete route performance result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RoutePerformanceResult {
     /// Performances sorted by date (oldest first)

@@ -91,6 +91,7 @@ pub(crate) fn compute_initial_stability(
 
 /// Scale preset for multi-scale section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ScalePreset {
     /// Scale name: "short", "medium", "long"
@@ -138,6 +139,7 @@ impl ScalePreset {
 
 /// Configuration for section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionConfig {
     /// Maximum distance between tracks to consider overlapping (meters)
@@ -338,6 +340,7 @@ pub struct PotentialSection {
 
 /// Result of multi-scale section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MultiScaleSectionResult {
     /// Confirmed sections (min_activities met)
@@ -350,6 +353,7 @@ pub struct MultiScaleSectionResult {
 
 /// Statistics from section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DetectionStats {
     /// Total activities processed

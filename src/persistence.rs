@@ -910,9 +910,10 @@ impl PersistentRouteEngine {
     }
 
     /// Get all activity bounds info as JSON for map display.
-    /// Returns array of { id, bounds, activity_type, distance }.
+    /// Returns array of { id, bounds, activityType, distance }.
     pub fn get_all_activity_bounds_json(&self) -> String {
         #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct BoundsInfo {
             id: String,
             bounds: [[f64; 2]; 2], // [[minLat, minLng], [maxLat, maxLng]]
@@ -3015,12 +3016,6 @@ pub mod persistent_engine_ffi {
             serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
         })
         .unwrap_or_else(|| "[]".to_string())
-    }
-
-    /// Get default custom section matching config.
-    #[uniffi::export]
-    pub fn default_custom_section_match_config() -> crate::CustomSectionMatchConfig {
-        crate::CustomSectionMatchConfig::default()
     }
 
     /// Extract the GPS trace for an activity that overlaps with a section polyline.
