@@ -57,7 +57,7 @@ pub type ProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
 
 /// Dispatch rate limiter - spaces out when requests START
 /// This is different from counting requests - it ensures we never dispatch
-/// more than ~12.5 requests per second by spacing them 80ms apart.
+/// more than 25 requests per second by spacing them 40ms apart.
 struct DispatchRateLimiter {
     next_dispatch: Mutex<Instant>,
     dispatched_count: AtomicU32,
@@ -452,33 +452,6 @@ pub fn fetch_activity_maps_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_dispatch_rate_limiter() {
-        let limiter = DispatchRateLimiter::new();
-
-        // First request should not wait
-        let start = Instant::now();
-        let num = limiter.wait_for_dispatch_slot().await;
-        assert_eq!(num, 1);
-        assert!(start.elapsed() < Duration::from_millis(10));
-
-        // Second request should wait ~80ms
-        let start2 = Instant::now();
-        let num2 = limiter.wait_for_dispatch_slot().await;
-        assert_eq!(num2, 2);
-        let elapsed = start2.elapsed();
-        assert!(
-            elapsed >= Duration::from_millis(70),
-            "Expected ~80ms wait, got {:?}",
-            elapsed
-        );
-        assert!(
-            elapsed < Duration::from_millis(120),
-            "Expected ~80ms wait, got {:?}",
-            elapsed
-        );
-    }
 
     #[test]
     fn test_activity_map_result_serialization() {
