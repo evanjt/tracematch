@@ -83,8 +83,8 @@ pub use engine::{
 pub mod persistence;
 #[cfg(feature = "persistence")]
 pub use persistence::{
-    PERSISTENT_ENGINE, PersistentEngineStats, PersistentRouteEngine, SectionDetectionHandle,
-    with_persistent_engine,
+    GroupSummary, PERSISTENT_ENGINE, PersistentEngineStats, PersistentRouteEngine,
+    SectionDetectionHandle, SectionSummary, with_persistent_engine,
 };
 
 // Frequent sections detection (medoid-based algorithm for smooth polylines)

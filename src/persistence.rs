@@ -83,6 +83,50 @@ impl RTreeObject for ActivityBoundsEntry {
     }
 }
 
+/// Lightweight section metadata for list views (no polyline data).
+/// Used to avoid loading full section data with polylines when only summary info is needed.
+#[cfg(feature = "persistence")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct SectionSummary {
+    /// Unique section ID
+    pub id: String,
+    /// Custom name (user-defined, None if not set)
+    pub name: Option<String>,
+    /// Sport type ("Run", "Ride", etc.)
+    pub sport_type: String,
+    /// Number of times this section was visited
+    pub visit_count: u32,
+    /// Section length in meters
+    pub distance_meters: f64,
+    /// Number of activities that traverse this section
+    pub activity_count: u32,
+    /// Confidence score (0.0-1.0)
+    pub confidence: f64,
+    /// Detection scale (e.g., "neighborhood", "city")
+    pub scale: Option<String>,
+    /// Bounding box for map display
+    pub bounds: Option<Bounds>,
+}
+
+/// Lightweight group metadata for list views.
+/// Used to avoid loading full group data with activity ID arrays when only summary info is needed.
+#[cfg(feature = "persistence")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct GroupSummary {
+    /// Unique group ID
+    pub group_id: String,
+    /// Representative activity ID
+    pub representative_id: String,
+    /// Sport type ("Run", "Ride", etc.)
+    pub sport_type: String,
+    /// Number of activities in this group
+    pub activity_count: u32,
+    /// Custom name (user-defined, None if not set)
+    pub custom_name: Option<String>,
+    /// Bounding box for map display
+    pub bounds: Option<Bounds>,
+}
+
 /// Progress state for section detection, shared between threads.
 #[cfg(feature = "persistence")]
 #[derive(Debug, Clone)]
@@ -193,6 +237,12 @@ pub struct PersistentRouteEngine {
     /// Tier 2: LRU cached consensus routes (50 max)
     consensus_cache: LruCache<String, Vec<GpsPoint>>,
 
+    /// Tier 2: LRU cached sections for single-item lookups (50 max = ~5MB)
+    section_cache: LruCache<String, FrequentSection>,
+
+    /// Tier 2: LRU cached groups for single-item lookups (100 max = ~1MB)
+    group_cache: LruCache<String, RouteGroup>,
+
     /// Cached route groups (loaded from DB)
     groups: Vec<RouteGroup>,
 
@@ -235,6 +285,8 @@ impl PersistentRouteEngine {
             spatial_index: RTree::new(),
             signature_cache: LruCache::new(std::num::NonZeroUsize::new(200).unwrap()),
             consensus_cache: LruCache::new(std::num::NonZeroUsize::new(50).unwrap()),
+            section_cache: LruCache::new(std::num::NonZeroUsize::new(50).unwrap()),
+            group_cache: LruCache::new(std::num::NonZeroUsize::new(100).unwrap()),
             groups: Vec::new(),
             activity_matches: HashMap::new(),
             activity_metrics: HashMap::new(),
@@ -1072,7 +1124,14 @@ impl PersistentRouteEngine {
         // Populate sport_type for each group from the representative activity
         for group in &mut self.groups {
             if let Some(meta) = self.activity_metadata.get(&group.representative_id) {
-                group.sport_type = meta.sport_type.clone();
+                group.sport_type = if meta.sport_type.is_empty() {
+                    "Ride".to_string() // Default for empty sport type
+                } else {
+                    meta.sport_type.clone()
+                };
+            } else {
+                // Representative activity not found - use default
+                group.sport_type = "Ride".to_string();
             }
         }
 
@@ -1149,6 +1208,356 @@ impl PersistentRouteEngine {
             self.sections.len()
         );
         serde_json::to_string(&self.sections).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Get section count directly from SQLite (no data loading).
+    /// This is O(1) and doesn't require loading sections into memory.
+    pub fn get_section_count(&self) -> u32 {
+        self.db
+            .query_row("SELECT COUNT(*) FROM sections", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Get group count directly from SQLite (no data loading).
+    /// This is O(1) and doesn't require loading groups into memory.
+    pub fn get_group_count(&self) -> u32 {
+        self.db
+            .query_row("SELECT COUNT(*) FROM route_groups", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Get lightweight section summaries without polyline data.
+    /// Queries SQLite and extracts only summary fields, skipping heavy data like
+    /// polylines, activityTraces, and pointDensity.
+    pub fn get_section_summaries(&self) -> Vec<SectionSummary> {
+        let mut stmt = match self.db.prepare("SELECT id, data FROM sections") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "[PersistentEngine] Failed to prepare section summaries query: {}",
+                    e
+                );
+                return Vec::new();
+            }
+        };
+
+        let results: Vec<SectionSummary> = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let data_blob: Vec<u8> = row.get(1)?;
+
+                // Parse JSON to extract only summary fields
+                let full: serde_json::Value = match serde_json::from_slice(&data_blob) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(None),
+                };
+
+                // Extract activity count from activityIds array length
+                let activity_count = full["activityIds"]
+                    .as_array()
+                    .map(|a| a.len() as u32)
+                    .unwrap_or(0);
+
+                // Extract bounds from polyline if present (first and last points)
+                let bounds = full["polyline"].as_array().and_then(|points| {
+                    if points.len() < 2 {
+                        return None;
+                    }
+                    let mut min_lat = f64::MAX;
+                    let mut max_lat = f64::MIN;
+                    let mut min_lng = f64::MAX;
+                    let mut max_lng = f64::MIN;
+
+                    for point in points {
+                        if let (Some(lat), Some(lng)) =
+                            (point["latitude"].as_f64(), point["longitude"].as_f64())
+                        {
+                            min_lat = min_lat.min(lat);
+                            max_lat = max_lat.max(lat);
+                            min_lng = min_lng.min(lng);
+                            max_lng = max_lng.max(lng);
+                        }
+                    }
+
+                    if min_lat < f64::MAX {
+                        Some(Bounds {
+                            min_lat,
+                            max_lat,
+                            min_lng,
+                            max_lng,
+                        })
+                    } else {
+                        None
+                    }
+                });
+
+                Ok(Some(SectionSummary {
+                    id,
+                    name: full["name"].as_str().map(String::from),
+                    sport_type: full["sportType"].as_str().unwrap_or("").to_string(),
+                    visit_count: full["visitCount"].as_u64().unwrap_or(0) as u32,
+                    distance_meters: full["distanceMeters"].as_f64().unwrap_or(0.0),
+                    activity_count,
+                    confidence: full["confidence"].as_f64().unwrap_or(0.0),
+                    scale: full["scale"].as_str().map(String::from),
+                    bounds,
+                }))
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).flatten().collect())
+            .unwrap_or_default();
+
+        log::info!(
+            "[PersistentEngine] get_section_summaries returned {} summaries",
+            results.len()
+        );
+        results
+    }
+
+    /// Get section summaries filtered by sport type.
+    pub fn get_section_summaries_for_sport(&self, sport_type: &str) -> Vec<SectionSummary> {
+        self.get_section_summaries()
+            .into_iter()
+            .filter(|s| s.sport_type == sport_type)
+            .collect()
+    }
+
+    /// Get lightweight group summaries without full activity ID lists.
+    pub fn get_group_summaries(&self) -> Vec<GroupSummary> {
+        let mut stmt = match self.db.prepare(
+            "SELECT id, representative_id, sport_type, activity_ids,
+                    bounds_min_lat, bounds_max_lat, bounds_min_lng, bounds_max_lng
+             FROM route_groups",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "[PersistentEngine] Failed to prepare group summaries query: {}",
+                    e
+                );
+                return Vec::new();
+            }
+        };
+
+        // Load custom names
+        let custom_names = self.get_all_route_names();
+
+        let results: Vec<GroupSummary> = stmt
+            .query_map([], |row| {
+                let group_id: String = row.get(0)?;
+                let representative_id: String = row.get(1)?;
+                let sport_type: String = row.get(2)?;
+                let activity_ids_json: String = row.get(3)?;
+
+                // Parse activity_ids just to get count
+                let activity_count: u32 = serde_json::from_str::<Vec<String>>(&activity_ids_json)
+                    .map(|ids| ids.len() as u32)
+                    .unwrap_or(0);
+
+                // Build bounds if present
+                let bounds = if let (Some(min_lat), Some(max_lat), Some(min_lng), Some(max_lng)) = (
+                    row.get::<_, Option<f64>>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, Option<f64>>(6)?,
+                    row.get::<_, Option<f64>>(7)?,
+                ) {
+                    Some(Bounds {
+                        min_lat,
+                        max_lat,
+                        min_lng,
+                        max_lng,
+                    })
+                } else {
+                    None
+                };
+
+                // Look up custom name
+                let custom_name = custom_names.get(&group_id).cloned();
+
+                Ok(GroupSummary {
+                    group_id,
+                    representative_id,
+                    sport_type,
+                    activity_count,
+                    custom_name,
+                    bounds,
+                })
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        log::info!(
+            "[PersistentEngine] get_group_summaries returned {} summaries",
+            results.len()
+        );
+        results
+    }
+
+    /// Get a single section by ID with LRU caching.
+    /// Returns the full FrequentSection with polyline data.
+    /// Uses LRU cache to avoid repeated SQLite queries for hot sections.
+    pub fn get_section_by_id(&mut self, section_id: &str) -> Option<FrequentSection> {
+        // Check LRU cache first
+        if let Some(section) = self.section_cache.get(&section_id.to_string()) {
+            log::debug!(
+                "[PersistentEngine] get_section_by_id cache hit for {}",
+                section_id
+            );
+            return Some(section.clone());
+        }
+
+        // Query SQLite
+        let result: Option<FrequentSection> = self
+            .db
+            .query_row(
+                "SELECT data FROM sections WHERE id = ?",
+                params![section_id],
+                |row| {
+                    let data_blob: Vec<u8> = row.get(0)?;
+                    Ok(serde_json::from_slice(&data_blob).ok())
+                },
+            )
+            .ok()
+            .flatten();
+
+        // Cache for future access
+        if let Some(ref section) = result {
+            self.section_cache
+                .put(section_id.to_string(), section.clone());
+            log::info!(
+                "[PersistentEngine] get_section_by_id found and cached section {}",
+                section_id
+            );
+        } else {
+            log::info!(
+                "[PersistentEngine] get_section_by_id: section {} not found",
+                section_id
+            );
+        }
+
+        result
+    }
+
+    /// Get a single group by ID with LRU caching.
+    /// Returns the full RouteGroup with activity IDs.
+    /// Uses LRU cache to avoid repeated SQLite queries for hot groups.
+    pub fn get_group_by_id(&mut self, group_id: &str) -> Option<RouteGroup> {
+        // Check LRU cache first
+        if let Some(group) = self.group_cache.get(&group_id.to_string()) {
+            log::debug!(
+                "[PersistentEngine] get_group_by_id cache hit for {}",
+                group_id
+            );
+            return Some(group.clone());
+        }
+
+        let custom_names = self.get_all_route_names();
+
+        let result: Option<RouteGroup> = self
+            .db
+            .query_row(
+                "SELECT id, representative_id, activity_ids, sport_type,
+                        bounds_min_lat, bounds_max_lat, bounds_min_lng, bounds_max_lng
+                 FROM route_groups WHERE id = ?",
+                params![group_id],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let representative_id: String = row.get(1)?;
+                    let activity_ids_json: String = row.get(2)?;
+                    let sport_type: String = row.get(3)?;
+
+                    let activity_ids: Vec<String> =
+                        serde_json::from_str(&activity_ids_json).unwrap_or_default();
+
+                    let bounds =
+                        if let (Some(min_lat), Some(max_lat), Some(min_lng), Some(max_lng)) = (
+                            row.get::<_, Option<f64>>(4)?,
+                            row.get::<_, Option<f64>>(5)?,
+                            row.get::<_, Option<f64>>(6)?,
+                            row.get::<_, Option<f64>>(7)?,
+                        ) {
+                            Some(Bounds {
+                                min_lat,
+                                max_lat,
+                                min_lng,
+                                max_lng,
+                            })
+                        } else {
+                            None
+                        };
+
+                    let custom_name = custom_names.get(&id).cloned();
+
+                    Ok(RouteGroup {
+                        group_id: id,
+                        representative_id,
+                        activity_ids,
+                        sport_type,
+                        bounds,
+                        custom_name,
+                        best_time: None,
+                        avg_time: None,
+                        best_pace: None,
+                        best_activity_id: None,
+                    })
+                },
+            )
+            .ok();
+
+        // Cache for future access
+        if let Some(ref group) = result {
+            self.group_cache.put(group_id.to_string(), group.clone());
+            log::info!(
+                "[PersistentEngine] get_group_by_id found and cached group {}",
+                group_id
+            );
+        } else {
+            log::info!(
+                "[PersistentEngine] get_group_by_id: group {} not found",
+                group_id
+            );
+        }
+
+        result
+    }
+
+    /// Get section polyline only (flat coordinates for map rendering).
+    /// Returns [lat1, lng1, lat2, lng2, ...] or empty vec if not found.
+    pub fn get_section_polyline(&self, section_id: &str) -> Vec<f64> {
+        let result: Option<Vec<f64>> = self
+            .db
+            .query_row(
+                "SELECT data FROM sections WHERE id = ?",
+                params![section_id],
+                |row| {
+                    let data_blob: Vec<u8> = row.get(0)?;
+                    let full: serde_json::Value = match serde_json::from_slice(&data_blob) {
+                        Ok(v) => v,
+                        Err(_) => return Ok(None),
+                    };
+
+                    let coords: Vec<f64> = full["polyline"]
+                        .as_array()
+                        .map(|points| {
+                            points
+                                .iter()
+                                .flat_map(|p| {
+                                    let lat = p["latitude"].as_f64().unwrap_or(0.0);
+                                    let lng = p["longitude"].as_f64().unwrap_or(0.0);
+                                    vec![lat, lng]
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    Ok(Some(coords))
+                },
+            )
+            .ok()
+            .flatten();
+
+        result.unwrap_or_default()
     }
 
     /// Start section detection in a background thread.
@@ -2731,6 +3140,74 @@ pub mod persistent_engine_ffi {
         with_persistent_engine(|e| e.get_sections_json()).unwrap_or_else(|| "[]".to_string())
     }
 
+    /// Get section count directly from SQLite (no data loading).
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_count() -> u32 {
+        with_persistent_engine(|e| e.get_section_count()).unwrap_or(0)
+    }
+
+    /// Get group count directly from SQLite (no data loading).
+    #[uniffi::export]
+    pub fn persistent_engine_get_group_count() -> u32 {
+        with_persistent_engine(|e| e.get_group_count()).unwrap_or(0)
+    }
+
+    /// Get lightweight section summaries without polyline data.
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_summaries_json() -> String {
+        with_persistent_engine(|e| {
+            let summaries = e.get_section_summaries();
+            serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string())
+        })
+        .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Get section summaries filtered by sport type.
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_summaries_for_sport_json(sport_type: String) -> String {
+        with_persistent_engine(|e| {
+            let summaries = e.get_section_summaries_for_sport(&sport_type);
+            serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string())
+        })
+        .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Get lightweight group summaries without full activity ID lists.
+    #[uniffi::export]
+    pub fn persistent_engine_get_group_summaries_json() -> String {
+        with_persistent_engine(|e| {
+            let summaries = e.get_group_summaries();
+            serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string())
+        })
+        .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Get a single section by ID (full data with polyline).
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_by_id_json(section_id: String) -> Option<String> {
+        with_persistent_engine(|e| {
+            e.get_section_by_id(&section_id)
+                .and_then(|s| serde_json::to_string(&s).ok())
+        })
+        .flatten()
+    }
+
+    /// Get a single group by ID (full data with activity IDs).
+    #[uniffi::export]
+    pub fn persistent_engine_get_group_by_id_json(group_id: String) -> Option<String> {
+        with_persistent_engine(|e| {
+            e.get_group_by_id(&group_id)
+                .and_then(|g| serde_json::to_string(&g).ok())
+        })
+        .flatten()
+    }
+
+    /// Get section polyline only (flat coordinates for map rendering).
+    #[uniffi::export]
+    pub fn persistent_engine_get_section_polyline(section_id: String) -> Vec<f64> {
+        with_persistent_engine(|e| e.get_section_polyline(&section_id)).unwrap_or_default()
+    }
+
     /// Query activities in viewport.
     #[uniffi::export]
     pub fn persistent_engine_query_viewport(
@@ -2773,6 +3250,26 @@ pub mod persistent_engine_ffi {
             e.get_gps_track(&activity_id)
                 .map(|points| {
                     points
+                        .iter()
+                        .flat_map(|p| vec![p.latitude, p.longitude])
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Get simplified GPS track for an activity as flat coordinates.
+    /// Uses Douglas-Peucker algorithm to reduce points for fast map rendering.
+    /// Tolerance of 0.00005 (~5m) gives good visual fidelity with ~50-200 points.
+    #[uniffi::export]
+    pub fn persistent_engine_get_simplified_gps_track(activity_id: String) -> Vec<f64> {
+        with_persistent_engine(|e| {
+            e.get_gps_track(&activity_id)
+                .map(|points| {
+                    // Use Douglas-Peucker simplification
+                    let simplified = crate::algorithms::douglas_peucker(&points, 0.00005);
+                    simplified
                         .iter()
                         .flat_map(|p| vec![p.latitude, p.longitude])
                         .collect()

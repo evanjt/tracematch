@@ -671,8 +671,8 @@ fn build_route_groups(
             // Find representative signature (first in group)
             let representative_id = activity_ids.first().cloned().unwrap_or_default();
 
-            // Get sport type from first signature (empty for now - caller should set)
-            let sport_type = String::new();
+            // Default sport type - caller should override with actual value
+            let sport_type = "Ride".to_string();
 
             // Compute combined bounds from all signatures in group
             let bounds = compute_group_bounds(&activity_ids, sig_map);
