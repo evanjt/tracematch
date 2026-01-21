@@ -418,6 +418,15 @@ impl PersistentRouteEngine {
                 FOREIGN KEY (section_id) REFERENCES custom_sections(id) ON DELETE CASCADE
             );
 
+            -- Time streams for section performance calculations
+            -- Stores cumulative seconds at each GPS point
+            CREATE TABLE IF NOT EXISTS time_streams (
+                activity_id TEXT PRIMARY KEY,
+                times BLOB NOT NULL,
+                point_count INTEGER NOT NULL,
+                FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_activities_sport ON activities(sport_type);
             CREATE INDEX IF NOT EXISTS idx_activities_bounds ON activities(min_lat, max_lat, min_lng, max_lng);
@@ -1085,6 +1094,118 @@ impl PersistentRouteEngine {
             Ok(rmp_serde::from_slice(&track_blob).unwrap_or_default())
         })
         .ok()
+    }
+
+    // ========================================================================
+    // Time Streams (for section performance calculations)
+    // ========================================================================
+
+    /// Store time stream to database.
+    fn store_time_stream(&self, activity_id: &str, times: &[u32]) -> SqlResult<()> {
+        let times_blob = rmp_serde::to_vec(times).unwrap_or_default();
+        self.db.execute(
+            "INSERT OR REPLACE INTO time_streams (activity_id, times, point_count)
+             VALUES (?, ?, ?)",
+            params![activity_id, times_blob, times.len() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Load time stream from database.
+    fn load_time_stream(&self, activity_id: &str) -> Option<Vec<u32>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT times FROM time_streams WHERE activity_id = ?")
+            .ok()?;
+
+        stmt.query_row(params![activity_id], |row| {
+            let times_blob: Vec<u8> = row.get(0)?;
+            Ok(rmp_serde::from_slice(&times_blob).unwrap_or_default())
+        })
+        .ok()
+    }
+
+    /// Check which activities are missing time streams (not in memory or SQLite).
+    /// Returns list of activity IDs that need to be fetched from the API.
+    pub fn get_activities_missing_time_streams(&self, activity_ids: &[String]) -> Vec<String> {
+        if activity_ids.is_empty() {
+            return Vec::new();
+        }
+
+        // First filter out any that are already in memory
+        let not_in_memory: Vec<&String> = activity_ids
+            .iter()
+            .filter(|id| !self.time_streams.contains_key(*id))
+            .collect();
+
+        if not_in_memory.is_empty() {
+            return Vec::new();
+        }
+
+        // Check SQLite for the remaining ones
+        let placeholders: Vec<&str> = not_in_memory.iter().map(|_| "?").collect();
+        let query = format!(
+            "SELECT activity_id FROM time_streams WHERE activity_id IN ({})",
+            placeholders.join(",")
+        );
+
+        let mut stmt = match self.db.prepare(&query) {
+            Ok(s) => s,
+            Err(_) => {
+                // On error, return all that aren't in memory
+                return not_in_memory.into_iter().cloned().collect();
+            }
+        };
+
+        // Bind all activity IDs as parameters
+        let params: Vec<&dyn rusqlite::ToSql> = not_in_memory
+            .iter()
+            .map(|s| *s as &dyn rusqlite::ToSql)
+            .collect();
+
+        let cached_in_sqlite: std::collections::HashSet<String> = stmt
+            .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        // Return IDs that are NOT in memory AND NOT in SQLite
+        not_in_memory
+            .into_iter()
+            .filter(|id| !cached_in_sqlite.contains(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// Check if a specific activity has a time stream (in memory or SQLite).
+    pub fn has_time_stream(&self, activity_id: &str) -> bool {
+        // First check memory cache
+        if self.time_streams.contains_key(activity_id) {
+            return true;
+        }
+        // Then check SQLite
+        let mut stmt = match self
+            .db
+            .prepare("SELECT 1 FROM time_streams WHERE activity_id = ? LIMIT 1")
+        {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        stmt.exists(params![activity_id]).unwrap_or(false)
+    }
+
+    /// Ensure time stream is loaded into memory (from SQLite if needed).
+    /// Returns true if the time stream is available.
+    fn ensure_time_stream_loaded(&mut self, activity_id: &str) -> bool {
+        // Already in memory?
+        if self.time_streams.contains_key(activity_id) {
+            return true;
+        }
+        // Try to load from SQLite
+        if let Some(times) = self.load_time_stream(activity_id) {
+            self.time_streams.insert(activity_id.to_string(), times);
+            return true;
+        }
+        false
     }
 
     // ========================================================================
@@ -2401,12 +2522,14 @@ impl PersistentRouteEngine {
 
     /// Set time streams for activities from flat buffer.
     /// Time streams are cumulative seconds at each GPS point, used for section performance calculations.
+    /// Persists to SQLite for offline access.
     pub fn set_time_streams_flat(
         &mut self,
         activity_ids: &[String],
         all_times: &[u32],
         offsets: &[u32],
     ) {
+        let mut persisted_count = 0;
         for (i, activity_id) in activity_ids.iter().enumerate() {
             let start = offsets[i] as usize;
             let end = offsets
@@ -2414,18 +2537,27 @@ impl PersistentRouteEngine {
                 .map(|&o| o as usize)
                 .unwrap_or(all_times.len());
             let times = all_times[start..end].to_vec();
+
+            // Persist to SQLite for offline access
+            if self.store_time_stream(activity_id, &times).is_ok() {
+                persisted_count += 1;
+            }
+
+            // Also keep in memory for fast access
             self.time_streams.insert(activity_id.clone(), times);
         }
         log::debug!(
-            "[PersistentEngine] Set time streams for {} activities",
-            activity_ids.len()
+            "[PersistentEngine] Set time streams for {} activities ({} persisted to SQLite)",
+            activity_ids.len(),
+            persisted_count
         );
     }
 
     /// Get section performances with accurate time calculations.
     /// Uses time streams to calculate actual traversal times.
     /// Supports both engine-detected sections and custom sections.
-    pub fn get_section_performances(&self, section_id: &str) -> SectionPerformanceResult {
+    /// Auto-loads time streams from SQLite if not in memory.
+    pub fn get_section_performances(&mut self, section_id: &str) -> SectionPerformanceResult {
         // Check if this is a custom section
         if section_id.starts_with("custom_") {
             return self.get_custom_section_performances(section_id);
@@ -2433,7 +2565,7 @@ impl PersistentRouteEngine {
 
         // Find the engine-detected section
         let section = match self.sections.iter().find(|s| s.id == section_id) {
-            Some(s) => s,
+            Some(s) => s.clone(),
             None => {
                 return SectionPerformanceResult {
                     records: vec![],
@@ -2441,6 +2573,19 @@ impl PersistentRouteEngine {
                 };
             }
         };
+
+        // Auto-load time streams from SQLite for all activities in this section
+        let activity_ids: Vec<String> = section
+            .activity_portions
+            .iter()
+            .map(|p| p.activity_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for activity_id in &activity_ids {
+            self.ensure_time_stream_loaded(activity_id);
+        }
 
         // Group portions by activity
         let mut portions_by_activity: HashMap<&str, Vec<&crate::SectionPortion>> = HashMap::new();
@@ -2549,7 +2694,7 @@ impl PersistentRouteEngine {
 
     /// Get performances for a custom section.
     /// Combines source activity and all matched activities.
-    fn get_custom_section_performances(&self, section_id: &str) -> SectionPerformanceResult {
+    fn get_custom_section_performances(&mut self, section_id: &str) -> SectionPerformanceResult {
         // Get the custom section
         let custom_section = match self.get_custom_section(section_id) {
             Some(s) => s,
@@ -2563,6 +2708,13 @@ impl PersistentRouteEngine {
 
         // Get all matches for this custom section
         let matches = self.get_custom_section_matches(section_id);
+
+        // Auto-load time streams from SQLite for all activities
+        let mut activity_ids: Vec<String> = vec![custom_section.source_activity_id.clone()];
+        activity_ids.extend(matches.iter().map(|m| m.activity_id.clone()));
+        for activity_id in &activity_ids {
+            self.ensure_time_stream_loaded(activity_id);
+        }
 
         // Build portions: source activity + matched activities
         let mut portions: Vec<(String, u32, u32, f64, String)> = Vec::new();
@@ -3108,6 +3260,16 @@ pub mod persistent_engine_ffi {
         with_persistent_engine(|e| {
             e.set_time_streams_flat(&activity_ids, &all_times, &offsets);
         });
+    }
+
+    /// Check which activities are missing cached time streams.
+    /// Returns activity IDs that need to be fetched from the API.
+    #[uniffi::export]
+    pub fn persistent_engine_get_activities_missing_time_streams(
+        activity_ids: Vec<String>,
+    ) -> Vec<String> {
+        with_persistent_engine(|e| e.get_activities_missing_time_streams(&activity_ids))
+            .unwrap_or(activity_ids)
     }
 
     /// Get section performances as JSON.
