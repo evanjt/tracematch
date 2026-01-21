@@ -438,6 +438,9 @@ fn process_cluster(
         config.proximity_threshold,
     );
 
+    // Count activity_ids before moving
+    let activity_count = cluster.activity_ids.len();
+
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
         name: None,
@@ -447,7 +450,8 @@ fn process_cluster(
         activity_ids: cluster.activity_ids.into_iter().collect(),
         activity_portions,
         route_ids,
-        visit_count: cluster.overlaps.len() as u32 + 1,
+        // visit_count should equal unique activities
+        visit_count: activity_count as u32,
         distance_meters: consensus_distance,
         activity_traces,
         confidence: consensus.confidence,

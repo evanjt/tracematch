@@ -127,8 +127,12 @@ pub fn update_section_with_new_traces(
     // Blend old and new polyline based on stability
     updated.polyline = blend_polylines(&section.polyline, &new_consensus.polyline, blend_factor);
     updated.activity_ids.extend(relevant_traces.keys().cloned());
+    // Deduplicate activity_ids in case of overlap
+    updated.activity_ids.sort();
+    updated.activity_ids.dedup();
     updated.activity_traces = full_track_map;
-    updated.visit_count += relevant_traces.len() as u32;
+    // visit_count should equal the number of unique activities, not traces
+    updated.visit_count = updated.activity_ids.len() as u32;
     updated.observation_count = all_traces.len() as u32;
     updated.distance_meters = calculate_route_distance(&updated.polyline);
     updated.confidence = new_consensus.confidence;
@@ -282,10 +286,11 @@ pub fn merge_overlapping_sections(
         sport_type: sport_type.clone(),
         polyline: consensus.polyline,
         representative_activity_id: reference_section.representative_activity_id.clone(),
-        activity_ids: all_activity_ids,
+        activity_ids: all_activity_ids.clone(),
         activity_portions: all_portions,
         route_ids: all_route_ids,
-        visit_count: all_traces.len() as u32,
+        // visit_count should equal unique activities, not traces
+        visit_count: all_activity_ids.len() as u32,
         distance_meters: calculate_route_distance(&reference_section.polyline),
         activity_traces: all_traces,
         confidence: consensus.confidence,

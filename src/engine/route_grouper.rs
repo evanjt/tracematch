@@ -115,7 +115,14 @@ impl RouteGrouper {
         // Populate sport_type and custom_name for each group
         for group in &mut self.groups {
             if let Some(activity) = store.get(&group.representative_id) {
-                group.sport_type = activity.sport_type.clone();
+                group.sport_type = if activity.sport_type.is_empty() {
+                    "Ride".to_string() // Default for empty sport type
+                } else {
+                    activity.sport_type.clone()
+                };
+            } else {
+                // Representative activity not found - use default
+                group.sport_type = "Ride".to_string();
             }
             if let Some(name) = self.route_names.get(&group.group_id) {
                 group.custom_name = Some(name.clone());

@@ -897,7 +897,14 @@ fn join_at_endpoints(
                 merged_section.id = format!("{}_joined", section_i.id);
                 merged_section.polyline = merged_polyline;
                 merged_section.distance_meters = merged_distance;
-                merged_section.visit_count = section_i.visit_count.max(section_j.visit_count);
+                // Merge activity_ids from both sections and deduplicate
+                merged_section
+                    .activity_ids
+                    .extend(section_j.activity_ids.iter().cloned());
+                merged_section.activity_ids.sort();
+                merged_section.activity_ids.dedup();
+                // visit_count should equal unique activities
+                merged_section.visit_count = merged_section.activity_ids.len() as u32;
                 merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
                 merged_section.activity_traces = HashMap::new();
 
@@ -1036,7 +1043,14 @@ fn merge_short_fragments(
                 merged_section.id = format!("{}_merged", section_i.id);
                 merged_section.polyline = merged_polyline;
                 merged_section.distance_meters = merged_distance;
-                merged_section.visit_count = section_i.visit_count.max(section_j.visit_count);
+                // Merge activity_ids from both sections and deduplicate
+                merged_section
+                    .activity_ids
+                    .extend(section_j.activity_ids.iter().cloned());
+                merged_section.activity_ids.sort();
+                merged_section.activity_ids.dedup();
+                // visit_count should equal unique activities
+                merged_section.visit_count = merged_section.activity_ids.len() as u32;
                 merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
                 merged_section.activity_traces = HashMap::new();
 
@@ -1428,7 +1442,8 @@ fn split_section_by_density(
         }
 
         // Only create the split section if it has enough activities
-        if split_activity_ids.len() >= config.min_activities as usize {
+        let split_activity_count = split_activity_ids.len();
+        if split_activity_count >= config.min_activities as usize {
             let split_section = FrequentSection {
                 id: format!("{}_split{}", section.id, split_idx),
                 name: None,
@@ -1438,7 +1453,8 @@ fn split_section_by_density(
                 activity_ids: split_activity_ids,
                 activity_portions: Vec::new(), // Will be recomputed later if needed
                 route_ids: section.route_ids.clone(),
-                visit_count: candidate.avg_density as u32,
+                // visit_count should equal unique activities
+                visit_count: split_activity_count as u32,
                 distance_meters: split_distance,
                 activity_traces: split_activity_traces,
                 confidence: section.confidence,

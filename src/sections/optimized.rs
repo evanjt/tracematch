@@ -503,6 +503,9 @@ fn convert_cluster_to_section(
         config.proximity_threshold,
     );
 
+    // Count activity_ids before moving
+    let activity_count = cluster.activity_ids.len();
+
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
         name: None,
@@ -512,7 +515,8 @@ fn convert_cluster_to_section(
         activity_ids: cluster.activity_ids.into_iter().collect(),
         activity_portions: vec![], // Skip for optimized mode
         route_ids: vec![],
-        visit_count: cluster.overlaps.len() as u32 + 1,
+        // visit_count should equal unique activities
+        visit_count: activity_count as u32,
         distance_meters: consensus_distance, // Use consensus distance, not representative
         activity_traces,
         confidence: consensus.confidence,
