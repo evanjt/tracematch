@@ -1,6 +1,0 @@
-# Original FIT files - large, can be re-downloaded
-*.fit
-
-# Original GPS with start location - privacy concern
-*_gps.json
-*_latlng.json

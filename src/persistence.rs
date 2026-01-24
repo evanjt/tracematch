@@ -210,6 +210,69 @@ impl SectionDetectionHandle {
 }
 
 // ============================================================================
+// Helper Functions for Background Threads
+// ============================================================================
+
+/// Load route groups from SQLite database.
+/// Used by background threads that have their own DB connection.
+#[cfg(feature = "persistence")]
+fn load_groups_from_db(conn: &Connection) -> Vec<RouteGroup> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, representative_id, activity_ids, sport_type,
+                bounds_min_lat, bounds_max_lat, bounds_min_lng, bounds_max_lng
+         FROM route_groups",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "tracematch: [load_groups_from_db] Failed to prepare statement: {:?}",
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    let groups: Vec<RouteGroup> = stmt
+        .query_map([], |row| {
+            let activity_ids_json: String = row.get(2)?;
+            let activity_ids: Vec<String> =
+                serde_json::from_str(&activity_ids_json).unwrap_or_default();
+
+            let bounds = match (
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
+                row.get::<_, Option<f64>>(7)?,
+            ) {
+                (Some(min_lat), Some(max_lat), Some(min_lng), Some(max_lng)) => Some(Bounds {
+                    min_lat,
+                    max_lat,
+                    min_lng,
+                    max_lng,
+                }),
+                _ => None,
+            };
+
+            Ok(RouteGroup {
+                group_id: row.get(0)?,
+                representative_id: row.get(1)?,
+                activity_ids,
+                sport_type: row.get(3)?,
+                bounds,
+                custom_name: None, // Custom names loaded separately if needed
+                best_time: None,
+                avg_time: None,
+                best_pace: None,
+                best_activity_id: None,
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    groups
+}
+
+// ============================================================================
 // Persistent Route Engine
 // ============================================================================
 
@@ -554,14 +617,14 @@ impl PersistentRouteEngine {
         let groups_count = self.groups.len();
         let matches_count = self.activity_matches.len();
         log::info!(
-            "[tracematch] load_groups: {} groups, {} activity_matches entries",
+            "tracematch: load_groups: {} groups, {} activity_matches entries",
             groups_count,
             matches_count
         );
 
         if !self.groups.is_empty() && self.activity_matches.is_empty() {
             log::info!(
-                "[tracematch] Forcing groups recompute: groups exist but activity_matches is empty"
+                "tracematch: Forcing groups recompute: groups exist but activity_matches is empty"
             );
             self.groups_dirty = true;
         } else {
@@ -667,7 +730,10 @@ impl PersistentRouteEngine {
             .db
             .query_row("SELECT COUNT(*) FROM sections", [], |row| row.get(0))
             .unwrap_or(0);
-        log::info!("[PersistentEngine] Loading sections: {} rows in DB", count);
+        log::info!(
+            "tracematch: [PersistentEngine] Loading sections: {} rows in DB",
+            count
+        );
 
         let mut stmt = self.db.prepare("SELECT id, data FROM sections")?;
 
@@ -678,7 +744,7 @@ impl PersistentRouteEngine {
                 let section: FrequentSection =
                     serde_json::from_slice(&data_blob).unwrap_or_else(|e| {
                         log::info!(
-                            "[PersistentEngine] Failed to deserialize section {}: {:?}",
+                            "tracematch: [PersistentEngine] Failed to deserialize section {}: {:?}",
                             id,
                             e
                         );
@@ -715,7 +781,7 @@ impl PersistentRouteEngine {
             .collect();
 
         log::info!(
-            "[PersistentEngine] Loaded {} sections into memory (from {} in DB)",
+            "tracematch: [PersistentEngine] Loaded {} sections into memory (from {} in DB)",
             self.sections.len(),
             count
         );
@@ -858,7 +924,9 @@ impl PersistentRouteEngine {
     pub fn cleanup_old_activities(&mut self, retention_days: u32) -> SqlResult<u32> {
         // If retention_days is 0, keep all activities
         if retention_days == 0 {
-            log::info!("[PersistentEngine] Cleanup skipped: retention period is 0 (keep all)");
+            log::info!(
+                "tracematch: [PersistentEngine] Cleanup skipped: retention period is 0 (keep all)"
+            );
             return Ok(0);
         }
 
@@ -885,7 +953,7 @@ impl PersistentRouteEngine {
             self.sections_dirty = true;
 
             log::info!(
-                "[PersistentEngine] Cleaned up {} activities older than {} days",
+                "tracematch: [PersistentEngine] Cleaned up {} activities older than {} days",
                 deleted,
                 retention_days
             );
@@ -913,7 +981,7 @@ impl PersistentRouteEngine {
         if !self.groups_dirty && !self.sections_dirty {
             self.groups_dirty = true;
             self.sections_dirty = true;
-            log::info!("[PersistentEngine] Marked for re-computation (cache expanded)");
+            log::info!("tracematch: [PersistentEngine] Marked for re-computation (cache expanded)");
         }
     }
 
@@ -1239,9 +1307,12 @@ impl PersistentRouteEngine {
 
     /// Recompute route groups.
     fn recompute_groups(&mut self) {
-        log::info!("[tracematch] recompute_groups: starting...");
+        use std::time::Instant;
+        let total_start = Instant::now();
+        log::info!("[RUST: PERF] recompute_groups: starting...");
 
-        // Load all signatures (this will use cache where possible)
+        // Phase 1: Load all signatures (this will use cache where possible)
+        let sig_start = Instant::now();
         let activity_ids: Vec<String> = self.activity_metadata.keys().cloned().collect();
         let mut signatures = Vec::with_capacity(activity_ids.len());
 
@@ -1250,31 +1321,42 @@ impl PersistentRouteEngine {
                 signatures.push(sig);
             }
         }
+        let sig_ms = sig_start.elapsed().as_millis();
 
         log::info!(
-            "[tracematch] recompute_groups: loaded {} signatures from {} activities",
+            "[RUST: PERF] Phase 1 - Load signatures: {} from {} activities in {}ms",
             signatures.len(),
-            activity_ids.len()
+            activity_ids.len(),
+            sig_ms
         );
 
-        // Group signatures and capture match info
+        // Phase 2: Group signatures and capture match info
+        let group_start = Instant::now();
         #[cfg(feature = "parallel")]
         let result = crate::group_signatures_parallel_with_matches(&signatures, &self.match_config);
 
         #[cfg(not(feature = "parallel"))]
         let result = crate::group_signatures_with_matches(&signatures, &self.match_config);
 
+        let group_ms = group_start.elapsed().as_millis();
+        log::info!(
+            "[RUST: PERF] Phase 2 - Group signatures: {} groups in {}ms (uses simplified signatures)",
+            result.groups.len(),
+            group_ms
+        );
+
         self.groups = result.groups;
         self.activity_matches = result.activity_matches;
 
-        // Recalculate match percentages using ORIGINAL GPS tracks (not simplified signatures)
+        // Phase 3: Recalculate match percentages using ORIGINAL GPS tracks (not simplified signatures)
         // This captures actual GPS variation that was smoothed out by Douglas-Peucker
+        // NOTE: This is the BOTTLENECK - see PERF logs inside this function
         self.recalculate_match_percentages_from_tracks();
 
         // Log match info computed
         let total_matches: usize = self.activity_matches.values().map(|v| v.len()).sum();
         log::info!(
-            "[tracematch] recompute_groups: computed {} groups with {} total match entries",
+            "[RUST: PERF] Phase 3 complete: {} groups with {} total match entries",
             self.groups.len(),
             total_matches
         );
@@ -1293,9 +1375,21 @@ impl PersistentRouteEngine {
             }
         }
 
-        // Save to database
+        // Phase 4: Save to database
+        let save_start = Instant::now();
         self.save_groups().ok();
+        let save_ms = save_start.elapsed().as_millis();
         self.groups_dirty = false;
+
+        let total_ms = total_start.elapsed().as_millis();
+        log::info!("[RUST: PERF] Phase 4 - Save groups: {}ms", save_ms);
+        log::info!(
+            "[RUST: PERF] recompute_groups TOTAL: {}ms (signatures={}ms + grouping={}ms + AMD_recalc=see_above + save={}ms)",
+            total_ms,
+            sig_ms,
+            group_ms,
+            save_ms
+        );
     }
 
     /// Recalculate match percentages using original GPS tracks instead of simplified signatures.
@@ -1303,15 +1397,31 @@ impl PersistentRouteEngine {
     fn recalculate_match_percentages_from_tracks(&mut self) {
         use crate::matching::{amd_to_percentage, average_min_distance};
         use std::collections::HashMap;
+        use std::time::Instant;
+
+        let func_start = Instant::now();
+
+        // PERF ASSESSMENT: This function is a BOTTLENECK
+        // - Loads ALL GPS tracks from SQLite (I/O bound)
+        // - Does pairwise AMD calculations SEQUENTIALLY (CPU bound, O(n*m) per pair)
+        // - Could be parallelized with rayon but requires restructuring
+        log::info!(
+            "tracematch: [PERF] recalculate_match_percentages: SEQUENTIAL pairwise AMD - {} groups",
+            self.groups.len()
+        );
 
         // First pass: collect all activity IDs and load tracks
+        // PERF: I/O bound - loads tracks SEQUENTIALLY from SQLite
+        let load_start = Instant::now();
         let mut tracks: HashMap<String, Vec<GpsPoint>> = HashMap::new();
+        let mut total_points_loaded: usize = 0;
 
         for group in &self.groups {
             // Load representative track
             if let Some(track) = self.load_gps_track_from_db(&group.representative_id)
                 && track.len() >= 2
             {
+                total_points_loaded += track.len();
                 tracks.insert(group.representative_id.clone(), track);
             }
 
@@ -1322,53 +1432,123 @@ impl PersistentRouteEngine {
                         && let Some(track) = self.load_gps_track_from_db(&match_info.activity_id)
                         && track.len() >= 2
                     {
+                        total_points_loaded += track.len();
                         tracks.insert(match_info.activity_id.clone(), track);
                     }
                 }
             }
         }
+        let load_ms = load_start.elapsed().as_millis();
+        log::info!(
+            "[RUST: PERF] Track loading: {} tracks, {} total points in {}ms (SEQUENTIAL I/O)",
+            tracks.len(),
+            total_points_loaded,
+            load_ms
+        );
 
         // Second pass: recalculate match percentages using AMD
+        // PERF: CPU bound - O(n*m) distance calculations per pair
+        // OPTIMIZATION 1: Skip self-comparisons (activity == representative)
+        // OPTIMIZATION 2: Parallelize with rayon
+        let calc_start = Instant::now();
+
+        // Collect work items for parallel processing
+        let mut work_items: Vec<(String, String, Vec<GpsPoint>, Vec<GpsPoint>)> = Vec::new();
+        let mut skipped_self = 0u32;
+
         for group in &self.groups {
             let rep_track = match tracks.get(&group.representative_id) {
                 Some(t) => t,
                 None => continue,
             };
 
-            let matches = match self.activity_matches.get_mut(&group.group_id) {
-                Some(m) => m,
-                None => continue,
-            };
+            if let Some(matches) = self.activity_matches.get(&group.group_id) {
+                for match_info in matches {
+                    // OPTIMIZATION: Skip self-comparisons - always 100% match
+                    if match_info.activity_id == group.representative_id {
+                        skipped_self += 1;
+                        continue;
+                    }
 
-            for match_info in matches.iter_mut() {
-                let activity_track = match tracks.get(&match_info.activity_id) {
-                    Some(t) => t,
-                    None => continue,
-                };
+                    let activity_track = match tracks.get(&match_info.activity_id) {
+                        Some(t) => t,
+                        None => continue,
+                    };
 
-                // Calculate AMD match using ORIGINAL tracks (not simplified)
+                    work_items.push((
+                        group.group_id.clone(),
+                        match_info.activity_id.clone(),
+                        activity_track.clone(),
+                        rep_track.clone(),
+                    ));
+                }
+            }
+        }
+
+        log::info!(
+            "[RUST: PERF] AMD work: {} pairs to compute, {} self-comparisons skipped",
+            work_items.len(),
+            skipped_self
+        );
+
+        // Parallel AMD calculation using rayon
+        use rayon::prelude::*;
+
+        let results: Vec<(String, String, f64, usize, usize)> = work_items
+            .par_iter()
+            .map(|(group_id, activity_id, activity_track, rep_track)| {
                 let amd_1_to_2 = average_min_distance(activity_track, rep_track);
                 let amd_2_to_1 = average_min_distance(rep_track, activity_track);
                 let avg_amd = (amd_1_to_2 + amd_2_to_1) / 2.0;
-                let new_percentage = amd_to_percentage(
+                (
+                    group_id.clone(),
+                    activity_id.clone(),
                     avg_amd,
-                    self.match_config.perfect_threshold,
-                    self.match_config.zero_threshold,
-                );
+                    activity_track.len(),
+                    rep_track.len(),
+                )
+            })
+            .collect();
 
+        let amd_calculations = (results.len() * 2) as u32;
+
+        // Apply results back to activity_matches
+        for (group_id, activity_id, avg_amd, activity_len, rep_len) in results {
+            let new_percentage = amd_to_percentage(
+                avg_amd,
+                self.match_config.perfect_threshold,
+                self.match_config.zero_threshold,
+            );
+
+            if let Some(matches) = self.activity_matches.get_mut(&group_id)
+                && let Some(match_info) = matches.iter_mut().find(|m| m.activity_id == activity_id)
+            {
                 log::debug!(
-                    "[tracematch] recalc match % for {}: {:.1}% -> {:.1}% (AMD: {:.1}m, {} vs {} points)",
-                    match_info.activity_id,
+                    "tracematch: recalc match % for {}: {:.1}% -> {:.1}% (AMD: {:.1}m, {} vs {} points)",
+                    activity_id,
                     match_info.match_percentage,
                     new_percentage,
                     avg_amd,
-                    activity_track.len(),
-                    rep_track.len()
+                    activity_len,
+                    rep_len
                 );
-
                 match_info.match_percentage = new_percentage;
             }
         }
+
+        let calc_ms = calc_start.elapsed().as_millis();
+        let total_ms = func_start.elapsed().as_millis();
+        log::info!(
+            "[RUST: PERF] AMD calculations: {} calls in {}ms (PARALLEL with rayon)",
+            amd_calculations,
+            calc_ms
+        );
+        log::info!(
+            "[RUST: PERF] recalculate_match_percentages TOTAL: {}ms (load={}ms + calc={}ms)",
+            total_ms,
+            load_ms,
+            calc_ms
+        );
     }
 
     /// Load original GPS track from database (separate function to avoid borrow issues)
@@ -1450,7 +1630,7 @@ impl PersistentRouteEngine {
     /// Get sections as JSON string.
     pub fn get_sections_json(&self) -> String {
         log::info!(
-            "[PersistentEngine] get_sections_json called, {} sections in memory",
+            "tracematch: [PersistentEngine] get_sections_json called, {} sections in memory",
             self.sections.len()
         );
         serde_json::to_string(&self.sections).unwrap_or_else(|_| "[]".to_string())
@@ -1480,7 +1660,7 @@ impl PersistentRouteEngine {
             Ok(s) => s,
             Err(e) => {
                 log::error!(
-                    "[PersistentEngine] Failed to prepare section summaries query: {}",
+                    "tracematch: [PersistentEngine] Failed to prepare section summaries query: {}",
                     e
                 );
                 return Vec::new();
@@ -1554,7 +1734,7 @@ impl PersistentRouteEngine {
             .unwrap_or_default();
 
         log::info!(
-            "[PersistentEngine] get_section_summaries returned {} summaries",
+            "tracematch: [PersistentEngine] get_section_summaries returned {} summaries",
             results.len()
         );
         results
@@ -1578,7 +1758,7 @@ impl PersistentRouteEngine {
             Ok(s) => s,
             Err(e) => {
                 log::error!(
-                    "[PersistentEngine] Failed to prepare group summaries query: {}",
+                    "tracematch: [PersistentEngine] Failed to prepare group summaries query: {}",
                     e
                 );
                 return Vec::new();
@@ -1634,7 +1814,7 @@ impl PersistentRouteEngine {
             .unwrap_or_default();
 
         log::info!(
-            "[PersistentEngine] get_group_summaries returned {} summaries",
+            "tracematch: [PersistentEngine] get_group_summaries returned {} summaries",
             results.len()
         );
         results
@@ -1647,7 +1827,7 @@ impl PersistentRouteEngine {
         // Check LRU cache first
         if let Some(section) = self.section_cache.get(&section_id.to_string()) {
             log::debug!(
-                "[PersistentEngine] get_section_by_id cache hit for {}",
+                "tracematch: [PersistentEngine] get_section_by_id cache hit for {}",
                 section_id
             );
             return Some(section.clone());
@@ -1672,12 +1852,12 @@ impl PersistentRouteEngine {
             self.section_cache
                 .put(section_id.to_string(), section.clone());
             log::info!(
-                "[PersistentEngine] get_section_by_id found and cached section {}",
+                "tracematch: [PersistentEngine] get_section_by_id found and cached section {}",
                 section_id
             );
         } else {
             log::info!(
-                "[PersistentEngine] get_section_by_id: section {} not found",
+                "tracematch: [PersistentEngine] get_section_by_id: section {} not found",
                 section_id
             );
         }
@@ -1692,7 +1872,7 @@ impl PersistentRouteEngine {
         // Check LRU cache first
         if let Some(group) = self.group_cache.get(&group_id.to_string()) {
             log::debug!(
-                "[PersistentEngine] get_group_by_id cache hit for {}",
+                "tracematch: [PersistentEngine] get_group_by_id cache hit for {}",
                 group_id
             );
             return Some(group.clone());
@@ -1755,12 +1935,12 @@ impl PersistentRouteEngine {
         if let Some(ref group) = result {
             self.group_cache.put(group_id.to_string(), group.clone());
             log::info!(
-                "[PersistentEngine] get_group_by_id found and cached group {}",
+                "tracematch: [PersistentEngine] get_group_by_id found and cached group {}",
                 group_id
             );
         } else {
             log::info!(
-                "[PersistentEngine] get_group_by_id: group {} not found",
+                "tracematch: [PersistentEngine] get_group_by_id: group {} not found",
                 group_id
             );
         }
@@ -1809,6 +1989,10 @@ impl PersistentRouteEngine {
     /// Start section detection in a background thread.
     ///
     /// Returns a handle that can be polled for completion and progress.
+    ///
+    /// Note: This method is designed to be non-blocking on the calling thread.
+    /// All heavy operations (groups loading, track loading, detection) happen
+    /// in the background thread to keep the UI responsive.
     pub fn detect_sections_background(
         &mut self,
         sport_filter: Option<String>,
@@ -1821,17 +2005,35 @@ impl PersistentRouteEngine {
         let progress = SectionDetectionProgress::new();
         let progress_clone = progress.clone();
 
-        // Get groups first (may trigger recomputation)
-        let groups = self.get_groups().to_vec();
+        // Ensure groups are computed before section detection.
+        // This is necessary because:
+        // 1. Route groups are a core feature - users expect to see their routes
+        // 2. Sections need groups to be linked to activities
+        // 3. Without groups, the Routes tab shows "0 routes"
+        //
+        // This call may trigger recomputation if groups_dirty = true (after addActivities).
+        // The recomputation loads signatures and runs grouping algorithm.
+        // For 54 activities, this typically takes < 1 second.
+        if self.groups_dirty {
+            log::info!(
+                "tracematch: [SectionDetection] Computing route groups before section detection..."
+            );
+            let start = std::time::Instant::now();
+            let _ = self.get_groups(); // This triggers recomputation and saves to DB
+            log::info!(
+                "tracematch: [SectionDetection] Route groups computed in {:?}",
+                start.elapsed()
+            );
+        }
 
-        // Build sport type map
+        // Build sport type map - lightweight, just copying metadata
         let sport_map: HashMap<String, String> = self
             .activity_metadata
             .values()
             .map(|m| (m.id.clone(), m.sport_type.clone()))
             .collect();
 
-        // Filter activity IDs by sport
+        // Filter activity IDs by sport - lightweight
         let activity_ids: Vec<String> = if let Some(ref sport) = sport_filter {
             self.activity_metadata
                 .values()
@@ -1847,7 +2049,7 @@ impl PersistentRouteEngine {
 
         thread::spawn(move || {
             log::info!(
-                "[SectionDetection] Background thread started with {} activity IDs",
+                "tracematch: [SectionDetection] Background thread started with {} activity IDs",
                 activity_ids.len()
             );
 
@@ -1855,11 +2057,18 @@ impl PersistentRouteEngine {
             let conn = match Connection::open(&db_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    log::info!("[SectionDetection] Failed to open DB: {:?}", e);
+                    log::info!("tracematch: [SectionDetection] Failed to open DB: {:?}", e);
                     tx.send(Vec::new()).ok();
                     return;
                 }
             };
+
+            // Load groups from DB inside the thread (non-blocking on main thread)
+            let groups = load_groups_from_db(&conn);
+            log::info!(
+                "tracematch: [SectionDetection] Loaded {} groups from DB",
+                groups.len()
+            );
 
             // Set loading phase with total count
             progress_clone.set_phase("loading", activity_ids.len() as u32);
@@ -1890,14 +2099,14 @@ impl PersistentRouteEngine {
                 .collect();
 
             log::info!(
-                "[SectionDetection] Loaded {} tracks ({} empty/missing) from {} activity IDs",
+                "tracematch: [SectionDetection] Loaded {} tracks ({} empty/missing) from {} activity IDs",
                 tracks_loaded,
                 tracks_empty,
                 activity_ids.len()
             );
 
             if tracks.is_empty() {
-                log::info!("[SectionDetection] No tracks loaded, skipping detection");
+                log::info!("tracematch: [SectionDetection] No tracks loaded, skipping detection");
                 progress_clone.set_phase("complete", 0);
                 tx.send(Vec::new()).ok();
                 return;
@@ -1906,7 +2115,7 @@ impl PersistentRouteEngine {
             // Log track point counts for debugging
             let total_points: usize = tracks.iter().map(|(_, t)| t.len()).sum();
             log::info!(
-                "[SectionDetection] Total GPS points: {}, avg per track: {}",
+                "tracematch: [SectionDetection] Total GPS points: {}, avg per track: {}",
                 total_points,
                 total_points / tracks.len().max(1)
             );
@@ -1921,7 +2130,7 @@ impl PersistentRouteEngine {
             );
 
             log::info!(
-                "[SectionDetection] Detection complete: {} sections, {} potentials",
+                "tracematch: [SectionDetection] Detection complete: {} sections, {} potentials",
                 result.sections.len(),
                 result.potentials.len()
             );
@@ -2672,7 +2881,7 @@ impl PersistentRouteEngine {
             self.time_streams.insert(activity_id.clone(), times);
         }
         log::debug!(
-            "[PersistentEngine] Set time streams for {} activities ({} persisted to SQLite)",
+            "tracematch: [PersistentEngine] Set time streams for {} activities ({} persisted to SQLite)",
             activity_ids.len(),
             persisted_count
         );
@@ -2943,7 +3152,7 @@ impl PersistentRouteEngine {
             Some(g) => g,
             None => {
                 log::debug!(
-                    "[tracematch] get_route_performances: group {} not found",
+                    "tracematch: get_route_performances: group {} not found",
                     route_group_id
                 );
                 return RoutePerformanceResult {
@@ -2957,7 +3166,7 @@ impl PersistentRouteEngine {
         // Get match info for this route
         let match_info = self.activity_matches.get(route_group_id);
         log::debug!(
-            "[tracematch] get_route_performances: group {} has {} activities, match_info: {}",
+            "tracematch: get_route_performances: group {} has {} activities, match_info: {}",
             route_group_id,
             group.activity_ids.len(),
             match_info.map(|m| m.len()).unwrap_or(0)
@@ -3145,25 +3354,31 @@ pub mod persistent_engine_ffi {
     #[uniffi::export]
     pub fn persistent_engine_init(db_path: String) -> bool {
         crate::init_logging();
-        info!("[PersistentEngine] Initializing with db: {}", db_path);
+        info!(
+            "tracematch: [PersistentEngine] Initializing with db: {}",
+            db_path
+        );
 
         match PersistentRouteEngine::new(&db_path) {
             Ok(mut engine) => {
                 // Load existing data
                 if let Err(e) = engine.load() {
                     info!(
-                        "[PersistentEngine] Warning: Failed to load existing data: {:?}",
+                        "tracematch: [PersistentEngine] Warning: Failed to load existing data: {:?}",
                         e
                     );
                 }
 
                 let mut guard = PERSISTENT_ENGINE.lock().unwrap();
                 *guard = Some(engine);
-                info!("[PersistentEngine] Initialized successfully");
+                info!("tracematch: [PersistentEngine] Initialized successfully");
                 true
             }
             Err(e) => {
-                info!("[PersistentEngine] Failed to initialize: {:?}", e);
+                info!(
+                    "tracematch: [PersistentEngine] Failed to initialize: {:?}",
+                    e
+                );
                 false
             }
         }
@@ -3184,7 +3399,7 @@ pub mod persistent_engine_ffi {
         if let Some(()) = with_persistent_engine(|e| {
             e.clear().ok();
         }) {
-            info!("[PersistentEngine] Cleared");
+            info!("tracematch: [PersistentEngine] Cleared");
         }
     }
 
@@ -3205,14 +3420,14 @@ pub mod persistent_engine_ffi {
             Ok(count) => {
                 if retention_days > 0 && count > 0 {
                     info!(
-                        "[PersistentEngine] Cleanup completed: {} activities removed",
+                        "tracematch: [PersistentEngine] Cleanup completed: {} activities removed",
                         count
                     );
                 }
                 count
             }
             Err(e) => {
-                log::error!("[PersistentEngine] Cleanup failed: {:?}", e);
+                log::error!("tracematch: [PersistentEngine] Cleanup failed: {:?}", e);
                 0
             }
         })
@@ -3227,7 +3442,7 @@ pub mod persistent_engine_ffi {
     pub fn persistent_engine_mark_for_recomputation() {
         with_persistent_engine(|e| {
             e.mark_for_recomputation();
-            info!("[PersistentEngine] Marked for re-computation");
+            info!("tracematch: [PersistentEngine] Marked for re-computation");
         });
     }
 
@@ -3241,7 +3456,7 @@ pub mod persistent_engine_ffi {
         sport_types: Vec<String>,
     ) {
         info!(
-            "[PersistentEngine] Adding {} activities ({} coords)",
+            "tracematch: [PersistentEngine] Adding {} activities ({} coords)",
             activity_ids.len(),
             all_coords.len() / 2
         );
@@ -3275,7 +3490,7 @@ pub mod persistent_engine_ffi {
     #[uniffi::export]
     pub fn persistent_engine_remove_activities(activity_ids: Vec<String>) {
         info!(
-            "[PersistentEngine] Removing {} activities",
+            "tracematch: [PersistentEngine] Removing {} activities",
             activity_ids.len()
         );
         with_persistent_engine(|engine| {
@@ -3603,7 +3818,7 @@ pub mod persistent_engine_ffi {
         {
             let handle_guard = SECTION_DETECTION_HANDLE.lock().unwrap();
             if handle_guard.is_some() {
-                info!("[PersistentEngine] Section detection already running");
+                info!("tracematch: [PersistentEngine] Section detection already running");
                 return false;
             }
         }
@@ -3614,10 +3829,10 @@ pub mod persistent_engine_ffi {
         if let Some(h) = handle {
             let mut handle_guard = SECTION_DETECTION_HANDLE.lock().unwrap();
             *handle_guard = Some(h);
-            info!("[PersistentEngine] Section detection started");
+            info!("tracematch: [PersistentEngine] Section detection started");
             true
         } else {
-            info!("[PersistentEngine] Failed to start section detection");
+            info!("tracematch: [PersistentEngine] Failed to start section detection");
             false
         }
     }
@@ -3655,7 +3870,7 @@ pub mod persistent_engine_ffi {
                             let activity_ids = e.get_activity_ids();
                             let config = crate::CustomSectionMatchConfig::default();
                             info!(
-                                "[PersistentEngine] Matching {} custom sections against {} activities",
+                                "tracematch: [PersistentEngine] Matching {} custom sections against {} activities",
                                 custom_sections.len(),
                                 activity_ids.len()
                             );
@@ -3669,7 +3884,7 @@ pub mod persistent_engine_ffi {
                         }
                     });
 
-                    info!("[PersistentEngine] Section detection complete");
+                    info!("tracematch: [PersistentEngine] Section detection complete");
                     "complete".to_string()
                 } else {
                     "error".to_string()
@@ -3706,7 +3921,7 @@ pub mod persistent_engine_ffi {
         let mut handle_guard = SECTION_DETECTION_HANDLE.lock().unwrap();
         if handle_guard.is_some() {
             *handle_guard = None;
-            info!("[PersistentEngine] Section detection cancelled");
+            info!("tracematch: [PersistentEngine] Section detection cancelled");
         }
     }
 
@@ -3720,7 +3935,10 @@ pub mod persistent_engine_ffi {
         let section: crate::CustomSection = match serde_json::from_str(&section_json) {
             Ok(s) => s,
             Err(e) => {
-                log::error!("[PersistentEngine] Failed to parse custom section: {:?}", e);
+                log::error!(
+                    "tracematch: [PersistentEngine] Failed to parse custom section: {:?}",
+                    e
+                );
                 return false;
             }
         };
@@ -3729,11 +3947,17 @@ pub mod persistent_engine_ffi {
 
         let added = with_persistent_engine(|e| match e.add_custom_section(&section) {
             Ok(success) => {
-                info!("[PersistentEngine] Added custom section: {}", section.id);
+                info!(
+                    "tracematch: [PersistentEngine] Added custom section: {}",
+                    section.id
+                );
                 success
             }
             Err(e) => {
-                log::error!("[PersistentEngine] Failed to add custom section: {:?}", e);
+                log::error!(
+                    "tracematch: [PersistentEngine] Failed to add custom section: {:?}",
+                    e
+                );
                 false
             }
         })
@@ -3751,7 +3975,7 @@ pub mod persistent_engine_ffi {
                         &config,
                     );
                     info!(
-                        "[PersistentEngine] Matched custom section {} against {} activities, found {} matches",
+                        "tracematch: [PersistentEngine] Matched custom section {} against {} activities, found {} matches",
                         section_id,
                         activity_ids.len(),
                         matches.len()
@@ -3768,12 +3992,15 @@ pub mod persistent_engine_ffi {
     pub fn persistent_engine_remove_custom_section(section_id: String) -> bool {
         with_persistent_engine(|e| match e.remove_custom_section(&section_id) {
             Ok(success) => {
-                info!("[PersistentEngine] Removed custom section: {}", section_id);
+                info!(
+                    "tracematch: [PersistentEngine] Removed custom section: {}",
+                    section_id
+                );
                 success
             }
             Err(e) => {
                 log::error!(
-                    "[PersistentEngine] Failed to remove custom section: {:?}",
+                    "tracematch: [PersistentEngine] Failed to remove custom section: {:?}",
                     e
                 );
                 false

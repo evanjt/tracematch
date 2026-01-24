@@ -8,12 +8,20 @@
 
 use base64::Engine;
 use log::{debug, info, warn};
+use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// Helper to calculate elapsed milliseconds from an Instant
+#[inline]
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis() as u64
+}
 
 /// Global progress state for FFI polling.
 /// Uses atomics to allow safe concurrent access from fetch tasks and FFI polls.
@@ -60,6 +68,154 @@ pub fn get_download_progress() -> (u32, u32, bool) {
         DOWNLOAD_PROGRESS.total.load(Ordering::Relaxed),
         DOWNLOAD_PROGRESS.active.load(Ordering::Relaxed),
     )
+}
+
+/// Storage for background fetch results
+static BACKGROUND_FETCH_RESULTS: Lazy<StdMutex<Option<Vec<ActivityMapResult>>>> =
+    Lazy::new(|| StdMutex::new(None));
+
+/// Start a background fetch operation (returns immediately, doesn't block)
+/// Call get_download_progress() to monitor progress
+/// Call take_background_fetch_results() when active becomes false to get results
+pub fn start_background_fetch(auth_header: String, activity_ids: Vec<String>) {
+    let fn_start = Instant::now();
+    let activity_count = activity_ids.len();
+
+    // Clear any previous results
+    if let Ok(mut results) = BACKGROUND_FETCH_RESULTS.lock() {
+        *results = None;
+    }
+
+    // Reset progress counters
+    reset_download_progress(activity_ids.len() as u32);
+
+    info!(
+        "[RUST: start_background_fetch] Spawning thread for {} activities",
+        activity_count
+    );
+
+    // Spawn background thread to do the actual work
+    std::thread::spawn(move || {
+        let thread_start = Instant::now();
+        info!(
+            "[RUST: start_background_fetch] Thread started for {} activities",
+            activity_ids.len()
+        );
+
+        // Create runtime in this thread
+        let runtime_start = Instant::now();
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(8)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => {
+                info!(
+                    "[RUST: start_background_fetch] Created tokio runtime ({} ms)",
+                    elapsed_ms(runtime_start)
+                );
+                rt
+            }
+            Err(e) => {
+                warn!(
+                    "[RUST: start_background_fetch] Failed to create runtime: {} ({} ms)",
+                    e,
+                    elapsed_ms(runtime_start)
+                );
+                finish_download_progress();
+                if let Ok(mut results) = BACKGROUND_FETCH_RESULTS.lock() {
+                    *results = Some(
+                        activity_ids
+                            .into_iter()
+                            .map(|id| ActivityMapResult {
+                                activity_id: id,
+                                bounds: None,
+                                latlngs: None,
+                                success: false,
+                                error: Some(format!("Runtime error: {}", e)),
+                            })
+                            .collect(),
+                    );
+                }
+                return;
+            }
+        };
+
+        // Create HTTP client
+        let client_start = Instant::now();
+        let fetcher = match ActivityFetcher::with_auth_header(auth_header) {
+            Ok(f) => {
+                info!(
+                    "[RUST: start_background_fetch] Created HTTP client ({} ms)",
+                    elapsed_ms(client_start)
+                );
+                f
+            }
+            Err(e) => {
+                warn!(
+                    "[RUST: start_background_fetch] Failed to create HTTP client: {} ({} ms)",
+                    e,
+                    elapsed_ms(client_start)
+                );
+                finish_download_progress();
+                if let Ok(mut results) = BACKGROUND_FETCH_RESULTS.lock() {
+                    *results = Some(
+                        activity_ids
+                            .into_iter()
+                            .map(|id| ActivityMapResult {
+                                activity_id: id,
+                                bounds: None,
+                                latlngs: None,
+                                success: false,
+                                error: Some(e.clone()),
+                            })
+                            .collect(),
+                    );
+                }
+                return;
+            }
+        };
+
+        // Run the fetch
+        let fetch_start = Instant::now();
+        let fetch_results = rt.block_on(fetcher.fetch_activity_maps(activity_ids, None));
+        let success_count = fetch_results.iter().filter(|r| r.success).count();
+        info!(
+            "[RUST: start_background_fetch] Fetch complete: {}/{} successful ({} ms)",
+            success_count,
+            fetch_results.len(),
+            elapsed_ms(fetch_start)
+        );
+
+        // Store results
+        if let Ok(mut results) = BACKGROUND_FETCH_RESULTS.lock() {
+            *results = Some(fetch_results);
+        }
+
+        // Mark as complete (active = false)
+        finish_download_progress();
+
+        info!(
+            "[RUST: start_background_fetch] Thread complete ({} ms)",
+            elapsed_ms(thread_start)
+        );
+    });
+
+    info!(
+        "[RUST: start_background_fetch] Thread spawned, returning to caller ({} ms)",
+        elapsed_ms(fn_start)
+    );
+}
+
+/// Take the results from a completed background fetch
+/// Returns None if fetch is still in progress or no fetch was started
+/// Returns Some(results) and clears the storage
+pub fn take_background_fetch_results() -> Option<Vec<ActivityMapResult>> {
+    if let Ok(mut results) = BACKGROUND_FETCH_RESULTS.lock() {
+        results.take()
+    } else {
+        None
+    }
 }
 
 // Rate limits from intervals.icu API: 30/s burst, 132/10s sustained (13.2/s average)
@@ -214,14 +370,24 @@ impl ActivityFetcher {
         use futures::stream::{self, StreamExt};
 
         let total = activity_ids.len() as u32;
-        // Initialize global progress for FFI polling
-        reset_download_progress(total);
+        // NOTE: Caller is responsible for calling reset_download_progress() before this
+        // and finish_download_progress() after this completes.
         let completed = Arc::new(AtomicU32::new(0));
         let total_bytes = Arc::new(AtomicU32::new(0));
 
+        // PERF ASSESSMENT: Using PARALLEL async fetch with rate limiting
+        // - buffer_unordered(50) = up to 50 concurrent HTTP requests
+        // - dispatch_interval=83ms = new request every 83ms (12/sec rate limit)
+        // - Theoretical: 54 activities @ 12/s = 4.5s dispatch time
+        // - Network latency ~200-400ms overlaps with dispatch, so actual time depends on slowest request
         info!(
-            "[ActivityFetcher] Starting fetch of {} activities (dispatch interval: {}ms, max concurrent: {})",
-            total, DISPATCH_INTERVAL_MS, MAX_CONCURRENCY
+            "[RUST: PERF] HTTP Fetch: {} activities, PARALLEL with max {} concurrent, dispatch every {}ms (12 req/s limit)",
+            total, MAX_CONCURRENCY, DISPATCH_INTERVAL_MS
+        );
+        let theoretical_dispatch_time = (total as u64 - 1) * DISPATCH_INTERVAL_MS;
+        info!(
+            "[RUST: PERF] Theoretical minimum time: dispatch={}ms + network latency",
+            theoretical_dispatch_time
         );
 
         let start = Instant::now();
@@ -259,16 +425,19 @@ impl ActivityFetcher {
                         0.0
                     };
 
-                    info!(
-                        "[Progress] {}/{} | dispatched@{:.2}s (#{} @ {:.1}/s) | done@{:.2}s | {}KB",
-                        done,
-                        total,
-                        dispatch_time.as_secs_f64(),
-                        dispatch_num,
-                        dispatch_rate,
-                        complete_time.as_secs_f64(),
-                        bytes / 1024
-                    );
+                    // Log progress at key milestones (every 10 activities or first/last)
+                    if done == 1 || done == total || done.is_multiple_of(10) {
+                        info!(
+                            "[RUST: fetch_activity_maps] Progress {}/{} | dispatched@{:.2}s (#{} @ {:.1}/s) | done@{:.2}s | {}KB",
+                            done,
+                            total,
+                            dispatch_time.as_secs_f64(),
+                            dispatch_num,
+                            dispatch_rate,
+                            complete_time.as_secs_f64(),
+                            bytes / 1024
+                        );
+                    }
 
                     if let Some(ref cb) = callback {
                         cb(done, total);
@@ -288,17 +457,32 @@ impl ActivityFetcher {
         let total_kb = total_bytes.load(Ordering::Relaxed) / 1024;
 
         info!(
-            "[ActivityFetcher] DONE: {}/{} success ({} errors) in {:.2}s ({:.1} req/s, {}KB)",
+            "[RUST: fetch_activity_maps] Complete: {}/{} success ({} errors) in {:.2}s ({:.1} req/s, {}KB) ({} ms)",
             success_count,
             total,
             error_count,
             elapsed.as_secs_f64(),
             rate,
-            total_kb
+            total_kb,
+            elapsed_ms(start)
         );
 
-        // Mark download complete for FFI polling
-        finish_download_progress();
+        // PERF ASSESSMENT: Efficiency analysis
+        let theoretical_dispatch_ms = (total as u64 - 1) * DISPATCH_INTERVAL_MS;
+        let actual_ms = elapsed_ms(start);
+        let overhead_ms = actual_ms.saturating_sub(theoretical_dispatch_ms);
+        let efficiency = (theoretical_dispatch_ms as f64 / actual_ms as f64 * 100.0).min(100.0);
+        info!(
+            "[RUST: PERF] HTTP efficiency: theoretical={}ms, actual={}ms, overhead={}ms ({:.1}% efficient)",
+            theoretical_dispatch_ms, actual_ms, overhead_ms, efficiency
+        );
+        info!(
+            "[RUST: PERF] Throughput: {:.1} req/s, {:.1} KB/s",
+            rate,
+            total_kb as f64 / elapsed.as_secs_f64()
+        );
+
+        // NOTE: Caller is responsible for calling finish_download_progress()
 
         results
     }
@@ -456,20 +640,33 @@ pub fn fetch_activity_maps_sync(
 ) -> Vec<ActivityMapResult> {
     use tokio::runtime::Builder;
 
+    let fn_start = Instant::now();
+    let activity_count = activity_ids.len();
     info!(
-        "[FFI] fetch_activity_maps_sync called for {} activities",
-        activity_ids.len()
+        "[RUST: fetch_activity_maps_sync] Called for {} activities",
+        activity_count
     );
 
     // Create a multi-threaded runtime with enough workers for high concurrency
+    let runtime_start = Instant::now();
     let rt = match Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
         .build()
     {
-        Ok(rt) => rt,
+        Ok(rt) => {
+            info!(
+                "[RUST: fetch_activity_maps_sync] Created tokio runtime ({} ms)",
+                elapsed_ms(runtime_start)
+            );
+            rt
+        }
         Err(e) => {
-            warn!("Failed to create tokio runtime: {}", e);
+            warn!(
+                "[RUST: fetch_activity_maps_sync] Failed to create runtime: {} ({} ms)",
+                e,
+                elapsed_ms(runtime_start)
+            );
             return activity_ids
                 .into_iter()
                 .map(|id| ActivityMapResult {
@@ -483,10 +680,21 @@ pub fn fetch_activity_maps_sync(
         }
     };
 
+    let client_start = Instant::now();
     let fetcher = match ActivityFetcher::with_auth_header(auth_header) {
-        Ok(f) => f,
+        Ok(f) => {
+            info!(
+                "[RUST: fetch_activity_maps_sync] Created HTTP client ({} ms)",
+                elapsed_ms(client_start)
+            );
+            f
+        }
         Err(e) => {
-            warn!("Failed to create fetcher: {}", e);
+            warn!(
+                "[RUST: fetch_activity_maps_sync] Failed to create HTTP client: {} ({} ms)",
+                e,
+                elapsed_ms(client_start)
+            );
             return activity_ids
                 .into_iter()
                 .map(|id| ActivityMapResult {
@@ -500,7 +708,22 @@ pub fn fetch_activity_maps_sync(
         }
     };
 
-    rt.block_on(fetcher.fetch_activity_maps(activity_ids, on_progress))
+    let fetch_start = Instant::now();
+    let results = rt.block_on(fetcher.fetch_activity_maps(activity_ids, on_progress));
+    let success_count = results.iter().filter(|r| r.success).count();
+    info!(
+        "[RUST: fetch_activity_maps_sync] Fetch complete: {}/{} successful ({} ms)",
+        success_count,
+        activity_count,
+        elapsed_ms(fetch_start)
+    );
+
+    info!(
+        "[RUST: fetch_activity_maps_sync] Complete ({} ms)",
+        elapsed_ms(fn_start)
+    );
+
+    results
 }
 
 #[cfg(test)]

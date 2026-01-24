@@ -138,13 +138,23 @@ pub(crate) fn init_logging() {
     android_logger::init_once(
         Config::default()
             .with_max_level(LevelFilter::Debug)
-            .with_tag("RouteMatcherRust"),
+            .with_tag("tracematch"),
     );
 }
 
 #[cfg(all(feature = "ffi", not(target_os = "android")))]
 pub(crate) fn init_logging() {
     // No-op on non-Android platforms
+}
+
+// ============================================================================
+// Timing Utilities
+// ============================================================================
+
+/// Helper to calculate elapsed milliseconds from an Instant
+#[inline]
+pub fn elapsed_ms(start: std::time::Instant) -> u64 {
+    start.elapsed().as_millis() as u64
 }
 
 // ============================================================================
