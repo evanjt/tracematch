@@ -1,10 +1,8 @@
 //! Post-processing for sections: folding detection, merging, deduplication, and density-based splitting.
 //!
-//! Based on concepts from:
-//! - TRACLUS: "Trajectory Clustering: A Partition-and-Group Framework" (Lee, Han, Whang 2007)
-//!   https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf
-//! - GPS Segment Averaging (MDPI 2019)
-//!   https://mdpi.com/2076-3417/9/22/4899/htm
+//! Inspired by:
+//! - TRACLUS (Lee, Han, Whang 2007) — avoid over-segmentation principle
+//! - TS-MF (Xu et al. 2022) — two-phase split-then-merge pipeline
 
 use super::rtree::{IndexedPoint, build_rtree};
 use super::{FrequentSection, SectionConfig};
@@ -200,10 +198,7 @@ const MIN_HEADING_SPLIT_LENGTH: f64 = 300.0;
 
 /// Minimum section length (meters) to consider for splitting.
 /// Sections shorter than this are kept whole to avoid over-fragmentation.
-///
-/// Based on MDL principle from TRACLUS (Lee, Han, Whang 2007):
-/// "Only split if it improves the description" - splitting short sections
-/// rarely improves quality. Reference: https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf
+/// Inspired by MDL principle: only split if it improves the description.
 const MIN_SECTION_FOR_SPLITTING: f64 = 500.0;
 
 /// Process a single section for heading-based splitting.
@@ -211,7 +206,6 @@ fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
     let polyline = &section.polyline;
 
     // Guard 1: Skip splitting sections that are already short
-    // Based on MDL principle - splitting short sections rarely improves quality
     if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
         return vec![section];
     }
@@ -299,12 +293,9 @@ fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
 /// persists for at least 100 meters. This prevents splitting at single sharp
 /// turns while catching true direction changes.
 ///
-/// Uses MDL-inspired guards to prevent over-segmentation:
+/// Guards to prevent over-segmentation:
 /// - Skips sections already < 500m (splitting rarely helps)
 /// - Ensures all fragments are >= 300m
-///
-/// Reference: TS-MF Algorithm (Xu et al. 2022) - "avoid excessive segmentation"
-/// https://www.hindawi.com/journals/wcmc/2022/9540944/
 pub fn split_at_heading_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
@@ -438,7 +429,6 @@ fn process_gradient_section(section: FrequentSection) -> Vec<FrequentSection> {
     let polyline = &section.polyline;
 
     // Guard 1: Skip splitting sections that are already short
-    // Based on MDL principle - splitting short sections rarely improves quality
     if section.distance_meters < MIN_SECTION_FOR_SPLITTING {
         return vec![section];
     }
@@ -525,12 +515,9 @@ fn process_gradient_section(section: FrequentSection) -> Vec<FrequentSection> {
 /// A section is split where gradient changes significantly (flat→uphill,
 /// uphill→downhill, etc.). This only works if elevation data is available.
 ///
-/// Uses MDL-inspired guards to prevent over-segmentation:
+/// Guards to prevent over-segmentation:
 /// - Skips sections already < 500m (splitting rarely helps)
 /// - Ensures all fragments are >= 300m
-///
-/// Reference: TS-MF Algorithm (Xu et al. 2022) - "avoid excessive segmentation"
-/// https://www.hindawi.com/journals/wcmc/2022/9540944/
 pub fn split_at_gradient_changes(
     sections: Vec<FrequentSection>,
     _config: &SectionConfig,
@@ -750,9 +737,7 @@ const MAX_MERGED_LENGTH: f64 = 3000.0;
 /// 1. **Tight join**: Connect ANY sections with endpoints < 50m apart
 /// 2. **Fragment merge**: Merge short fragments (< 400m) with endpoints < 100m apart
 ///
-/// Based on the "mergence" phase of TS-MF algorithm (Xu et al. 2022):
-/// "The MDL principle merges subtrajectories by optimizing the cost function"
-/// Reference: https://www.hindawi.com/journals/wcmc/2022/9540944/
+/// Inspired by TS-MF "mergence" phase.
 pub fn consolidate_fragments(
     mut sections: Vec<FrequentSection>,
     config: &SectionConfig,
@@ -1683,10 +1668,6 @@ fn trim_to_unclaimed(
 // =============================================================================
 // Quality Filtering: Length-Weighted Visit Threshold
 // =============================================================================
-//
-// Based on graph-based clustering principles where low-density regions are noise.
-// Reference: "Graph-Based Approaches to Clustering Network-Constrained Trajectory Data"
-// https://arxiv.org/abs/1310.5249
 //
 // Philosophy: Since users can create their own segments, automatic detection
 // should be conservative. Short sections that are only visited twice are

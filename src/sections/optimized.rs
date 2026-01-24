@@ -305,18 +305,14 @@ pub fn detect_sections_optimized(
     );
 
     // ==========================================================================
-    // Post-processing Pipeline (MDL-aware, prevents over-fragmentation)
+    // Post-processing Pipeline (prevents over-fragmentation)
     //
-    // Order rationale (based on TRACLUS and TS-MF research):
+    // Inspired by TRACLUS and TS-MF research for the two-phase approach:
     // 1. Dedup first - remove obvious duplicates before any splitting
     // 2. Split at terrain changes - while sections are still complete
-    // 3. Consolidate fragments - merge back over-split pieces (TS-MF "mergence")
+    // 3. Consolidate fragments - merge back over-split pieces
     // 4. Make exclusive - cut at overlaps after meaningful sections exist
     // 5. Merge nearby - handle GPS drift and reversed sections last
-    //
-    // References:
-    // - TRACLUS (Lee, Han, Whang 2007): https://hanj.cs.illinois.edu/pdf/sigmod07_jglee.pdf
-    // - TS-MF (Xu et al. 2022): https://www.hindawi.com/journals/wcmc/2022/9540944/
     // ==========================================================================
 
     // Post-process step 1: Remove obvious duplicates
@@ -328,7 +324,7 @@ pub fn detect_sections_optimized(
 
     // Post-process step 2: Split at heading inflection points
     // Run BEFORE exclusivity - split complete sections, not arbitrary cuts
-    // MDL guards prevent over-fragmentation (skip sections < 500m, check ratio)
+    // Guards prevent over-fragmentation (skip sections < 500m, check ratio)
     let heading_start = std::time::Instant::now();
     let heading_sections = split_at_heading_changes(deduped, config);
     info!(
@@ -347,7 +343,7 @@ pub fn detect_sections_optimized(
     );
 
     // Post-process step 4: Consolidate short fragments back together
-    // Based on TS-MF "mergence" phase - reverses over-aggressive splitting
+    // Inspired by TS-MF "mergence" phase - reverses over-aggressive splitting
     let consolidate_start = std::time::Instant::now();
     let consolidated = consolidate_fragments(gradient_sections, config);
     info!(
@@ -375,7 +371,7 @@ pub fn detect_sections_optimized(
 
     // Post-process step 7: Quality filter (length-weighted visit threshold)
     // Short sections need more visits to prove they're meaningful patterns.
-    // Reference: Graph-based clustering treats low-density regions as noise.
+    // Low-density regions are treated as noise.
     let quality_start = std::time::Instant::now();
     let final_sections = filter_low_quality_sections(merged);
     info!(
