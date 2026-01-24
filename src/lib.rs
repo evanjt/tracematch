@@ -7,7 +7,6 @@
 //! - Route grouping and clustering algorithms
 //! - Frequent section detection (multi-scale)
 //! - Activity heatmap generation
-//! - Modular route engine
 //! - Parallel processing for batch operations
 //!
 //! ## Features
@@ -68,13 +67,6 @@ pub mod geo_utils;
 // Algorithm toolbox - modular access to all algorithms
 // Use tracematch::algorithms::{...} for standalone algorithm access
 pub mod algorithms;
-
-// Modular route engine with extracted components
-pub mod engine;
-pub use engine::{
-    ActivityData, ActivityStore, ModularEngineStats, ModularRouteEngine, RouteGrouper,
-    SignatureStore, SpatialIndex,
-};
 
 // Frequent sections detection (medoid-based algorithm for smooth polylines)
 pub mod sections;

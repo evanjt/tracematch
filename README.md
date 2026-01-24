@@ -4,28 +4,28 @@ High-performance GPS route matching library.
 
 ## Features
 
-- **Route Matching** — AMD-based polyline similarity with bidirectional detection
-- **Route Grouping** — Cluster activities by route using Union-Find
-- **Section Detection** — Multi-scale detection of frequently-traveled sections
-- **Spatial Indexing** — R-tree for O(log n) viewport queries
-- **Parallel Processing** — Optional rayon-based parallelism
+- **Route Matching** - AMD-based polyline similarity with bidirectional detection
+- **Route Grouping** - Cluster activities by route using Union-Find
+- **Section Detection** - Multi-scale detection of frequently-traveled sections
+- **Spatial Indexing** - R-tree for O(log n) viewport queries
+- **Parallel Processing** - Optional rayon-based parallelism
 
 ## Performance
 
 Fast enough for real-time use on mobile devices. Benchmarked on real GPS traces (140-490 points per track):
 
-| Operation | Time | What it means |
-|-----------|------|---------------|
-| Create signature | 10-16 µs | Process a 200-point track in 0.016ms |
-| Compare two routes | 20-28 µs | Check similarity in 0.028ms |
-| Group 20 routes | 750 µs | Cluster all routes in under 1ms |
+| Operation          | Time     | What it means                        |
+| ------------------ | -------- | ------------------------------------ |
+| Create signature   | 10-16 µs | Process a 200-point track in 0.016ms |
+| Compare two routes | 20-28 µs | Check similarity in 0.028ms          |
+| Group 20 routes    | 750 µs   | Cluster all routes in under 1ms      |
 
 **Why it's fast:**
 
-- **R-tree spatial indexing** — O(log n) nearest-neighbor queries instead of O(n) linear scan
-- **Early exit** — Dissimilar routes (different regions) detected in ~3 nanoseconds
-- **Rayon parallelism** — Optional multi-core processing for large datasets
-- **Zero-copy design** — Minimal allocations in hot paths
+- **R-tree spatial indexing** - O(log n) nearest-neighbor queries instead of O(n) linear scan
+- **Early exit** - Dissimilar routes (different regions) detected in ~3 nanoseconds
+- **Rayon parallelism** - Optional multi-core processing for large datasets
+- **Zero-copy design** - Minimal allocations in hot paths
 
 Run benchmarks: `cargo bench --bench route_matching`
 
@@ -150,28 +150,28 @@ let config = MatchConfig {
 
 **Implemented algorithms:**
 
-- Beckmann, N., Kriegel, H.-P., Schneider, R., & Seeger, B. (1990). [The R\*-tree: An efficient and robust access method for points and rectangles](https://doi.org/10.1145/93597.98741). *Proceedings of the 1990 ACM SIGMOD International Conference on Management of Data*, 322–331.
-  — Spatial indexing via [rstar](https://crates.io/crates/rstar) crate
+- Beckmann, N., Kriegel, H.-P., Schneider, R., & Seeger, B. (1990). [The R\*-tree: An efficient and robust access method for points and rectangles](https://doi.org/10.1145/93597.98741). _Proceedings of the 1990 ACM SIGMOD International Conference on Management of Data_, 322–331.
+  - Spatial indexing via [rstar](https://crates.io/crates/rstar) crate
 
-- Tarjan, R. E. (1975). [Efficiency of a good but not linear set union algorithm](https://doi.org/10.1145/321879.321884). *Journal of the ACM*, 22(2), 215–225.
-  — Route grouping with path compression and union by rank
+- Tarjan, R. E. (1975). [Efficiency of a good but not linear set union algorithm](https://doi.org/10.1145/321879.321884). _Journal of the ACM_, 22(2), 215–225.
+  - Route grouping with path compression and union by rank
 
-- Douglas, D. H., & Peucker, T. K. (1973). [Algorithms for the reduction of the number of points required to represent a digitized line or its caricature](https://doi.org/10.3138/FM57-6770-U75U-7727). *Cartographica*, 10(2), 112–122.
-  — Polyline simplification via [geo](https://crates.io/crates/geo) crate
+- Douglas, D. H., & Peucker, T. K. (1973). [Algorithms for the reduction of the number of points required to represent a digitized line or its caricature](https://doi.org/10.3138/FM57-6770-U75U-7727). _Cartographica_, 10(2), 112–122.
+  - Polyline simplification via [geo](https://crates.io/crates/geo) crate
 
-- Kaufman, L., & Rousseeuw, P. J. (1987). Clustering by means of medoids. *Statistical Data Analysis Based on the L₁-Norm and Related Methods*, 405–416.
-  — Representative route selection (medoid concept; not full PAM)
+- Kaufman, L., & Rousseeuw, P. J. (1987). Clustering by means of medoids. _Statistical Data Analysis Based on the L₁-Norm and Related Methods_, 405–416.
+  - Representative route selection (medoid concept; not full PAM)
 
 **Conceptual inspiration:**
 
-- Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). *Proceedings of the 2007 ACM SIGMOD International Conference on Management of Data*, 593–604.
-  — MDL principle for avoiding over-segmentation
+- Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). _Proceedings of the 2007 ACM SIGMOD International Conference on Management of Data_, 593–604.
+  - MDL principle for avoiding over-segmentation
 
-- Xu, W., & Dong, S. (2022). [Application of artificial intelligence in an unsupervised algorithm for trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). *Wireless Communications and Mobile Computing*, 2022, 9540944.
-  — Two-phase segmentation-then-mergence pipeline
+- Xu, W., & Dong, S. (2022). [Application of artificial intelligence in an unsupervised algorithm for trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). _Wireless Communications and Mobile Computing_, 2022, 9540944.
+  - Two-phase segmentation-then-mergence pipeline
 
-- Yang, J., Mariescu-Istodor, R., & Fränti, P. (2019). [Three rapid methods for averaging GPS segments](https://doi.org/10.3390/app9224899). *Applied Sciences*, 9(22), 4899.
-  — Consensus polyline computation concepts
+- Yang, J., Mariescu-Istodor, R., & Fränti, P. (2019). [Three rapid methods for averaging GPS segments](https://doi.org/10.3390/app9224899). _Applied Sciences_, 9(22), 4899.
+  - Consensus polyline computation concepts
 
 ## License
 

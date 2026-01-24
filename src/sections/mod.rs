@@ -25,7 +25,6 @@
 //! - Section contracts if tracks consistently end before current bounds
 
 mod consensus;
-mod evolution;
 mod medoid;
 mod optimized;
 mod overlap;
@@ -57,16 +56,10 @@ pub(crate) use postprocess::{
 pub(crate) use rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
 pub(crate) use traces::extract_all_activity_traces;
 
-// Re-export evolution functions for public API
-pub use evolution::{
-    SectionUpdateResult, merge_overlapping_sections, update_section_with_new_traces,
-};
-
 // Re-export optimized detection functions
 pub use optimized::{
-    IncrementalResult, SectionMatch, SplitResult, detect_sections_incremental,
-    detect_sections_optimized, find_sections_in_route, recalculate_section_polyline,
-    split_section_at_index, split_section_at_point,
+    SectionMatch, SplitResult, detect_sections_optimized, find_sections_in_route,
+    recalculate_section_polyline, split_section_at_index, split_section_at_point,
 };
 
 /// Compute initial stability score from consensus metrics.
