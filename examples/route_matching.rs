@@ -25,14 +25,20 @@ fn main() {
     // Same routes
     println!("london-1 vs london-2:");
     match compare_routes(&sig1, &sig2, &config) {
-        Some(result) => println!("  {}% match ({})", result.match_percentage, result.direction),
+        Some(result) => println!(
+            "  {}% match ({})",
+            result.match_percentage, result.direction
+        ),
         None => println!("  no match"),
     }
 
     // Different routes
     println!("london-1 vs nyc:");
     match compare_routes(&sig1, &sig3, &config) {
-        Some(result) => println!("  {}% match ({})", result.match_percentage, result.direction),
+        Some(result) => println!(
+            "  {}% match ({})",
+            result.match_percentage, result.direction
+        ),
         None => println!("  no match"),
     }
 }

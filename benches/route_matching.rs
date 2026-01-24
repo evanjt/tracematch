@@ -17,14 +17,18 @@ struct DemoRoute {
 }
 
 fn load_demo_routes() -> Vec<(String, Vec<GpsPoint>)> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo/realRoutes.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/demo/realRoutes.json"
+    );
     let content = fs::read_to_string(path).expect("Failed to load demo routes");
     let routes: Vec<DemoRoute> = serde_json::from_str(&content).expect("Failed to parse JSON");
 
     routes
         .into_iter()
         .map(|r| {
-            let points = r.coordinates
+            let points = r
+                .coordinates
                 .into_iter()
                 .map(|[lat, lng]| GpsPoint::new(lat, lng))
                 .collect();
@@ -60,7 +64,9 @@ fn bench_route_comparison(c: &mut Criterion) {
     // Pre-compute signatures
     let signatures: Vec<_> = routes
         .iter()
-        .filter_map(|(id, pts)| RouteSignature::from_points(id, pts, &config).map(|s| (id.clone(), s)))
+        .filter_map(|(id, pts)| {
+            RouteSignature::from_points(id, pts, &config).map(|s| (id.clone(), s))
+        })
         .collect();
 
     let mut group = c.benchmark_group("route_comparison");
@@ -68,13 +74,9 @@ fn bench_route_comparison(c: &mut Criterion) {
     // Compare first signature against others
     if let Some((_, sig1)) = signatures.first() {
         for (id, sig2) in signatures.iter().skip(1).take(5) {
-            group.bench_with_input(
-                BenchmarkId::new("compare_routes", id),
-                sig2,
-                |b, s2| {
-                    b.iter(|| compare_routes(sig1, s2, &config));
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("compare_routes", id), sig2, |b, s2| {
+                b.iter(|| compare_routes(sig1, s2, &config));
+            });
         }
     }
 
