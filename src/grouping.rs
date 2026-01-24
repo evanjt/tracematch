@@ -263,7 +263,7 @@ pub fn group_signatures_with_matches(
                 };
 
                 log::debug!(
-                    "[tracematch] amd_match for {}: {:.1}% ({})",
+                    "tracematch: amd_match for {}: {:.1}% ({})",
                     activity_id,
                     result.match_percentage,
                     result.direction
