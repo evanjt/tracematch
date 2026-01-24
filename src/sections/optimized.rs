@@ -687,7 +687,6 @@ pub struct IncrementalResult {
 
 /// A section match found within a route
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionMatch {
     /// The section ID that was matched
     pub section_id: String,
@@ -851,7 +850,6 @@ fn find_section_span_directed(
 
 /// Result of splitting a section
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SplitResult {
     /// The first part of the split section
     pub first: FrequentSection,

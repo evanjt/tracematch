@@ -12,7 +12,6 @@ use std::collections::HashMap;
 
 /// Configuration for heatmap generation
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HeatmapConfig {
     /// Grid cell size in meters (default: 100m)
     pub cell_size_meters: f64,
@@ -31,7 +30,6 @@ impl Default for HeatmapConfig {
 
 /// Bounding box for heatmap computation
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HeatmapBounds {
     pub min_lat: f64,
     pub max_lat: f64,
@@ -41,7 +39,6 @@ pub struct HeatmapBounds {
 
 /// Reference to a route group passing through a cell
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RouteRef {
     /// Route group ID
     pub route_id: String,
@@ -53,7 +50,6 @@ pub struct RouteRef {
 
 /// A single cell in the heatmap grid
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HeatmapCell {
     /// Grid row index
     pub row: i32,
@@ -82,7 +78,6 @@ pub struct HeatmapCell {
 
 /// Complete heatmap result
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HeatmapResult {
     /// Non-empty cells only (sparse representation)
     pub cells: Vec<HeatmapCell>,
@@ -102,7 +97,6 @@ pub struct HeatmapResult {
 
 /// Query result when user taps a location
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CellQueryResult {
     /// The cell at the queried location
     pub cell: HeatmapCell,
@@ -325,7 +319,6 @@ impl HeatmapGrid {
 
 /// Activity metadata for heatmap generation
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ActivityHeatmapData {
     pub activity_id: String,
     pub route_id: Option<String>,
