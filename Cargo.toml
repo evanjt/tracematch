@@ -34,6 +34,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 iai-callgrind = "0.14"
 
 [[bench]]
+name = "route_matching"
+harness = false
+
+[[bench]]
 name = "section_detection"
 harness = false
 
@@ -52,5 +56,9 @@ inherits = "release"
 panic = "abort"
 
 [[example]]
-name = "basic_matching"
-path = "examples/basic_matching.rs"
+name = "route_matching"
+path = "examples/route_matching.rs"
+
+[[example]]
+name = "route_grouping"
+path = "examples/route_grouping.rs"
