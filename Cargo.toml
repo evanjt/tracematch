@@ -10,6 +10,7 @@ readme = "README.md"
 keywords = ["gps", "route", "matching", "geospatial", "fitness"]
 categories = ["algorithms", "science::geo"]
 publish = true
+exclude = ["tests/fixtures/raw_traces"]
 
 [lib]
 name = "tracematch"
