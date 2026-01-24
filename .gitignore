@@ -6,3 +6,6 @@
 *.log
 *.geojson
 .cargo
+
+# Worktrees
+.worktrees/
