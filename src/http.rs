@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-// Rate limits from intervals.icu API: 30/s burst, 132/10s sustained
-// Target: 25 req/s (40ms intervals) - under 30 req/s burst limit
-// With network latency (~200-400ms), actual sustained rate stays under 132/10s
-const DISPATCH_INTERVAL_MS: u64 = 40; // 1000ms / 25 = 40ms between dispatches
+// Rate limits from intervals.icu API: 30/s burst, 132/10s sustained (13.2/s average)
+// Target: 12 req/s (83ms intervals) - conservative rate with 10% headroom
+// This avoids 429 errors and is more respectful to the API
+const DISPATCH_INTERVAL_MS: u64 = 83; // 1000ms / 12 = 83ms between dispatches (safe margin under 13.2/s limit)
 const MAX_CONCURRENCY: usize = 50; // Allow many in-flight (network latency ~200-400ms)
 const MAX_RETRIES: u32 = 3;
 
@@ -57,7 +57,7 @@ pub type ProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
 
 /// Dispatch rate limiter - spaces out when requests START
 /// This is different from counting requests - it ensures we never dispatch
-/// more than 25 requests per second by spacing them 40ms apart.
+/// more than 12 requests per second by spacing them 83ms apart.
 struct DispatchRateLimiter {
     next_dispatch: Mutex<Instant>,
     dispatched_count: AtomicU32,
