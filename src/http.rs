@@ -11,9 +11,56 @@ use log::{debug, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// Global progress state for FFI polling.
+/// Uses atomics to allow safe concurrent access from fetch tasks and FFI polls.
+pub struct DownloadProgress {
+    completed: AtomicU32,
+    total: AtomicU32,
+    active: AtomicBool,
+}
+
+impl DownloadProgress {
+    const fn new() -> Self {
+        Self {
+            completed: AtomicU32::new(0),
+            total: AtomicU32::new(0),
+            active: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Global progress instance - single writer (fetch loop), multiple readers (FFI polls)
+static DOWNLOAD_PROGRESS: DownloadProgress = DownloadProgress::new();
+
+/// Reset progress counters at start of fetch operation
+pub fn reset_download_progress(total: u32) {
+    DOWNLOAD_PROGRESS.total.store(total, Ordering::Relaxed);
+    DOWNLOAD_PROGRESS.completed.store(0, Ordering::Relaxed);
+    DOWNLOAD_PROGRESS.active.store(true, Ordering::Relaxed);
+}
+
+/// Increment completed counter after each activity fetches
+pub fn increment_download_progress() {
+    DOWNLOAD_PROGRESS.completed.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Mark download as complete
+pub fn finish_download_progress() {
+    DOWNLOAD_PROGRESS.active.store(false, Ordering::Relaxed);
+}
+
+/// Get current progress state (called by FFI)
+pub fn get_download_progress() -> (u32, u32, bool) {
+    (
+        DOWNLOAD_PROGRESS.completed.load(Ordering::Relaxed),
+        DOWNLOAD_PROGRESS.total.load(Ordering::Relaxed),
+        DOWNLOAD_PROGRESS.active.load(Ordering::Relaxed),
+    )
+}
 
 // Rate limits from intervals.icu API: 30/s burst, 132/10s sustained (13.2/s average)
 // Target: 12 req/s (83ms intervals) - conservative rate with 10% headroom
@@ -167,6 +214,8 @@ impl ActivityFetcher {
         use futures::stream::{self, StreamExt};
 
         let total = activity_ids.len() as u32;
+        // Initialize global progress for FFI polling
+        reset_download_progress(total);
         let completed = Arc::new(AtomicU32::new(0));
         let total_bytes = Arc::new(AtomicU32::new(0));
 
@@ -197,6 +246,8 @@ impl ActivityFetcher {
 
                     // Track progress
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Update global progress for FFI polling
+                    increment_download_progress();
                     let bytes = result.latlngs.as_ref().map_or(0, |v| v.len() * 16) as u32;
                     total_bytes.fetch_add(bytes, Ordering::Relaxed);
                     let complete_time = start_time.elapsed();
@@ -245,6 +296,9 @@ impl ActivityFetcher {
             rate,
             total_kb
         );
+
+        // Mark download complete for FFI polling
+        finish_download_progress();
 
         results
     }
