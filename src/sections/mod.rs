@@ -54,7 +54,7 @@ pub(crate) use postprocess::{
     split_at_heading_changes, split_folding_sections, split_high_variance_sections,
 };
 pub(crate) use rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
-pub(crate) use traces::extract_all_activity_traces;
+pub use traces::extract_all_activity_traces;
 
 // Re-export optimized detection functions
 pub use optimized::{
