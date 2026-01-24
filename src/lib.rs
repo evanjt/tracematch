@@ -1,4 +1,4 @@
-//! # Route Matcher
+//! # tracematch
 //!
 //! High-performance GPS route matching library for fitness applications.
 //!
@@ -7,14 +7,12 @@
 //! - Route grouping and clustering algorithms
 //! - Frequent section detection (multi-scale)
 //! - Activity heatmap generation
-//! - Modular route engine with persistence support
+//! - Modular route engine
 //! - Parallel processing for batch operations
 //!
 //! ## Features
 //!
-//! - **`parallel`** - Enable parallel processing with rayon
-//! - **`persistence`** - Enable SQLite persistence for route engine
-//! - **`ffi`** - Enable FFI bindings for mobile platforms (iOS/Android)
+//! - **`parallel`** - Enable parallel processing with rayon (default)
 //!
 //! ## Quick Start
 //!
@@ -78,15 +76,6 @@ pub use engine::{
     SignatureStore, SpatialIndex,
 };
 
-// Persistent route engine with tiered storage
-#[cfg(feature = "persistence")]
-pub mod persistence;
-#[cfg(feature = "persistence")]
-pub use persistence::{
-    GroupSummary, PERSISTENT_ENGINE, PersistentEngineStats, PersistentRouteEngine,
-    SectionDetectionHandle, SectionSummary, with_persistent_engine,
-};
-
 // Frequent sections detection (medoid-based algorithm for smooth polylines)
 pub mod sections;
 pub use sections::{
@@ -116,37 +105,6 @@ pub use heatmap::{
     RouteRef, generate_heatmap, query_heatmap_cell,
 };
 
-// HTTP client for activity fetching from intervals.icu
-#[cfg(feature = "http")]
-pub mod http;
-#[cfg(feature = "http")]
-pub use http::{ActivityFetcher, ActivityMapResult, MapBounds};
-
-// FFI bindings for mobile platforms (iOS/Android)
-#[cfg(feature = "ffi")]
-pub mod ffi;
-
-#[cfg(feature = "ffi")]
-uniffi::setup_scaffolding!();
-
-/// Initialize logging for Android (only used in FFI)
-#[cfg(all(feature = "ffi", target_os = "android"))]
-pub(crate) fn init_logging() {
-    use android_logger::Config;
-    use log::LevelFilter;
-
-    android_logger::init_once(
-        Config::default()
-            .with_max_level(LevelFilter::Debug)
-            .with_tag("tracematch"),
-    );
-}
-
-#[cfg(all(feature = "ffi", not(target_os = "android")))]
-pub(crate) fn init_logging() {
-    // No-op on non-Android platforms
-}
-
 // ============================================================================
 // Timing Utilities
 // ============================================================================
@@ -169,7 +127,6 @@ pub fn elapsed_ms(start: std::time::Instant) -> u64 {
 /// let point = GpsPoint::new(51.5074, -0.1278); // London
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct GpsPoint {
     pub latitude: f64,
     pub longitude: f64,
@@ -210,7 +167,6 @@ impl GpsPoint {
 
 /// Bounding box for a route.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Bounds {
     pub min_lat: f64,
     pub max_lat: f64,
@@ -258,7 +214,6 @@ impl Bounds {
 /// The signature contains a simplified version of the original GPS track,
 /// optimized for comparison using the Fréchet distance algorithm.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RouteSignature {
     /// Unique identifier for the activity/route
     pub activity_id: String,
@@ -377,7 +332,6 @@ impl RouteSignature {
 
 /// Result of comparing two routes.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MatchResult {
     /// ID of the first route
     pub activity_id_1: String,
@@ -393,7 +347,6 @@ pub struct MatchResult {
 
 /// Configuration for route matching algorithms.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MatchConfig {
     /// AMD threshold for perfect match (100%). Routes with AMD below this are considered identical.
     /// Default: 15.0 meters (tighter threshold to show deviations)
@@ -473,7 +426,6 @@ impl Default for MatchConfig {
 /// A group of similar routes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RouteGroup {
     /// Unique identifier for this group (typically the first activity ID)
     pub group_id: String,
@@ -530,7 +482,6 @@ pub struct GroupingResult {
 /// Stores the non-GPS data needed for performance comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ActivityMetrics {
     pub activity_id: String,
     pub name: String,
@@ -555,7 +506,6 @@ pub struct ActivityMetrics {
 /// A single performance point for route comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RoutePerformance {
     pub activity_id: String,
     pub name: String,
@@ -586,7 +536,6 @@ pub struct RoutePerformance {
 /// Complete route performance result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RoutePerformanceResult {
     /// Performances sorted by date (oldest first)
     pub performances: Vec<RoutePerformance>,
@@ -599,7 +548,6 @@ pub struct RoutePerformanceResult {
 /// A single lap of a section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionLap {
     pub id: String,
     #[serde(alias = "activity_id")]
@@ -623,7 +571,6 @@ pub struct SectionLap {
 /// Section performance record for an activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionPerformanceRecord {
     #[serde(alias = "activity_id")]
     pub activity_id: String,
@@ -659,7 +606,6 @@ pub struct SectionPerformanceRecord {
 /// Complete section performance result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SectionPerformanceResult {
     /// Performance records sorted by date (oldest first)
     pub records: Vec<SectionPerformanceRecord>,
@@ -675,7 +621,6 @@ pub struct SectionPerformanceResult {
 /// A user-created custom section definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSection {
     /// Unique identifier (e.g., "custom_1234567890_abc123")
     pub id: String,
@@ -700,7 +645,6 @@ pub struct CustomSection {
 /// A match between a custom section and an activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSectionMatch {
     /// Activity ID that matched the section
     pub activity_id: String,
@@ -717,7 +661,6 @@ pub struct CustomSectionMatch {
 /// Configuration for custom section matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CustomSectionMatchConfig {
     /// Maximum distance in meters between section and activity points (default: 50m)
     pub proximity_threshold: f64,
