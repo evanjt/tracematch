@@ -219,11 +219,24 @@ pub fn take_background_fetch_results() -> Option<Vec<ActivityMapResult>> {
 }
 
 // Rate limits from intervals.icu API: 30/s burst, 132/10s sustained (13.2/s average)
-// Target: 12 req/s (83ms intervals) - conservative rate with 10% headroom
-// This avoids 429 errors and is more respectful to the API
-const DISPATCH_INTERVAL_MS: u64 = 83; // 1000ms / 12 = 83ms between dispatches (safe margin under 13.2/s limit)
+// In practice, 30/s burst triggers 429s - the API uses a sliding window.
+// Safe rates discovered through testing:
+// - 20 req/s (50ms) works reliably for small batches
+// - 13 req/s (77ms) for sustained large fetches
+const BURST_INTERVAL_MS: u64 = 50; // 1000ms / 20 = 50ms (20 req/s - safe burst)
+const SUSTAINED_INTERVAL_MS: u64 = 77; // 1000ms / 13 = 77ms (13 req/s sustained rate)
+const BURST_THRESHOLD: usize = 100; // Use burst for batches under 100
 const MAX_CONCURRENCY: usize = 50; // Allow many in-flight (network latency ~200-400ms)
 const MAX_RETRIES: u32 = 3;
+
+/// Calculate optimal dispatch interval based on request count
+fn calculate_dispatch_interval(total_requests: usize) -> u64 {
+    if total_requests <= BURST_THRESHOLD {
+        BURST_INTERVAL_MS
+    } else {
+        SUSTAINED_INTERVAL_MS
+    }
+}
 
 /// Result of fetching activity map data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,24 +273,26 @@ pub type ProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
 
 /// Dispatch rate limiter - spaces out when requests START
 /// This is different from counting requests - it ensures we never dispatch
-/// more than 12 requests per second by spacing them 83ms apart.
+/// faster than the configured rate by spacing them apart.
 struct DispatchRateLimiter {
     next_dispatch: Mutex<Instant>,
     dispatched_count: AtomicU32,
     consecutive_429s: AtomicU32,
+    interval_ms: u64,
 }
 
 impl DispatchRateLimiter {
-    fn new() -> Self {
+    fn new(interval_ms: u64) -> Self {
         Self {
             next_dispatch: Mutex::new(Instant::now()),
             dispatched_count: AtomicU32::new(0),
             consecutive_429s: AtomicU32::new(0),
+            interval_ms,
         }
     }
 
     /// Wait for our dispatch slot. Each caller gets a unique slot
-    /// spaced DISPATCH_INTERVAL_MS apart.
+    /// spaced interval_ms apart.
     async fn wait_for_dispatch_slot(&self) -> u32 {
         let (wait_duration, dispatch_num) = {
             let mut next = self.next_dispatch.lock().await;
@@ -287,7 +302,7 @@ impl DispatchRateLimiter {
             let dispatch_at = if *next > now { *next } else { now };
 
             // Reserve the next slot for the next caller
-            *next = dispatch_at + Duration::from_millis(DISPATCH_INTERVAL_MS);
+            *next = dispatch_at + Duration::from_millis(self.interval_ms);
 
             let num = self.dispatched_count.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -333,7 +348,6 @@ impl DispatchRateLimiter {
 pub struct ActivityFetcher {
     client: Client,
     auth_header: String,
-    rate_limiter: Arc<DispatchRateLimiter>,
 }
 
 impl ActivityFetcher {
@@ -357,7 +371,6 @@ impl ActivityFetcher {
         Ok(Self {
             client,
             auth_header,
-            rate_limiter: Arc::new(DispatchRateLimiter::new()),
         })
     }
 
@@ -375,16 +388,21 @@ impl ActivityFetcher {
         let completed = Arc::new(AtomicU32::new(0));
         let total_bytes = Arc::new(AtomicU32::new(0));
 
+        // Dynamic rate limiting: use burst rate for small batches, sustained for large
+        let dispatch_interval = calculate_dispatch_interval(activity_ids.len());
+        let rate_mode = if activity_ids.len() <= BURST_THRESHOLD {
+            "BURST"
+        } else {
+            "SUSTAINED"
+        };
+        let req_per_sec = 1000.0 / dispatch_interval as f64;
+
         // PERF ASSESSMENT: Using PARALLEL async fetch with rate limiting
-        // - buffer_unordered(50) = up to 50 concurrent HTTP requests
-        // - dispatch_interval=83ms = new request every 83ms (12/sec rate limit)
-        // - Theoretical: 54 activities @ 12/s = 4.5s dispatch time
-        // - Network latency ~200-400ms overlaps with dispatch, so actual time depends on slowest request
         info!(
-            "[RUST: PERF] HTTP Fetch: {} activities, PARALLEL with max {} concurrent, dispatch every {}ms (12 req/s limit)",
-            total, MAX_CONCURRENCY, DISPATCH_INTERVAL_MS
+            "[RUST: PERF] HTTP Fetch: {} activities, {} mode ({:.0} req/s), max {} concurrent",
+            total, rate_mode, req_per_sec, MAX_CONCURRENCY
         );
-        let theoretical_dispatch_time = (total as u64 - 1) * DISPATCH_INTERVAL_MS;
+        let theoretical_dispatch_time = (total as u64 - 1) * dispatch_interval;
         info!(
             "[RUST: PERF] Theoretical minimum time: dispatch={}ms + network latency",
             theoretical_dispatch_time
@@ -392,12 +410,15 @@ impl ActivityFetcher {
 
         let start = Instant::now();
 
+        // Create rate limiter with the calculated interval
+        let rate_limiter = Arc::new(DispatchRateLimiter::new(dispatch_interval));
+
         // Use buffered stream for parallel execution with dispatch rate limiting
         let results: Vec<ActivityMapResult> = stream::iter(activity_ids)
             .map(|id| {
                 let client = &self.client;
                 let auth = &self.auth_header;
-                let rate_limiter = &self.rate_limiter;
+                let rate_limiter = Arc::clone(&rate_limiter);
                 let completed = Arc::clone(&completed);
                 let total_bytes = Arc::clone(&total_bytes);
                 let callback = on_progress.clone();
@@ -408,7 +429,7 @@ impl ActivityFetcher {
                     let dispatch_num = rate_limiter.wait_for_dispatch_slot().await;
                     let dispatch_time = start_time.elapsed();
 
-                    let result = Self::fetch_single_map(client, auth, rate_limiter, &id).await;
+                    let result = Self::fetch_single_map(client, auth, &rate_limiter, &id).await;
 
                     // Track progress
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -468,13 +489,12 @@ impl ActivityFetcher {
         );
 
         // PERF ASSESSMENT: Efficiency analysis
-        let theoretical_dispatch_ms = (total as u64 - 1) * DISPATCH_INTERVAL_MS;
         let actual_ms = elapsed_ms(start);
-        let overhead_ms = actual_ms.saturating_sub(theoretical_dispatch_ms);
-        let efficiency = (theoretical_dispatch_ms as f64 / actual_ms as f64 * 100.0).min(100.0);
+        let overhead_ms = actual_ms.saturating_sub(theoretical_dispatch_time);
+        let efficiency = (theoretical_dispatch_time as f64 / actual_ms as f64 * 100.0).min(100.0);
         info!(
             "[RUST: PERF] HTTP efficiency: theoretical={}ms, actual={}ms, overhead={}ms ({:.1}% efficient)",
-            theoretical_dispatch_ms, actual_ms, overhead_ms, efficiency
+            theoretical_dispatch_time, actual_ms, overhead_ms, efficiency
         );
         info!(
             "[RUST: PERF] Throughput: {:.1} req/s, {:.1} KB/s",
