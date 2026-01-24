@@ -6,6 +6,9 @@
 //!
 //! These tests define expected behavior. If tests fail, the library logic
 //! should be adjusted, not the tests.
+//!
+//! NOTE: These tests require raw GPS fixtures in `tests/fixtures/raw_traces/`.
+//! If the fixtures are not present (e.g., in CI), tests will be skipped.
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,6 +18,14 @@ use tracematch::{
     GpsPoint, MatchConfig, RouteSignature, ScalePreset, SectionConfig, detect_sections_from_tracks,
     detect_sections_multiscale, group_signatures,
 };
+
+/// Check if the raw trace fixtures are available.
+fn fixtures_available() -> bool {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/fixtures/raw_traces");
+    path.push("activity_1_trimmed.json");
+    path.exists()
+}
 
 /// Load a GPS trace from a fixture file.
 fn load_fixture(name: &str) -> Vec<GpsPoint> {
@@ -33,15 +44,33 @@ fn load_fixture(name: &str) -> Vec<GpsPoint> {
         .collect()
 }
 
-/// Load all 5 activity fixtures.
-fn load_all_fixtures() -> Vec<(String, Vec<GpsPoint>)> {
-    (1..=5)
-        .map(|i| {
-            let id = format!("activity_{}", i);
-            let points = load_fixture(&format!("{}_trimmed.json", id));
-            (id, points)
-        })
-        .collect()
+/// Load all 5 activity fixtures. Returns None if fixtures are not available.
+fn load_all_fixtures() -> Option<Vec<(String, Vec<GpsPoint>)>> {
+    if !fixtures_available() {
+        return None;
+    }
+    Some(
+        (1..=5)
+            .map(|i| {
+                let id = format!("activity_{}", i);
+                let points = load_fixture(&format!("{}_trimmed.json", id));
+                (id, points)
+            })
+            .collect(),
+    )
+}
+
+/// Macro to skip a test if fixtures are not available.
+macro_rules! require_fixtures {
+    () => {
+        match load_all_fixtures() {
+            Some(tracks) => tracks,
+            None => {
+                eprintln!("Skipping test: raw trace fixtures not available");
+                return;
+            }
+        }
+    };
 }
 
 /// Create sport types map (all activities are Run)
@@ -54,7 +83,7 @@ fn create_sport_types(tracks: &[(String, Vec<GpsPoint>)]) -> HashMap<String, Str
 
 #[test]
 fn test_load_fixtures() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
 
     assert_eq!(tracks.len(), 5);
 
@@ -88,7 +117,7 @@ fn test_load_fixtures() {
 
 #[test]
 fn test_detect_sections_finds_overlaps() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Use discovery config with lower thresholds
@@ -124,7 +153,7 @@ fn test_detect_sections_finds_overlaps() {
 
 #[test]
 fn test_detect_common_sections_exploration() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Config to find sections of 300m-1.5km with at least 3 activities
@@ -197,7 +226,7 @@ fn test_detect_common_sections_exploration() {
 
 #[test]
 fn test_section_includes_activity_5() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Config focused on finding sections Activity 5 participates in
@@ -256,7 +285,7 @@ fn test_section_includes_activity_5() {
 
 #[test]
 fn test_activity_5_shares_end_not_start() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     let config = SectionConfig {
@@ -308,7 +337,7 @@ fn test_activity_5_shares_end_not_start() {
 
 #[test]
 fn test_multiscale_detection() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Use multi-scale detection
@@ -368,7 +397,7 @@ fn test_multiscale_detection() {
 
 #[test]
 fn test_section_polyline_quality() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     let config = SectionConfig {
@@ -439,7 +468,7 @@ fn test_similar_length_routes_group_together() {
     // Activities 3 and 4 have similar lengths (6.1km vs 7.2km = 15% diff)
     // and should group together.
 
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let config = MatchConfig::default();
 
     let signatures: Vec<RouteSignature> = tracks
@@ -490,7 +519,7 @@ fn test_activity_5_shares_common_section_with_others() {
     // The section detection should find this overlap.
     // This is a behavioral requirement, not an implementation detail.
 
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     let config = SectionConfig {
@@ -562,7 +591,7 @@ fn test_activity_5_shares_common_section_with_others() {
 
 #[test]
 fn test_debug_a3_sections() {
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Try with very permissive settings
@@ -610,7 +639,7 @@ fn test_investigate_start_section() {
     // A1-A4 share a common START section heading East/Southeast.
     // This test investigates why only the END section is detected.
 
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Extract just the first 1km of each track to see START overlaps
@@ -706,7 +735,7 @@ fn test_no_sparse_linestrings_in_output() {
     // A LineString with fewer than 2 points is invalid and would cause
     // rendering errors in GeoJSON consumers.
 
-    let tracks = load_all_fixtures();
+    let tracks = require_fixtures!();
     let sport_types = create_sport_types(&tracks);
 
     // Test single-scale detection
