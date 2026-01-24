@@ -21,6 +21,18 @@ pub trait FetchProgressCallback: Send + Sync {
     fn on_progress(&self, completed: u32, total: u32);
 }
 
+/// Result of polling download progress.
+/// Used by TypeScript to show real-time progress without cross-thread callbacks.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DownloadProgressResult {
+    /// Number of activities fetched so far
+    pub completed: u32,
+    /// Total number of activities to fetch
+    pub total: u32,
+    /// Whether a download is currently active
+    pub active: bool,
+}
+
 // ============================================================================
 // Frequent Sections Detection
 // ============================================================================
@@ -276,4 +288,22 @@ pub fn fetch_activity_maps_with_progress(
             error: r.error,
         })
         .collect()
+}
+
+/// Get current download progress for FFI polling.
+///
+/// TypeScript should poll this every 100ms during fetch operations
+/// to get smooth progress updates without cross-thread callback issues.
+///
+/// Returns DownloadProgressResult with completed/total/active fields.
+/// When active is false, the download has completed (or never started).
+#[cfg(feature = "http")]
+#[uniffi::export]
+pub fn get_download_progress() -> DownloadProgressResult {
+    let (completed, total, active) = crate::http::get_download_progress();
+    DownloadProgressResult {
+        completed,
+        total,
+        active,
+    }
 }
