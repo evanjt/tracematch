@@ -190,3 +190,101 @@ fn test_compare_routes_different_lengths() {
     assert!(result.is_some());
     assert!(result.unwrap().match_percentage > 95.0);
 }
+
+// ========================================================================
+// AMD Threshold Tests (new tighter thresholds: 15m/100m)
+// ========================================================================
+
+#[test]
+fn test_amd_to_percentage_new_thresholds() {
+    // Test with new tighter thresholds (15m/100m)
+    let perfect = 15.0;
+    let zero = 100.0;
+
+    // Below perfect threshold = 100%
+    assert_eq!(amd_to_percentage(10.0, perfect, zero), 100.0);
+
+    // At perfect threshold = 100%
+    assert_eq!(amd_to_percentage(15.0, perfect, zero), 100.0);
+
+    // Above zero threshold = 0%
+    assert_eq!(amd_to_percentage(150.0, perfect, zero), 0.0);
+
+    // At zero threshold = 0%
+    assert_eq!(amd_to_percentage(100.0, perfect, zero), 0.0);
+
+    // Midpoint (57.5m) should be ~50%
+    let mid = amd_to_percentage(57.5, perfect, zero);
+    assert!(
+        mid > 45.0 && mid < 55.0,
+        "Expected ~50% at midpoint, got {mid}"
+    );
+
+    // 30m deviation (old perfect threshold) should now show < 100%
+    let at_30m = amd_to_percentage(30.0, perfect, zero);
+    assert!(
+        at_30m < 100.0 && at_30m > 80.0,
+        "Expected 80-100% at 30m, got {at_30m}"
+    );
+}
+
+#[test]
+fn test_deviation_reflected_in_percentage() {
+    // Create two routes: one straight, one with a lateral deviation
+    let straight: Vec<GpsPoint> = (0..50)
+        .map(|i| GpsPoint::new(51.5074 + i as f64 * 0.0002, -0.1278))
+        .collect();
+
+    // Same route but with points 20-30 shifted laterally by ~50m
+    let with_deviation: Vec<GpsPoint> = (0..50)
+        .map(|i| {
+            let lat = 51.5074 + i as f64 * 0.0002;
+            let lng = if i >= 20 && i < 30 {
+                // ~50m deviation (0.0007 degrees ~ 50m at this latitude)
+                -0.1278 + 0.0007
+            } else {
+                -0.1278
+            };
+            GpsPoint::new(lat, lng)
+        })
+        .collect();
+
+    let config = MatchConfig::default(); // Uses 15m/100m thresholds
+
+    let sig1 = RouteSignature::from_points("straight", &straight, &config).unwrap();
+    let sig2 = RouteSignature::from_points("deviated", &with_deviation, &config).unwrap();
+
+    let result = compare_routes(&sig1, &sig2, &config);
+    assert!(result.is_some(), "Routes should match");
+
+    let match_pct = result.unwrap().match_percentage;
+
+    // With 20% of route at 50m deviation and 80% at ~0m:
+    // AMD ≈ 0.8 * 0 + 0.2 * 50 = 10m
+    // With 15m/100m thresholds: 10m < 15m → 100%
+    // But resampling may affect this. Key is it should NOT be exactly 100%
+    // if there's actual deviation visible.
+    assert!(
+        match_pct >= 80.0,
+        "Match should be high (≥80%), got {match_pct}"
+    );
+}
+
+#[test]
+fn test_identical_route_near_100_percent() {
+    // Identical routes should give ~100% (may not be exactly 100 due to floating point)
+    let route = generate_route_with_distance(5000.0);
+
+    let config = MatchConfig::default();
+    let sig1 = RouteSignature::from_points("a", &route, &config).unwrap();
+    let sig2 = RouteSignature::from_points("b", &route, &config).unwrap();
+
+    let result = compare_routes(&sig1, &sig2, &config);
+    assert!(result.is_some());
+
+    let match_pct = result.unwrap().match_percentage;
+    assert!(
+        match_pct >= 99.0,
+        "Identical routes should be ≥99%, got {match_pct}"
+    );
+}

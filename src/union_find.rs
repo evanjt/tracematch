@@ -26,18 +26,18 @@ use std::hash::Hash;
 /// assert_ne!(uf.find(&1), uf.find(&3));
 /// ```
 #[derive(Debug, Clone)]
-pub struct UnionFind<T: Eq + Hash + Clone> {
+pub struct UnionFind<T: Eq + Hash + Clone + Ord> {
     parent: HashMap<T, T>,
     rank: HashMap<T, usize>,
 }
 
-impl<T: Eq + Hash + Clone> Default for UnionFind<T> {
+impl<T: Eq + Hash + Clone + Ord> Default for UnionFind<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Eq + Hash + Clone> UnionFind<T> {
+impl<T: Eq + Hash + Clone + Ord> UnionFind<T> {
     /// Create a new empty Union-Find structure.
     pub fn new() -> Self {
         Self {
@@ -120,13 +120,20 @@ impl<T: Eq + Hash + Clone> UnionFind<T> {
     }
 
     /// Get all unique groups as a map from root -> members.
+    /// Members within each group are sorted for deterministic iteration.
     pub fn groups(&mut self) -> HashMap<T, Vec<T>> {
-        let items: Vec<T> = self.parent.keys().cloned().collect();
+        let mut items: Vec<T> = self.parent.keys().cloned().collect();
+        items.sort(); // Deterministic iteration order
         let mut groups: HashMap<T, Vec<T>> = HashMap::new();
 
         for item in items {
             let root = self.find(&item);
             groups.entry(root).or_default().push(item);
+        }
+
+        // Sort members within each group for determinism
+        for members in groups.values_mut() {
+            members.sort();
         }
 
         groups

@@ -386,11 +386,11 @@ pub struct MatchResult {
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MatchConfig {
     /// AMD threshold for perfect match (100%). Routes with AMD below this are considered identical.
-    /// Default: 30.0 meters (accounts for GPS variance of 5-10m)
+    /// Default: 15.0 meters (tighter threshold to show deviations)
     pub perfect_threshold: f64,
 
     /// AMD threshold for no match (0%). Routes with AMD above this are considered different.
-    /// Default: 250.0 meters
+    /// Default: 100.0 meters (tighter range for visible deviation percentages)
     pub zero_threshold: f64,
 
     /// Minimum match percentage to consider routes similar.
@@ -441,8 +441,8 @@ pub struct MatchConfig {
 impl Default for MatchConfig {
     fn default() -> Self {
         Self {
-            perfect_threshold: 30.0,
-            zero_threshold: 250.0,
+            perfect_threshold: 15.0,
+            zero_threshold: 100.0,
             // Lowered from 65% to be more inclusive - let match % show similarity
             min_match_percentage: 50.0,
             min_route_distance: 500.0,
@@ -569,8 +569,8 @@ pub struct RoutePerformance {
     pub is_current: bool,
     /// Match direction: "same", "reverse", or "partial"
     pub direction: String,
-    /// Match percentage (0-100)
-    pub match_percentage: f64,
+    /// Match percentage (0-100), None if no match data available
+    pub match_percentage: Option<f64>,
 }
 
 /// Complete route performance result.

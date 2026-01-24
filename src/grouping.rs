@@ -251,28 +251,28 @@ pub fn group_signatures_with_matches(
             }
         };
 
-        // Calculate match info for each activity using checkpoint-based matching
+        // Calculate match info for each activity using AMD-based matching
         let mut matches = Vec::new();
         for activity_id in &group.activity_ids {
             if let Some(activity_sig) = sig_map.get(activity_id.as_str()) {
-                let (match_percentage, direction) = if activity_id == &group.representative_id {
-                    (100.0, "same".to_string())
-                } else {
-                    let checkpoint_match = calculate_checkpoint_match(
-                        &activity_sig.points,
-                        &representative_sig.points,
-                        config,
-                    );
-                    let dir = compare_routes(activity_sig, representative_sig, config)
-                        .map(|r| r.direction)
-                        .unwrap_or_else(|| "same".to_string());
-                    (checkpoint_match, dir)
+                // Use AMD match percentage directly - no fallbacks
+                let match_result = compare_routes(activity_sig, representative_sig, config);
+                let Some(result) = match_result else {
+                    // Skip activities without valid match data
+                    continue;
                 };
+
+                log::debug!(
+                    "[tracematch] amd_match for {}: {:.1}% ({})",
+                    activity_id,
+                    result.match_percentage,
+                    result.direction
+                );
 
                 matches.push(ActivityMatchInfo {
                     activity_id: activity_id.clone(),
-                    match_percentage,
-                    direction,
+                    match_percentage: result.match_percentage,
+                    direction: result.direction,
                 });
             }
         }
@@ -300,25 +300,13 @@ pub fn group_signatures_with_matches(
                     .iter()
                     .filter_map(|activity_id| {
                         let activity_sig = sig_map.get(activity_id.as_str())?;
-                        let (match_percentage, direction) =
-                            if activity_id == &split_group.representative_id {
-                                (100.0, "same".to_string())
-                            } else {
-                                let checkpoint_match = calculate_checkpoint_match(
-                                    &activity_sig.points,
-                                    &split_rep_sig.points,
-                                    config,
-                                );
-                                let dir = compare_routes(activity_sig, split_rep_sig, config)
-                                    .map(|r| r.direction)
-                                    .unwrap_or_else(|| "same".to_string());
-                                (checkpoint_match, dir)
-                            };
+                        // Use AMD match percentage directly - no fallbacks
+                        let result = compare_routes(activity_sig, split_rep_sig, config)?;
 
                         Some(ActivityMatchInfo {
                             activity_id: activity_id.clone(),
-                            match_percentage,
-                            direction,
+                            match_percentage: result.match_percentage,
+                            direction: result.direction,
                         })
                     })
                     .collect();
@@ -442,25 +430,13 @@ pub fn group_signatures_parallel_with_matches(
                 .iter()
                 .filter_map(|activity_id| {
                     let activity_sig = sig_map.get(activity_id.as_str())?;
-
-                    let (match_percentage, direction) = if activity_id == &group.representative_id {
-                        (100.0, "same".to_string())
-                    } else {
-                        let checkpoint_match = calculate_checkpoint_match(
-                            &activity_sig.points,
-                            &representative_sig.points,
-                            config,
-                        );
-                        let dir = compare_routes(activity_sig, representative_sig, config)
-                            .map(|r| r.direction)
-                            .unwrap_or_else(|| "same".to_string());
-                        (checkpoint_match, dir)
-                    };
+                    // Use AMD match percentage directly - no fallbacks
+                    let result = compare_routes(activity_sig, representative_sig, config)?;
 
                     Some(ActivityMatchInfo {
                         activity_id: activity_id.clone(),
-                        match_percentage,
-                        direction,
+                        match_percentage: result.match_percentage,
+                        direction: result.direction,
                     })
                 })
                 .collect();
@@ -492,25 +468,13 @@ pub fn group_signatures_parallel_with_matches(
                         .iter()
                         .filter_map(|activity_id| {
                             let activity_sig = sig_map.get(activity_id.as_str())?;
-                            let (match_percentage, direction) =
-                                if activity_id == &split_group.representative_id {
-                                    (100.0, "same".to_string())
-                                } else {
-                                    let checkpoint_match = calculate_checkpoint_match(
-                                        &activity_sig.points,
-                                        &split_rep_sig.points,
-                                        config,
-                                    );
-                                    let dir = compare_routes(activity_sig, split_rep_sig, config)
-                                        .map(|r| r.direction)
-                                        .unwrap_or_else(|| "same".to_string());
-                                    (checkpoint_match, dir)
-                                };
+                            // Use AMD match percentage directly - no fallbacks
+                            let result = compare_routes(activity_sig, split_rep_sig, config)?;
 
                             Some(ActivityMatchInfo {
                                 activity_id: activity_id.clone(),
-                                match_percentage,
-                                direction,
+                                match_percentage: result.match_percentage,
+                                direction: result.direction,
                             })
                         })
                         .collect();
@@ -655,9 +619,15 @@ pub fn group_incremental(
         uf.union(&id1, &id2);
     }
 
-    // Build groups from Union-Find
+    // Build map of existing representatives for stability
+    let existing_reps: HashMap<String, String> = existing_groups
+        .iter()
+        .map(|g| (g.group_id.clone(), g.representative_id.clone()))
+        .collect();
+
+    // Build groups from Union-Find, preserving existing representatives
     let groups_map = uf.groups();
-    build_route_groups(groups_map, &sig_map)
+    build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps)
 }
 
 /// Build RouteGroup instances with full metadata from grouped activity IDs.
@@ -665,11 +635,26 @@ fn build_route_groups(
     groups_map: HashMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
 ) -> Vec<RouteGroup> {
+    build_route_groups_with_existing_reps(groups_map, sig_map, &HashMap::new())
+}
+
+/// Build RouteGroup instances, preserving existing representatives when available.
+/// This ensures incremental loading produces stable results.
+fn build_route_groups_with_existing_reps(
+    groups_map: HashMap<String, Vec<String>>,
+    sig_map: &HashMap<&str, &RouteSignature>,
+    existing_reps: &HashMap<String, String>,
+) -> Vec<RouteGroup> {
     groups_map
         .into_iter()
         .map(|(group_id, activity_ids)| {
-            // Find representative signature (first in group)
-            let representative_id = activity_ids.first().cloned().unwrap_or_default();
+            // activity_ids is already sorted from union_find.groups()
+            // Preserve existing representative if still in group, otherwise use first (sorted)
+            let representative_id = existing_reps
+                .get(&group_id)
+                .filter(|rep| activity_ids.contains(rep))
+                .cloned()
+                .unwrap_or_else(|| activity_ids.first().cloned().unwrap_or_default());
 
             // Default sport type - caller should override with actual value
             let sport_type = "Ride".to_string();

@@ -524,7 +524,7 @@ impl ModularRouteEngine {
                     avg_power: metrics.avg_power,
                     is_current: current_activity_id == Some(id.as_str()),
                     direction: "same".to_string(),
-                    match_percentage: 100.0,
+                    match_percentage: None, // Not calculated in non-persistent engine
                 })
             })
             .collect();
