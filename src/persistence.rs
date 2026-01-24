@@ -549,7 +549,24 @@ impl PersistentRouteEngine {
         // Load activity matches
         self.load_activity_matches()?;
 
-        self.groups_dirty = false;
+        // If we have groups but no match info, force recompute to populate match percentages
+        // This handles databases created before match percentage tracking was added
+        let groups_count = self.groups.len();
+        let matches_count = self.activity_matches.len();
+        log::info!(
+            "[tracematch] load_groups: {} groups, {} activity_matches entries",
+            groups_count,
+            matches_count
+        );
+
+        if !self.groups.is_empty() && self.activity_matches.is_empty() {
+            log::info!(
+                "[tracematch] Forcing groups recompute: groups exist but activity_matches is empty"
+            );
+            self.groups_dirty = true;
+        } else {
+            self.groups_dirty = false;
+        }
         Ok(())
     }
 
@@ -1222,6 +1239,8 @@ impl PersistentRouteEngine {
 
     /// Recompute route groups.
     fn recompute_groups(&mut self) {
+        log::info!("[tracematch] recompute_groups: starting...");
+
         // Load all signatures (this will use cache where possible)
         let activity_ids: Vec<String> = self.activity_metadata.keys().cloned().collect();
         let mut signatures = Vec::with_capacity(activity_ids.len());
@@ -1232,6 +1251,12 @@ impl PersistentRouteEngine {
             }
         }
 
+        log::info!(
+            "[tracematch] recompute_groups: loaded {} signatures from {} activities",
+            signatures.len(),
+            activity_ids.len()
+        );
+
         // Group signatures and capture match info
         #[cfg(feature = "parallel")]
         let result = crate::group_signatures_parallel_with_matches(&signatures, &self.match_config);
@@ -1241,6 +1266,18 @@ impl PersistentRouteEngine {
 
         self.groups = result.groups;
         self.activity_matches = result.activity_matches;
+
+        // Recalculate match percentages using ORIGINAL GPS tracks (not simplified signatures)
+        // This captures actual GPS variation that was smoothed out by Douglas-Peucker
+        self.recalculate_match_percentages_from_tracks();
+
+        // Log match info computed
+        let total_matches: usize = self.activity_matches.values().map(|v| v.len()).sum();
+        log::info!(
+            "[tracematch] recompute_groups: computed {} groups with {} total match entries",
+            self.groups.len(),
+            total_matches
+        );
 
         // Populate sport_type for each group from the representative activity
         for group in &mut self.groups {
@@ -1259,6 +1296,94 @@ impl PersistentRouteEngine {
         // Save to database
         self.save_groups().ok();
         self.groups_dirty = false;
+    }
+
+    /// Recalculate match percentages using original GPS tracks instead of simplified signatures.
+    /// Uses AMD (Average Minimum Distance) for accurate track comparison.
+    fn recalculate_match_percentages_from_tracks(&mut self) {
+        use crate::matching::{amd_to_percentage, average_min_distance};
+        use std::collections::HashMap;
+
+        // First pass: collect all activity IDs and load tracks
+        let mut tracks: HashMap<String, Vec<GpsPoint>> = HashMap::new();
+
+        for group in &self.groups {
+            // Load representative track
+            if let Some(track) = self.load_gps_track_from_db(&group.representative_id)
+                && track.len() >= 2
+            {
+                tracks.insert(group.representative_id.clone(), track);
+            }
+
+            // Load all activity tracks in this group
+            if let Some(matches) = self.activity_matches.get(&group.group_id) {
+                for match_info in matches {
+                    if !tracks.contains_key(&match_info.activity_id)
+                        && let Some(track) = self.load_gps_track_from_db(&match_info.activity_id)
+                        && track.len() >= 2
+                    {
+                        tracks.insert(match_info.activity_id.clone(), track);
+                    }
+                }
+            }
+        }
+
+        // Second pass: recalculate match percentages using AMD
+        for group in &self.groups {
+            let rep_track = match tracks.get(&group.representative_id) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let matches = match self.activity_matches.get_mut(&group.group_id) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            for match_info in matches.iter_mut() {
+                let activity_track = match tracks.get(&match_info.activity_id) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                // Calculate AMD match using ORIGINAL tracks (not simplified)
+                let amd_1_to_2 = average_min_distance(activity_track, rep_track);
+                let amd_2_to_1 = average_min_distance(rep_track, activity_track);
+                let avg_amd = (amd_1_to_2 + amd_2_to_1) / 2.0;
+                let new_percentage = amd_to_percentage(
+                    avg_amd,
+                    self.match_config.perfect_threshold,
+                    self.match_config.zero_threshold,
+                );
+
+                log::debug!(
+                    "[tracematch] recalc match % for {}: {:.1}% -> {:.1}% (AMD: {:.1}m, {} vs {} points)",
+                    match_info.activity_id,
+                    match_info.match_percentage,
+                    new_percentage,
+                    avg_amd,
+                    activity_track.len(),
+                    rep_track.len()
+                );
+
+                match_info.match_percentage = new_percentage;
+            }
+        }
+    }
+
+    /// Load original GPS track from database (separate function to avoid borrow issues)
+    fn load_gps_track_from_db(&self, activity_id: &str) -> Option<Vec<GpsPoint>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT track_data FROM gps_tracks WHERE activity_id = ?")
+            .ok()?;
+
+        stmt.query_row(params![activity_id], |row| {
+            let data: Vec<u8> = row.get(0)?;
+            Ok(rmp_serde::from_slice(&data).ok())
+        })
+        .ok()
+        .flatten()
     }
 
     fn save_groups(&self) -> SqlResult<()> {
@@ -2817,6 +2942,10 @@ impl PersistentRouteEngine {
         let group = match self.groups.iter().find(|g| g.group_id == route_group_id) {
             Some(g) => g,
             None => {
+                log::debug!(
+                    "[tracematch] get_route_performances: group {} not found",
+                    route_group_id
+                );
                 return RoutePerformanceResult {
                     performances: vec![],
                     best: None,
@@ -2827,6 +2956,12 @@ impl PersistentRouteEngine {
 
         // Get match info for this route
         let match_info = self.activity_matches.get(route_group_id);
+        log::debug!(
+            "[tracematch] get_route_performances: group {} has {} activities, match_info: {}",
+            route_group_id,
+            group.activity_ids.len(),
+            match_info.map(|m| m.len()).unwrap_or(0)
+        );
 
         // Build performances from metrics
         let mut performances: Vec<RoutePerformance> = group
@@ -2840,11 +2975,13 @@ impl PersistentRouteEngine {
                     0.0
                 };
 
-                // Look up match info for this activity
-                let (match_percentage, direction) = match_info
-                    .and_then(|matches| matches.iter().find(|m| m.activity_id == *id))
-                    .map(|m| (m.match_percentage, m.direction.clone()))
-                    .unwrap_or((100.0, "same".to_string()));
+                // Look up match info for this activity (optional - may not exist for old data)
+                let match_data =
+                    match_info.and_then(|matches| matches.iter().find(|m| m.activity_id == *id));
+                let match_percentage = match_data.map(|m| m.match_percentage);
+                let direction = match_data
+                    .map(|m| m.direction.clone())
+                    .unwrap_or_else(|| "same".to_string());
 
                 Some(RoutePerformance {
                     activity_id: id.clone(),
@@ -3291,6 +3428,8 @@ pub mod persistent_engine_ffi {
         current_activity_id: Option<String>,
     ) -> String {
         with_persistent_engine(|e| {
+            // Ensure groups are recomputed if dirty (this populates activity_matches)
+            let _ = e.get_groups();
             e.get_route_performances_json(&route_group_id, current_activity_id.as_deref())
         })
         .unwrap_or_else(|| "{}".to_string())

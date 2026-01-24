@@ -66,3 +66,73 @@ fn test_string_helpers() {
         union_find::string_uf::find(&mut uf, "route-2")
     );
 }
+
+#[test]
+fn test_groups_deterministic() {
+    // Run multiple times - results should be identical
+    let results: Vec<_> = (0..5)
+        .map(|_| {
+            let mut uf: UnionFind<String> = UnionFind::new();
+
+            // Add in different order internally (HashMap iteration is random)
+            uf.make_set("d".to_string());
+            uf.make_set("a".to_string());
+            uf.make_set("c".to_string());
+            uf.make_set("b".to_string());
+
+            uf.union(&"a".to_string(), &"b".to_string());
+            uf.union(&"c".to_string(), &"d".to_string());
+
+            uf.groups()
+        })
+        .collect();
+
+    // All results should be identical
+    for i in 1..results.len() {
+        // Check same number of groups
+        assert_eq!(
+            results[0].len(),
+            results[i].len(),
+            "Different group counts on run {i}"
+        );
+
+        // Check each group has same members (sorted)
+        for (root, members) in &results[0] {
+            let other_members = results[i].get(root);
+            assert!(other_members.is_some(), "Missing group {root} on run {i}");
+            assert_eq!(
+                members,
+                other_members.unwrap(),
+                "Different members for group {root} on run {i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_groups_members_sorted() {
+    let mut uf: UnionFind<String> = UnionFind::new();
+
+    // Add in reverse alphabetical order
+    uf.make_set("z".to_string());
+    uf.make_set("m".to_string());
+    uf.make_set("a".to_string());
+
+    uf.union(&"z".to_string(), &"a".to_string());
+    uf.union(&"z".to_string(), &"m".to_string());
+
+    let groups = uf.groups();
+    assert_eq!(groups.len(), 1);
+
+    // Get the single group's members
+    let members = groups.values().next().unwrap();
+
+    // Members should be sorted
+    let mut sorted = members.clone();
+    sorted.sort();
+    assert_eq!(
+        members, &sorted,
+        "Members should be sorted, got {:?}",
+        members
+    );
+}
