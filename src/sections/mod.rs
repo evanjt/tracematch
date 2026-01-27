@@ -1084,6 +1084,17 @@ pub fn detect_sections_multiscale(
     let mut sorted_sections = final_sections;
     sorted_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
 
+    // Re-assign unique IDs after all post-processing
+    // Each scale generates IDs independently (sec_run_0, sec_run_1, ...),
+    // so merging scales can produce duplicate IDs. Renumber here.
+    let mut id_counters: HashMap<String, usize> = HashMap::new();
+    for section in &mut sorted_sections {
+        let sport_key = section.sport_type.to_lowercase();
+        let counter = id_counters.entry(sport_key.clone()).or_insert(0);
+        section.id = format!("sec_{}_{}", sport_key, *counter);
+        *counter += 1;
+    }
+
     // Sort potentials by confidence
     let mut sorted_potentials = all_potentials;
     sorted_potentials.sort_by(|a, b| {

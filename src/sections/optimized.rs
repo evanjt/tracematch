@@ -373,12 +373,23 @@ pub fn detect_sections_optimized(
     // Short sections need more visits to prove they're meaningful patterns.
     // Low-density regions are treated as noise.
     let quality_start = std::time::Instant::now();
-    let final_sections = filter_low_quality_sections(merged);
+    let mut final_sections = filter_low_quality_sections(merged);
     info!(
         "[OptimizedSections] After quality filter: {} sections in {}ms",
         final_sections.len(),
         quality_start.elapsed().as_millis()
     );
+
+    // Re-assign unique IDs after all post-processing.
+    // Post-processing can create derivative IDs (_h1, _merged, etc.) that
+    // could conflict across sport types. Renumber for guaranteed uniqueness.
+    let mut id_counters: HashMap<String, usize> = HashMap::new();
+    for section in &mut final_sections {
+        let sport_key = section.sport_type.to_lowercase();
+        let counter = id_counters.entry(sport_key.clone()).or_insert(0);
+        section.id = format!("sec_{}_{}", sport_key, *counter);
+        *counter += 1;
+    }
 
     info!(
         "[OptimizedSections] Final: {} sections (total {}ms)",

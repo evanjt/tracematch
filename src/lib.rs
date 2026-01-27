@@ -90,13 +90,6 @@ pub use sections::{
     split_section_at_point,
 };
 
-// Heatmap generation module
-pub mod heatmap;
-pub use heatmap::{
-    ActivityHeatmapData, CellQueryResult, HeatmapBounds, HeatmapCell, HeatmapConfig, HeatmapResult,
-    RouteRef, generate_heatmap, query_heatmap_cell,
-};
-
 // ============================================================================
 // Timing Utilities
 // ============================================================================
@@ -531,8 +524,16 @@ pub struct RoutePerformance {
 pub struct RoutePerformanceResult {
     /// Performances sorted by date (oldest first)
     pub performances: Vec<RoutePerformance>,
-    /// Best performance (fastest speed)
+    /// Best performance (fastest speed) - overall regardless of direction
     pub best: Option<RoutePerformance>,
+    /// Best performance in forward/same direction
+    pub best_forward: Option<RoutePerformance>,
+    /// Best performance in reverse direction
+    pub best_reverse: Option<RoutePerformance>,
+    /// Summary stats for forward/same direction
+    pub forward_stats: Option<DirectionStats>,
+    /// Summary stats for reverse direction
+    pub reverse_stats: Option<DirectionStats>,
     /// Current activity's rank (1 = fastest), if current_activity_id was provided
     pub current_rank: Option<u32>,
 }
@@ -595,15 +596,39 @@ pub struct SectionPerformanceRecord {
     pub section_distance: f64,
 }
 
+/// Per-direction summary statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectionStats {
+    /// Average time across all traversals in this direction (seconds)
+    pub avg_time: Option<f64>,
+    /// Unix timestamp of most recent traversal in this direction
+    pub last_activity: Option<i64>,
+    /// Number of traversals in this direction
+    pub count: u32,
+}
+
 /// Complete section performance result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionPerformanceResult {
     /// Performance records sorted by date (oldest first)
     pub records: Vec<SectionPerformanceRecord>,
-    /// Best record (fastest time)
+    /// Best record (fastest time) - overall regardless of direction
     #[serde(alias = "best_record")]
     pub best_record: Option<SectionPerformanceRecord>,
+    /// Best record in forward/same direction
+    #[serde(alias = "best_forward_record")]
+    pub best_forward_record: Option<SectionPerformanceRecord>,
+    /// Best record in reverse direction
+    #[serde(alias = "best_reverse_record")]
+    pub best_reverse_record: Option<SectionPerformanceRecord>,
+    /// Summary stats for forward/same direction
+    #[serde(alias = "forward_stats")]
+    pub forward_stats: Option<DirectionStats>,
+    /// Summary stats for reverse direction
+    #[serde(alias = "reverse_stats")]
+    pub reverse_stats: Option<DirectionStats>,
 }
 
 // ============================================================================
