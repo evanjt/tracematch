@@ -120,29 +120,6 @@ pub use crate::sections::SectionPortion;
 pub use crate::sections::detect_sections_from_tracks;
 
 // =============================================================================
-// Heatmap Generation
-// =============================================================================
-
-/// Activity metadata for heatmap
-pub use crate::heatmap::ActivityHeatmapData;
-/// Cell query result
-pub use crate::heatmap::CellQueryResult;
-/// Heatmap bounds
-pub use crate::heatmap::HeatmapBounds;
-/// Single heatmap cell
-pub use crate::heatmap::HeatmapCell;
-/// Heatmap configuration
-pub use crate::heatmap::HeatmapConfig;
-/// Complete heatmap result
-pub use crate::heatmap::HeatmapResult;
-/// Route reference in a cell
-pub use crate::heatmap::RouteRef;
-/// Generate heatmap from signatures
-pub use crate::heatmap::generate_heatmap;
-/// Query cell at location
-pub use crate::heatmap::query_heatmap_cell;
-
-// =============================================================================
 // Line Simplification
 // =============================================================================
 
