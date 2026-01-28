@@ -8,7 +8,8 @@ use crate::matching::calculate_route_distance;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;
 
-/// Compute each activity's portion of a section
+/// Compute each activity's portion of a section.
+/// Returns ALL traversals of the section by each activity (supports out-and-back, track laps).
 pub fn compute_activity_portions(
     cluster: &OverlapCluster,
     representative_polyline: &[GpsPoint],
@@ -19,10 +20,11 @@ pub fn compute_activity_portions(
 
     for activity_id in &cluster.activity_ids {
         if let Some(track) = all_tracks.get(activity_id) {
-            // Find the portion of this track that overlaps with the representative
-            if let Some((start_idx, end_idx, direction)) =
-                find_track_portion(track, representative_polyline, config.proximity_threshold)
-            {
+            // Find ALL portions of this track that overlap with the representative
+            let all_traversals =
+                find_all_track_portions(track, representative_polyline, config.proximity_threshold);
+
+            for (start_idx, end_idx, direction) in all_traversals {
                 let distance = calculate_route_distance(&track[start_idx..end_idx]);
 
                 portions.push(SectionPortion {
@@ -46,15 +48,16 @@ struct OverlapSegment {
     distance: f64,
 }
 
-/// Find the portion of a track that overlaps with a reference polyline.
-/// Returns the segment that best matches the section length, not just any overlap.
-fn find_track_portion(
+/// Find ALL portions of a track that overlap with a reference polyline.
+/// Returns all qualifying traversals (for out-and-back, track laps, etc.).
+/// Each traversal is returned with (start_index, end_index, direction).
+fn find_all_track_portions(
     track: &[GpsPoint],
     reference: &[GpsPoint],
     threshold: f64,
-) -> Option<(usize, usize, String)> {
+) -> Vec<(usize, usize, String)> {
     if track.is_empty() || reference.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let ref_tree = build_rtree(reference);
@@ -115,49 +118,27 @@ fn find_track_portion(
     }
 
     if segments.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    // Select the best segment:
-    // 1. Distance should be close to section length (within 50% tolerance)
-    // 2. If multiple segments match, pick the one closest to section length
-    let tolerance = 0.5; // 50% tolerance
-    let min_dist = ref_length * (1.0 - tolerance);
-    let max_dist = ref_length * (1.0 + tolerance);
+    // Filter segments: must be at least 50% of section length
+    let min_distance = ref_length * 0.5;
 
-    // First try to find segments within tolerance
-    let mut best_segment: Option<&OverlapSegment> = None;
-    let mut best_diff = f64::MAX;
+    // Collect all qualifying segments with their directions
+    let mut results: Vec<(usize, usize, String)> = Vec::new();
 
     for segment in &segments {
-        if segment.distance >= min_dist && segment.distance <= max_dist {
-            let diff = (segment.distance - ref_length).abs();
-            if diff < best_diff {
-                best_diff = diff;
-                best_segment = Some(segment);
-            }
+        if segment.distance >= min_distance {
+            let direction =
+                detect_direction_robust(&track[segment.start_idx..segment.end_idx], reference, &ref_tree);
+            results.push((segment.start_idx, segment.end_idx, direction));
         }
     }
 
-    // If no segment within tolerance, pick the closest one to section length
-    // (but only if it's at least 50% of the section length)
-    if best_segment.is_none() {
-        for segment in &segments {
-            if segment.distance >= ref_length * 0.5 {
-                let diff = (segment.distance - ref_length).abs();
-                if diff < best_diff {
-                    best_diff = diff;
-                    best_segment = Some(segment);
-                }
-            }
-        }
-    }
+    // Sort by start index (time order)
+    results.sort_by_key(|r| r.0);
 
-    best_segment.map(|seg| {
-        let direction =
-            detect_direction_robust(&track[seg.start_idx..seg.end_idx], reference, &ref_tree);
-        (seg.start_idx, seg.end_idx, direction)
-    })
+    results
 }
 
 /// Detect direction by sampling multiple points along the track and checking
