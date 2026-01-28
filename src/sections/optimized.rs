@@ -558,6 +558,7 @@ pub struct SectionMatch {
 ///
 /// This scans the route and identifies where each known section appears,
 /// returning the start/end indices and match quality for each.
+/// Supports multiple traversals of the same section (out-and-back, track laps).
 ///
 /// # Arguments
 /// * `route` - The GPS track to search within
@@ -583,14 +584,15 @@ pub fn find_sections_in_route(
             continue;
         }
 
-        // Find where this section appears in the route
-        if let Some(match_info) = find_section_span_in_route(route, &section.polyline, threshold) {
+        // Find ALL places where this section appears in the route
+        let all_spans = find_all_section_spans_in_route(route, &section.polyline, threshold);
+        for (start, end, quality, same_dir) in all_spans {
             matches.push(SectionMatch {
                 section_id: section.id.clone(),
-                start_index: match_info.0 as u64,
-                end_index: match_info.1 as u64,
-                match_quality: match_info.2,
-                same_direction: match_info.3,
+                start_index: start as u64,
+                end_index: end as u64,
+                match_quality: quality,
+                same_direction: same_dir,
             });
         }
     }
@@ -600,106 +602,165 @@ pub fn find_sections_in_route(
     matches
 }
 
-/// Find where a section polyline appears in a route.
-/// Returns (start_index, end_index, quality, same_direction)
-fn find_section_span_in_route(
+/// Find ALL places where a section polyline appears in a route.
+/// Returns Vec of (start_index, end_index, quality, same_direction).
+/// Supports multiple traversals (out-and-back, track laps).
+/// Used by both auto-detected sections and custom sections.
+pub fn find_all_section_spans_in_route(
     route: &[GpsPoint],
     section: &[GpsPoint],
     threshold: f64,
-) -> Option<(usize, usize, f64, bool)> {
+) -> Vec<(usize, usize, f64, bool)> {
     if route.len() < 3 || section.len() < 3 {
-        return None;
+        return Vec::new();
     }
 
     // Try both directions
-    let forward = find_section_span_directed(route, section, threshold);
+    let forward_spans = find_all_section_spans_directed(route, section, threshold);
     let reversed: Vec<_> = section.iter().rev().cloned().collect();
-    let backward = find_section_span_directed(route, &reversed, threshold);
+    let backward_spans = find_all_section_spans_directed(route, &reversed, threshold);
 
-    match (forward, backward) {
-        (Some(f), Some(b)) => {
-            if f.2 >= b.2 {
-                Some((f.0, f.1, f.2, true))
-            } else {
-                Some((b.0, b.1, b.2, false))
-            }
-        }
-        (Some(f), None) => Some((f.0, f.1, f.2, true)),
-        (None, Some(b)) => Some((b.0, b.1, b.2, false)),
-        (None, None) => None,
+    // Combine results with direction flag
+    let mut all_spans: Vec<(usize, usize, f64, bool)> = Vec::new();
+
+    for (start, end, quality) in forward_spans {
+        all_spans.push((start, end, quality, true));
     }
+
+    for (start, end, quality) in backward_spans {
+        all_spans.push((start, end, quality, false));
+    }
+
+    // Sort by start index and dedupe overlapping spans
+    all_spans.sort_by_key(|s| s.0);
+    dedupe_overlapping_spans(all_spans)
 }
 
-/// Find section span in one direction
-fn find_section_span_directed(
+/// Remove overlapping spans, keeping the higher quality one when they conflict.
+fn dedupe_overlapping_spans(
+    spans: Vec<(usize, usize, f64, bool)>,
+) -> Vec<(usize, usize, f64, bool)> {
+    if spans.is_empty() {
+        return spans;
+    }
+
+    let mut result: Vec<(usize, usize, f64, bool)> = Vec::new();
+
+    for span in spans {
+        let overlaps_existing = result.iter().any(|existing| {
+            // Check if ranges overlap
+            span.0 < existing.1 && span.1 > existing.0
+        });
+
+        if !overlaps_existing {
+            result.push(span);
+        }
+        // If it overlaps, we skip it (first one wins since sorted by start)
+    }
+
+    result
+}
+
+/// Find ALL section spans in one direction.
+/// Returns Vec of (start_index, end_index, quality).
+fn find_all_section_spans_directed(
     route: &[GpsPoint],
     section: &[GpsPoint],
     threshold: f64,
-) -> Option<(usize, usize, f64)> {
-    // Find the first section point in the route
+) -> Vec<(usize, usize, f64)> {
     let section_start = &section[0];
-    let section_end = section.last()?;
-
-    let mut best_start_idx = None;
-    let mut best_start_dist = f64::MAX;
-
-    // Find closest point to section start
-    for (i, point) in route.iter().enumerate() {
-        let dist = haversine_distance(point, section_start);
-        if dist < threshold && dist < best_start_dist {
-            best_start_dist = dist;
-            best_start_idx = Some(i);
-        }
-    }
-
-    let start_idx = best_start_idx?;
-
-    // Find closest point to section end (after start)
-    let mut best_end_idx = None;
-    let mut best_end_dist = f64::MAX;
-
-    for (i, point) in route.iter().enumerate().skip(start_idx + 1) {
-        let dist = haversine_distance(point, section_end);
-        if dist < threshold && dist < best_end_dist {
-            best_end_dist = dist;
-            best_end_idx = Some(i);
-        }
-    }
-
-    let end_idx = best_end_idx.unwrap_or(route.len() - 1);
-
-    // Calculate match quality by sampling section points
-    let sample_step = (section.len() / 10).max(1);
-    let mut matched = 0;
-    let mut total = 0;
-
-    for (i, section_point) in section.iter().enumerate() {
-        if i % sample_step != 0 {
-            continue;
-        }
-        total += 1;
-
-        // Check if any route point in the span is near this section point
-        for route_point in &route[start_idx..=end_idx.min(route.len() - 1)] {
-            if haversine_distance(route_point, section_point) <= threshold {
-                matched += 1;
-                break;
-            }
-        }
-    }
-
-    let quality = if total > 0 {
-        matched as f64 / total as f64
-    } else {
-        0.0
+    let section_end = match section.last() {
+        Some(e) => e,
+        None => return Vec::new(),
     };
 
-    // Require at least 60% match
-    if quality >= 0.6 {
-        Some((start_idx, end_idx + 1, quality))
-    } else {
-        None
+    // Find ALL points near section start
+    let mut start_candidates: Vec<(usize, f64)> = Vec::new();
+    for (i, point) in route.iter().enumerate() {
+        let dist = haversine_distance(point, section_start);
+        if dist < threshold {
+            start_candidates.push((i, dist));
+        }
     }
+
+    if start_candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results: Vec<(usize, usize, f64)> = Vec::new();
+    let mut used_ranges: Vec<(usize, usize)> = Vec::new();
+
+    // For each start candidate, try to find a valid end point
+    for (start_idx, _start_dist) in &start_candidates {
+        let start_idx = *start_idx;
+
+        // Skip if this start is already covered by a previous match
+        if used_ranges.iter().any(|(s, e)| start_idx >= *s && start_idx < *e) {
+            continue;
+        }
+
+        // Find the closest point to section end (after start)
+        let mut best_end_idx = None;
+        let mut best_end_dist = f64::MAX;
+
+        for (i, point) in route.iter().enumerate().skip(start_idx + 1) {
+            // Stop searching if we hit another start candidate (next traversal)
+            if i > start_idx + 5 {
+                // Allow some buffer for GPS noise
+                let is_another_start = start_candidates
+                    .iter()
+                    .any(|(si, _)| *si == i && *si > start_idx);
+                if is_another_start && best_end_idx.is_some() {
+                    break;
+                }
+            }
+
+            let dist = haversine_distance(point, section_end);
+            if dist < threshold && dist < best_end_dist {
+                best_end_dist = dist;
+                best_end_idx = Some(i);
+            }
+        }
+
+        let end_idx = match best_end_idx {
+            Some(idx) => idx,
+            None => continue, // No valid end found
+        };
+
+        // Calculate match quality by sampling section points
+        let sample_step = (section.len() / 10).max(1);
+        let mut matched = 0;
+        let mut total = 0;
+
+        for (i, section_point) in section.iter().enumerate() {
+            if i % sample_step != 0 {
+                continue;
+            }
+            total += 1;
+
+            // Check if any route point in the span is near this section point
+            for route_point in &route[start_idx..=end_idx.min(route.len() - 1)] {
+                if haversine_distance(route_point, section_point) <= threshold {
+                    matched += 1;
+                    break;
+                }
+            }
+        }
+
+        let quality = if total > 0 {
+            matched as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        // Require at least 60% match
+        if quality >= 0.6 {
+            results.push((start_idx, end_idx + 1, quality));
+            used_ranges.push((start_idx, end_idx + 1));
+        }
+    }
+
+    results
 }
 
 /// Result of splitting a section

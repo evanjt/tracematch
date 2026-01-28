@@ -58,8 +58,9 @@ pub use traces::extract_all_activity_traces;
 
 // Re-export optimized detection functions
 pub use optimized::{
-    SectionMatch, SplitResult, detect_sections_optimized, find_sections_in_route,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    SectionMatch, SplitResult, detect_sections_optimized, find_all_section_spans_in_route,
+    find_sections_in_route, recalculate_section_polyline, split_section_at_index,
+    split_section_at_point,
 };
 
 /// Compute initial stability score from consensus metrics.
