@@ -695,7 +695,10 @@ fn find_all_section_spans_directed(
         let start_idx = *start_idx;
 
         // Skip if this start is already covered by a previous match
-        if used_ranges.iter().any(|(s, e)| start_idx >= *s && start_idx < *e) {
+        if used_ranges
+            .iter()
+            .any(|(s, e)| start_idx >= *s && start_idx < *e)
+        {
             continue;
         }
 
