@@ -129,8 +129,11 @@ fn find_all_track_portions(
 
     for segment in &segments {
         if segment.distance >= min_distance {
-            let direction =
-                detect_direction_robust(&track[segment.start_idx..segment.end_idx], reference, &ref_tree);
+            let direction = detect_direction_robust(
+                &track[segment.start_idx..segment.end_idx],
+                reference,
+                &ref_tree,
+            );
             results.push((segment.start_idx, segment.end_idx, direction));
         }
     }
