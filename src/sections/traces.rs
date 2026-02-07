@@ -19,7 +19,7 @@ const MIN_TRACE_POINTS: usize = 3;
 /// This handles out-and-back routes where the activity crosses the section twice.
 /// Uses R-tree for efficient O(log n) proximity lookups.
 /// Tolerates small gaps (up to 3 points) due to GPS noise.
-fn extract_activity_trace(
+pub fn extract_activity_trace(
     track: &[GpsPoint],
     section_polyline: &[GpsPoint],
     polyline_tree: &RTree<IndexedPoint>,
