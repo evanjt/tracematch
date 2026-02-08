@@ -77,51 +77,6 @@ path = "examples/scaling_report.rs"
 required-features = ["synthetic"]
 
 [[example]]
-name = "bench_scaling_multiscale"
-path = "examples/bench_scaling_multiscale.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_scaling_optimized"
-path = "examples/bench_scaling_optimized.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_route_length"
-path = "examples/bench_route_length.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_overlap_density"
-path = "examples/bench_overlap_density.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_no_overlap"
-path = "examples/bench_no_overlap.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_scenarios"
-path = "examples/bench_scenarios.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_grid_filtering"
-path = "examples/bench_grid_filtering.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_incremental"
-path = "examples/bench_incremental.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "bench_chaos"
-path = "examples/bench_chaos.rs"
-required-features = ["synthetic"]
-
-[[example]]
 name = "bench_parallel_scaling"
 path = "examples/bench_parallel_scaling.rs"
 required-features = ["synthetic"]
