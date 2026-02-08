@@ -6,7 +6,6 @@ use rayon::prelude::*;
 use super::rtree::{IndexedPoint, build_rtree};
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
-use std::collections::HashMap;
 
 /// Distance threshold for considering a point "on" the section (meters)
 const TRACE_PROXIMITY_THRESHOLD: f64 = 50.0;
@@ -95,15 +94,15 @@ pub fn extract_activity_trace(
 pub fn extract_all_activity_traces(
     activity_ids: &[String],
     section_polyline: &[GpsPoint],
-    track_map: &HashMap<String, Vec<GpsPoint>>,
-) -> HashMap<String, Vec<GpsPoint>> {
+    track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
+) -> std::collections::HashMap<String, Vec<GpsPoint>> {
     let polyline_tree = build_rtree(section_polyline);
 
     #[cfg(feature = "parallel")]
-    let traces: HashMap<String, Vec<GpsPoint>> = activity_ids
+    let traces: std::collections::HashMap<String, Vec<GpsPoint>> = activity_ids
         .par_iter()
         .filter_map(|activity_id| {
-            track_map.get(activity_id).and_then(|track| {
+            track_map.get(activity_id.as_str()).and_then(|track| {
                 let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
                 if trace.is_empty() {
                     None
@@ -115,10 +114,10 @@ pub fn extract_all_activity_traces(
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let traces: HashMap<String, Vec<GpsPoint>> = activity_ids
+    let traces: std::collections::HashMap<String, Vec<GpsPoint>> = activity_ids
         .iter()
         .filter_map(|activity_id| {
-            track_map.get(activity_id).and_then(|track| {
+            track_map.get(activity_id.as_str()).and_then(|track| {
                 let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
                 if trace.is_empty() {
                     None

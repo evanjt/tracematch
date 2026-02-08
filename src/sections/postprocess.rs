@@ -1368,7 +1368,7 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
 /// Returns the original section plus any new sections created from high-density portions.
 fn split_section_by_density(
     section: FrequentSection,
-    track_map: &HashMap<String, Vec<GpsPoint>>,
+    track_map: &HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
     let candidates = find_split_candidates(&section);
@@ -1395,33 +1395,37 @@ fn split_section_by_density(
 
         // Re-compute which activities overlap with this portion
         let mut split_activity_ids = Vec::new();
-        let mut split_activity_traces = HashMap::new();
 
         let split_tree = build_rtree(&split_polyline);
         let threshold_deg = config.proximity_threshold / 111_000.0;
         let threshold_deg_sq = threshold_deg * threshold_deg;
 
         for activity_id in &section.activity_ids {
-            if let Some(track) = track_map.get(activity_id) {
+            if let Some(track) = track_map.get(activity_id.as_str()) {
                 // Check if this activity overlaps with the split portion
-                let mut overlap_points = Vec::new();
+                let mut overlap_count = 0;
+                let mut overlap_distance = 0.0;
+                let mut last_overlap_point: Option<&GpsPoint> = None;
 
-                for point in track {
+                for point in *track {
                     let query = [point.latitude, point.longitude];
                     if let Some(nearest) = split_tree.nearest_neighbor(&query)
                         && nearest.distance_2(&query) <= threshold_deg_sq
                     {
-                        overlap_points.push(*point);
+                        overlap_count += 1;
+                        if let Some(prev) = last_overlap_point {
+                            overlap_distance +=
+                                crate::geo_utils::haversine_distance(prev, point);
+                        }
+                        last_overlap_point = Some(point);
+                    } else {
+                        last_overlap_point = None;
                     }
                 }
 
                 // Need substantial overlap to count
-                let overlap_distance = calculate_route_distance(&overlap_points);
-                if overlap_distance >= split_distance * 0.5 {
+                if overlap_count >= 3 && overlap_distance >= split_distance * 0.5 {
                     split_activity_ids.push(activity_id.clone());
-                    if !overlap_points.is_empty() {
-                        split_activity_traces.insert(activity_id.clone(), overlap_points);
-                    }
                 }
             }
         }
@@ -1441,7 +1445,8 @@ fn split_section_by_density(
                 // visit_count should equal unique activities
                 visit_count: split_activity_count as u32,
                 distance_meters: split_distance,
-                activity_traces: split_activity_traces,
+                // Lazy: traces populated on-demand
+                activity_traces: HashMap::new(),
                 confidence: section.confidence,
                 observation_count: candidate.avg_density as u32,
                 average_spread: section.average_spread,
@@ -1477,7 +1482,7 @@ fn split_section_by_density(
 /// high-traffic portions used by many other activities.
 pub fn split_high_variance_sections(
     sections: Vec<FrequentSection>,
-    track_map: &HashMap<String, Vec<GpsPoint>>,
+    track_map: &HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
     #[cfg(feature = "parallel")]

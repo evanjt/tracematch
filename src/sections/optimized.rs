@@ -16,10 +16,10 @@ use rayon::prelude::*;
 
 use super::rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
 use super::{
-    FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps, compute_consensus_polyline,
-    compute_initial_stability, consolidate_fragments, extract_all_activity_traces,
-    filter_low_quality_sections, make_sections_exclusive, merge_nearby_sections,
-    remove_overlapping_sections, select_medoid, split_at_gradient_changes,
+    FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps_with_map,
+    compute_consensus_polyline, compute_initial_stability, consolidate_fragments,
+    extract_all_activity_traces, filter_low_quality_sections, make_sections_exclusive,
+    merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
     split_at_heading_changes,
 };
 use crate::GpsPoint;
@@ -29,9 +29,10 @@ use log::info;
 use rstar::{PointDistance, RTree};
 use std::collections::{HashMap, HashSet};
 
-/// Geographic grid cell for spatial partitioning
+/// Geographic grid cell for spatial partitioning.
+/// Uses ~5km grid cells for filtering geographically distant track pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct GridCell {
+pub struct GridCell {
     lat_idx: i32,
     lng_idx: i32,
 }
@@ -39,7 +40,7 @@ struct GridCell {
 impl GridCell {
     /// Create grid cell from a GPS point
     /// Uses ~5km grid cells (0.05 degrees)
-    fn from_point(lat: f64, lng: f64) -> Self {
+    pub fn from_point(lat: f64, lng: f64) -> Self {
         const CELL_SIZE: f64 = 0.05; // ~5km at equator
         Self {
             lat_idx: (lat / CELL_SIZE).floor() as i32,
@@ -48,7 +49,7 @@ impl GridCell {
     }
 
     /// Get this cell and all 8 adjacent cells
-    fn with_neighbors(&self) -> Vec<GridCell> {
+    pub fn with_neighbors(&self) -> Vec<GridCell> {
         let mut cells = Vec::with_capacity(9);
         for dlat in -1..=1 {
             for dlng in -1..=1 {
@@ -62,8 +63,56 @@ impl GridCell {
     }
 }
 
+/// Compute the set of grid cells that a GPS track passes through.
+pub fn compute_grid_cells(track: &[GpsPoint]) -> HashSet<GridCell> {
+    let mut cells = HashSet::new();
+    for point in track {
+        cells.insert(GridCell::from_point(point.latitude, point.longitude));
+    }
+    cells
+}
+
+/// Generate candidate pairs using grid-based spatial filtering.
+/// Only pairs of tracks that share the same or adjacent 5km grid cells are returned.
+/// Returns pairs as (i, j) with i < j.
+pub fn grid_filtered_pairs(track_cells: &[HashSet<GridCell>]) -> Vec<(usize, usize)> {
+    // Build grid index: cell -> list of track indices
+    let mut grid_index: HashMap<GridCell, Vec<usize>> = HashMap::new();
+    for (idx, cells) in track_cells.iter().enumerate() {
+        for cell in cells {
+            grid_index.entry(*cell).or_default().push(idx);
+        }
+    }
+
+    // Find candidate pairs using grid (only tracks in same/adjacent cells)
+    let mut candidate_pairs: HashSet<(usize, usize)> = HashSet::new();
+    for (idx, cells) in track_cells.iter().enumerate() {
+        let mut nearby_indices: HashSet<usize> = HashSet::new();
+        for cell in cells {
+            for neighbor in cell.with_neighbors() {
+                if let Some(indices) = grid_index.get(&neighbor) {
+                    nearby_indices.extend(indices.iter().copied());
+                }
+            }
+        }
+
+        for other_idx in nearby_indices {
+            if other_idx != idx {
+                let pair = if idx < other_idx {
+                    (idx, other_idx)
+                } else {
+                    (other_idx, idx)
+                };
+                candidate_pairs.insert(pair);
+            }
+        }
+    }
+
+    candidate_pairs.into_iter().collect()
+}
+
 /// Downsample a track to approximately target_points
-fn downsample_track(track: &[GpsPoint], target_points: usize) -> Vec<GpsPoint> {
+pub(crate) fn downsample_track(track: &[GpsPoint], target_points: usize) -> Vec<GpsPoint> {
     if track.len() <= target_points {
         return track.to_vec();
     }
@@ -259,8 +308,14 @@ pub fn detect_sections_optimized(
             overlap_start.elapsed().as_millis()
         );
 
+        // Build track map for clustering and section conversion — borrow, no cloning
+        let track_map: HashMap<&str, &[GpsPoint]> = sport_tracks
+            .iter()
+            .map(|t| (t.activity_id.as_str(), t.full_track.as_slice()))
+            .collect();
+
         // Cluster and convert to sections
-        let clusters = cluster_overlaps(overlaps, config);
+        let clusters = cluster_overlaps_with_map(overlaps, config, &track_map);
         let significant: Vec<_> = clusters
             .into_iter()
             .filter(|c| c.activity_ids.len() >= config.min_activities as usize)
@@ -271,11 +326,6 @@ pub fn detect_sections_optimized(
             significant.len(),
             sport_type
         );
-
-        let track_map: HashMap<String, Vec<GpsPoint>> = sport_tracks
-            .iter()
-            .map(|t| (t.activity_id.clone(), t.full_track.clone()))
-            .collect();
 
         let cluster_data: Vec<_> = significant.into_iter().enumerate().collect();
 
@@ -400,7 +450,8 @@ pub fn detect_sections_optimized(
     final_sections
 }
 
-/// Find overlap between two tracks using downsampled versions
+/// Find overlap between two tracks using downsampled versions.
+/// Returns index ranges mapped back to the full-resolution track indices.
 fn find_overlap_downsampled(
     track_a: &TrackInfo,
     track_b: &TrackInfo,
@@ -410,25 +461,33 @@ fn find_overlap_downsampled(
     let threshold_deg = config.proximity_threshold / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
 
-    let mut overlap_points_a = Vec::new();
-    let mut overlap_points_b = Vec::new();
+    // Track the downsampled indices of the overlap for mapping back
+    let mut overlap_start_ds_a: Option<usize> = None;
+    let mut overlap_end_ds_a = 0usize;
+    let mut overlap_min_ds_b = usize::MAX;
+    let mut overlap_max_ds_b = 0usize;
     let mut overlap_length = 0.0;
+    let mut overlap_points_for_center: Vec<GpsPoint> = Vec::new();
 
     let mut in_overlap = false;
     let mut last_point: Option<&GpsPoint> = None;
 
-    for point_a in &track_a.downsampled {
+    for (ds_idx, point_a) in track_a.downsampled.iter().enumerate() {
         let query = [point_a.latitude, point_a.longitude];
 
         if let Some(nearest) = tree_b.nearest_neighbor(&query) {
             let dist_sq = nearest.distance_2(&query);
 
             if dist_sq <= threshold_deg_sq {
-                overlap_points_a.push(*point_a);
-
-                if nearest.idx < track_b.downsampled.len() {
-                    overlap_points_b.push(track_b.downsampled[nearest.idx]);
+                if overlap_start_ds_a.is_none() {
+                    overlap_start_ds_a = Some(ds_idx);
                 }
+                overlap_end_ds_a = ds_idx + 1;
+                if nearest.idx < track_b.downsampled.len() {
+                    overlap_min_ds_b = overlap_min_ds_b.min(nearest.idx);
+                    overlap_max_ds_b = overlap_max_ds_b.max(nearest.idx);
+                }
+                overlap_points_for_center.push(*point_a);
 
                 if let Some(prev) = last_point {
                     overlap_length += haversine_distance(prev, point_a);
@@ -441,9 +500,12 @@ fn find_overlap_downsampled(
                     break; // Early termination - found good overlap
                 }
                 // Reset if not enough
-                overlap_points_a.clear();
-                overlap_points_b.clear();
+                overlap_start_ds_a = None;
+                overlap_end_ds_a = 0;
+                overlap_min_ds_b = usize::MAX;
+                overlap_max_ds_b = 0;
                 overlap_length = 0.0;
+                overlap_points_for_center.clear();
                 in_overlap = false;
                 last_point = None;
             }
@@ -451,14 +513,36 @@ fn find_overlap_downsampled(
     }
 
     // Check final overlap
-    if overlap_length >= config.min_section_length && !overlap_points_a.is_empty() {
-        let center = crate::geo_utils::compute_center(&overlap_points_a);
+    if overlap_length >= config.min_section_length && overlap_start_ds_a.is_some() {
+        let ds_start_a = overlap_start_ds_a.unwrap();
+        let ds_end_a = overlap_end_ds_a;
+
+        // Map downsampled indices back to full-resolution indices
+        let step_a = if track_a.downsampled.len() > 1 {
+            track_a.full_track.len() as f64 / track_a.downsampled.len() as f64
+        } else {
+            1.0
+        };
+        let step_b = if track_b.downsampled.len() > 1 {
+            track_b.full_track.len() as f64 / track_b.downsampled.len() as f64
+        } else {
+            1.0
+        };
+
+        let full_start_a = (ds_start_a as f64 * step_a) as usize;
+        let full_end_a = ((ds_end_a as f64 * step_a) as usize).min(track_a.full_track.len());
+        let full_start_b = (overlap_min_ds_b as f64 * step_b) as usize;
+        let full_end_b =
+            (((overlap_max_ds_b + 1) as f64 * step_b) as usize).min(track_b.full_track.len());
+
+        let center = crate::geo_utils::compute_center(&overlap_points_for_center);
         Some(FullTrackOverlap {
             activity_a: track_a.activity_id.clone(),
             activity_b: track_b.activity_id.clone(),
-            points_a: overlap_points_a,
-            points_b: overlap_points_b,
+            range_a: (full_start_a, full_end_a),
+            range_b: (full_start_b, full_end_b),
             center,
+            overlap_length,
         })
     } else {
         None
@@ -470,10 +554,10 @@ fn convert_cluster_to_section(
     idx: usize,
     cluster: super::OverlapCluster,
     sport_type: &str,
-    track_map: &HashMap<String, Vec<GpsPoint>>,
+    track_map: &HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Option<FrequentSection> {
-    let (representative_id, representative_polyline) = select_medoid(&cluster);
+    let (representative_id, representative_polyline) = select_medoid(&cluster, track_map);
 
     if representative_polyline.is_empty() {
         return None;
@@ -485,12 +569,13 @@ fn convert_cluster_to_section(
         return None;
     }
 
-    // Extract traces using full resolution
+    // Extract traces for consensus computation (not stored in section)
     let activity_ids: Vec<String> = cluster.activity_ids.iter().cloned().collect();
-    let activity_traces =
+    let activity_traces_for_consensus =
         extract_all_activity_traces(&activity_ids, &representative_polyline, track_map);
 
-    let all_traces: Vec<Vec<GpsPoint>> = activity_traces.values().cloned().collect();
+    let all_traces: Vec<Vec<GpsPoint>> =
+        activity_traces_for_consensus.values().cloned().collect();
 
     let consensus = compute_consensus_polyline(
         &representative_polyline,
@@ -525,7 +610,8 @@ fn convert_cluster_to_section(
         // visit_count should equal unique activities
         visit_count: activity_count as u32,
         distance_meters: consensus_distance, // Use consensus distance, not representative
-        activity_traces,
+        // Lazy activity_traces: empty during detection, populated on-demand
+        activity_traces: HashMap::new(),
         confidence: consensus.confidence,
         observation_count: consensus.observation_count,
         average_spread: consensus.average_spread,
@@ -815,7 +901,8 @@ pub fn split_section_at_index(
             route_ids: section.route_ids.clone(),
             visit_count: section.visit_count,
             distance_meters: first_distance,
-            activity_traces: section.activity_traces.clone(),
+            // Lazy: traces need re-extraction for the new polyline
+            activity_traces: HashMap::new(),
             confidence: section.confidence * 0.9, // Slight reduction
             observation_count: section.observation_count,
             average_spread: section.average_spread,
@@ -838,7 +925,8 @@ pub fn split_section_at_index(
             route_ids: section.route_ids.clone(),
             visit_count: section.visit_count,
             distance_meters: second_distance,
-            activity_traces: section.activity_traces.clone(),
+            // Lazy: traces need re-extraction for the new polyline
+            activity_traces: HashMap::new(),
             confidence: section.confidence * 0.9,
             observation_count: section.observation_count,
             average_spread: section.average_spread,

@@ -25,10 +25,12 @@
 //! - Section contracts if tracks consistently end before current bounds
 
 mod consensus;
+pub mod incremental;
 mod medoid;
-mod optimized;
+pub mod optimized;
 mod overlap;
 mod portions;
+pub mod progress;
 mod postprocess;
 mod rtree;
 mod traces;
@@ -40,12 +42,19 @@ use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub use progress::{
+    AtomicProgressTracker, DetectionPhase, DetectionProgressCallback, NoopProgress,
+};
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
 pub(crate) use medoid::select_medoid;
 pub(crate) use overlap::{
-    FullTrackOverlap, OverlapCluster, cluster_overlaps, find_full_track_overlap,
+    FullTrackOverlap, OverlapCluster, cluster_overlaps, cluster_overlaps_with_map,
+    find_full_track_overlap,
 };
 pub(crate) use portions::compute_activity_portions;
 pub(crate) use postprocess::{
@@ -123,8 +132,34 @@ impl ScalePreset {
         }
     }
 
+    /// Extra long sections: 5km-50km (long cycling climbs, rail trails).
+    pub fn extra_long() -> Self {
+        Self {
+            name: "extra_long".to_string(),
+            min_length: 5_000.0,
+            max_length: 50_000.0,
+            min_activities: 3,
+        }
+    }
+
+    /// Ultra long sections: 50km-200km (century routes, multi-day corridors).
+    pub fn ultra_long() -> Self {
+        Self {
+            name: "ultra_long".to_string(),
+            min_length: 50_000.0,
+            max_length: 200_000.0,
+            min_activities: 3,
+        }
+    }
+
     pub fn default_presets() -> Vec<Self> {
-        vec![Self::short(), Self::medium(), Self::long()]
+        vec![
+            Self::short(),
+            Self::medium(),
+            Self::long(),
+            Self::extra_long(),
+            Self::ultra_long(),
+        ]
     }
 }
 
@@ -159,7 +194,7 @@ impl Default for SectionConfig {
         Self {
             proximity_threshold: 50.0, // 50m - handles GPS error + wide roads + opposite sides
             min_section_length: 200.0, // 200m minimum section (used when scale_presets is empty)
-            max_section_length: 5000.0, // 5km max (used when scale_presets is empty)
+            max_section_length: 200_000.0, // 200km max (used when scale_presets is empty)
             min_activities: 3,         // Need 3+ activities (used when scale_presets is empty)
             cluster_tolerance: 80.0,   // 80m for clustering similar overlaps
             sample_points: 50,         // For AMD comparison only
@@ -356,13 +391,13 @@ fn process_cluster(
     idx: usize,
     cluster: OverlapCluster,
     sport_type: &str,
-    track_map: &HashMap<String, Vec<GpsPoint>>,
+    track_map: &HashMap<&str, &[GpsPoint]>,
     activity_to_route: &HashMap<&str, &str>,
     config: &SectionConfig,
     scale_name: Option<&str>,
 ) -> Option<FrequentSection> {
-    // Select medoid - an ACTUAL GPS trace
-    let (representative_id, representative_polyline) = select_medoid(&cluster);
+    // Select medoid - an ACTUAL GPS trace (resolved from track_map via index ranges)
+    let (representative_id, representative_polyline) = select_medoid(&cluster, track_map);
 
     if representative_polyline.is_empty() {
         return None;
@@ -388,13 +423,14 @@ fn process_cluster(
         .into_iter()
         .collect();
 
-    // Pre-compute activity traces
+    // Extract traces for consensus computation only (not stored in section)
     let activity_id_vec: Vec<String> = cluster.activity_ids.iter().cloned().collect();
-    let activity_traces =
+    let activity_traces_for_consensus =
         extract_all_activity_traces(&activity_id_vec, &representative_polyline, track_map);
 
     // Collect all traces for consensus computation
-    let all_traces: Vec<Vec<GpsPoint>> = activity_traces.values().cloned().collect();
+    let all_traces: Vec<Vec<GpsPoint>> =
+        activity_traces_for_consensus.values().cloned().collect();
 
     // Compute consensus polyline from all overlapping tracks
     let consensus = compute_consensus_polyline(
@@ -438,7 +474,8 @@ fn process_cluster(
         // visit_count should equal unique activities
         visit_count: activity_count as u32,
         distance_meters: consensus_distance,
-        activity_traces,
+        // Lazy activity_traces: empty during detection, populated on-demand
+        activity_traces: HashMap::new(),
         confidence: consensus.confidence,
         observation_count: consensus.observation_count,
         average_spread: consensus.average_spread,
@@ -491,10 +528,10 @@ pub fn detect_sections_from_tracks(
         activity_to_route.len()
     );
 
-    // Build track lookup
-    let track_map: HashMap<String, Vec<GpsPoint>> = tracks
+    // Build track lookup — borrow from input tracks, no cloning
+    let track_map: HashMap<&str, &[GpsPoint]> = tracks
         .iter()
-        .map(|(id, pts)| (id.clone(), pts.clone()))
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
 
     // Group tracks by sport type
@@ -597,9 +634,9 @@ pub fn detect_sections_from_tracks(
             overlap_start.elapsed().as_millis()
         );
 
-        // Cluster overlaps
+        // Cluster overlaps (pass sport_tracks for point resolution)
         let cluster_start = std::time::Instant::now();
-        let clusters = cluster_overlaps(overlaps, config);
+        let clusters = cluster_overlaps(overlaps, config, sport_tracks);
 
         // Filter to clusters with enough activities
         let significant_clusters: Vec<_> = clusters
@@ -732,193 +769,37 @@ pub fn detect_sections_from_tracks(
     all_sections
 }
 
-/// Result from processing a single scale preset
-struct ScaleResult {
-    sections: Vec<FrequentSection>,
-    potentials: Vec<PotentialSection>,
-    overlaps_found: u32,
-    scale_name: String,
-}
-
-/// Process a single scale preset (extracted for parallel execution)
-fn process_scale_preset(
-    preset: &ScalePreset,
-    tracks_by_sport: &HashMap<String, Vec<(&str, &[GpsPoint])>>,
-    track_map: &HashMap<String, Vec<GpsPoint>>,
-    activity_to_route: &HashMap<&str, &str>,
-    config: &SectionConfig,
-) -> ScaleResult {
-    info!(
-        "[MultiScale] Processing {} scale: {}-{}m, min {} activities",
-        preset.name, preset.min_length, preset.max_length, preset.min_activities
-    );
-
-    let scale_config = SectionConfig {
-        min_section_length: preset.min_length,
-        max_section_length: preset.max_length,
-        min_activities: preset.min_activities,
-        ..config.clone()
-    };
-
-    let mut scale_sections: Vec<FrequentSection> = Vec::new();
-    let mut scale_potentials: Vec<PotentialSection> = Vec::new();
-    let mut overlaps_found = 0u32;
-
-    // Process each sport type
-    for (sport_type, sport_tracks) in tracks_by_sport {
-        // For potentials, we only need 1 activity; for sections, use preset.min_activities
-        let min_tracks_for_processing = if config.include_potentials {
-            1
-        } else {
-            preset.min_activities as usize
-        };
-        if sport_tracks.len() < min_tracks_for_processing {
-            continue;
-        }
-
-        #[cfg(feature = "parallel")]
-        let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
-            .par_iter()
-            .map(|(_, pts)| build_rtree(pts))
-            .collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
-            .iter()
-            .map(|(_, pts)| build_rtree(pts))
-            .collect();
-
-        // Generate pairs and find overlaps
-        let pairs: Vec<(usize, usize)> = (0..sport_tracks.len())
-            .flat_map(|i| ((i + 1)..sport_tracks.len()).map(move |j| (i, j)))
-            .collect();
-
-        #[cfg(feature = "parallel")]
-        let overlaps: Vec<FullTrackOverlap> = pairs
-            .into_par_iter()
-            .filter_map(|(i, j)| {
-                let (id_a, track_a) = sport_tracks[i];
-                let (id_b, track_b) = sport_tracks[j];
-                if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
-                    return None;
-                }
-                find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
-            })
-            .collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let overlaps: Vec<FullTrackOverlap> = pairs
-            .into_iter()
-            .filter_map(|(i, j)| {
-                let (id_a, track_a) = sport_tracks[i];
-                let (id_b, track_b) = sport_tracks[j];
-                if !bounds_overlap_tracks(track_a, track_b, scale_config.proximity_threshold) {
-                    return None;
-                }
-                find_full_track_overlap(id_a, track_a, id_b, track_b, &rtrees[j], &scale_config)
-            })
-            .collect();
-
-        overlaps_found += overlaps.len() as u32;
-
-        // Cluster overlaps
-        let clusters = cluster_overlaps(overlaps, &scale_config);
-
-        // Separate into confirmed sections and potential sections
-        let (significant, potential): (Vec<_>, Vec<_>) = clusters
-            .into_iter()
-            .partition(|c| c.activity_ids.len() >= preset.min_activities as usize);
-
-        // Process confirmed sections
-        #[cfg(feature = "parallel")]
-        let sport_sections: Vec<FrequentSection> = significant
-            .into_par_iter()
-            .enumerate()
-            .filter_map(|(idx, cluster)| {
-                process_cluster(
-                    idx,
-                    cluster,
-                    sport_type,
-                    track_map,
-                    activity_to_route,
-                    &scale_config,
-                    Some(&preset.name),
-                )
-            })
-            .collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let sport_sections: Vec<FrequentSection> = significant
-            .into_iter()
-            .enumerate()
-            .filter_map(|(idx, cluster)| {
-                process_cluster(
-                    idx,
-                    cluster,
-                    sport_type,
-                    track_map,
-                    activity_to_route,
-                    &scale_config,
-                    Some(&preset.name),
-                )
-            })
-            .collect();
-
-        scale_sections.extend(sport_sections);
-
-        // Process potential sections if enabled
-        if config.include_potentials {
-            for (idx, cluster) in potential.into_iter().enumerate() {
-                // Only include clusters with 1-2 activities
-                let activity_count = cluster.activity_ids.len();
-                if activity_count >= 1
-                    && activity_count < preset.min_activities as usize
-                    && let Some((_rep_id, rep_polyline)) = Some(select_medoid(&cluster))
-                    && !rep_polyline.is_empty()
-                {
-                    let distance = calculate_route_distance(&rep_polyline);
-                    if distance >= preset.min_length && distance <= preset.max_length {
-                        scale_potentials.push(PotentialSection {
-                            id: format!(
-                                "pot_{}_{}_{}",
-                                preset.name,
-                                sport_type.to_lowercase(),
-                                idx
-                            ),
-                            sport_type: sport_type.to_string(),
-                            polyline: rep_polyline,
-                            activity_ids: cluster.activity_ids.into_iter().collect(),
-                            visit_count: activity_count as u32,
-                            distance_meters: distance,
-                            confidence: 0.3 + (activity_count as f64 * 0.2), // 0.5 for 1, 0.7 for 2
-                            scale: preset.name.clone(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    info!(
-        "[MultiScale] {} scale: {} sections, {} potentials",
-        preset.name,
-        scale_sections.len(),
-        scale_potentials.len()
-    );
-
-    ScaleResult {
-        sections: scale_sections,
-        potentials: scale_potentials,
-        overlaps_found,
-        scale_name: preset.name.clone(),
-    }
-}
-
 pub fn detect_sections_multiscale(
     tracks: &[(String, Vec<GpsPoint>)],
     sport_types: &HashMap<String, String>,
     groups: &[RouteGroup],
     config: &SectionConfig,
+) -> MultiScaleSectionResult {
+    detect_sections_multiscale_with_progress(
+        tracks,
+        sport_types,
+        groups,
+        config,
+        Arc::new(NoopProgress),
+    )
+}
+
+/// Detect sections with a progress callback for real-time UI updates.
+///
+/// Architecture: Overlaps are computed ONCE per sport type and shared across all
+/// scale presets (filtered by length). This reduces memory and computation by ~5x
+/// compared to the previous approach of running independent overlap detection per preset.
+///
+/// Phases reported:
+/// - `BuildingRtrees`: total = tracks across all sport types
+/// - `FindingOverlaps`: total = pairs across all sport types
+/// - `Postprocessing`: total = 6 (one per post-processing step)
+pub fn detect_sections_multiscale_with_progress(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    groups: &[RouteGroup],
+    config: &SectionConfig,
+    progress: Arc<dyn DetectionProgressCallback>,
 ) -> MultiScaleSectionResult {
     info!(
         "[MultiScale] Detecting from {} tracks with {} scale presets",
@@ -946,10 +827,10 @@ pub fn detect_sections_multiscale(
         };
     }
 
-    // Build shared data structures once
-    let track_map: HashMap<String, Vec<GpsPoint>> = tracks
+    // Build shared data structures once — borrow from input tracks, no cloning
+    let track_map: HashMap<&str, &[GpsPoint]> = tracks
         .iter()
-        .map(|(id, pts)| (id.clone(), pts.clone()))
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
 
     let significant_groups: Vec<&RouteGroup> = groups
@@ -979,56 +860,352 @@ pub fn detect_sections_multiscale(
             .push((activity_id.as_str(), points.as_slice()));
     }
 
-    // Process all scale presets IN PARALLEL
-    #[cfg(feature = "parallel")]
-    let scale_results: Vec<ScaleResult> = config
-        .scale_presets
-        .par_iter()
-        .map(|preset| {
-            process_scale_preset(
-                preset,
-                &tracks_by_sport,
-                &track_map,
-                &activity_to_route,
-                config,
-            )
-        })
-        .collect();
+    // Calculate totals for progress reporting (now ONCE, not per-preset)
+    let total_tracks_across_sports: u32 = tracks_by_sport.values().map(|v| v.len() as u32).sum();
 
-    #[cfg(not(feature = "parallel"))]
-    let scale_results: Vec<ScaleResult> = config
+    // Phase 1: Building R-trees (ONCE per sport type, not per preset)
+    progress.on_phase(DetectionPhase::BuildingRtrees, total_tracks_across_sports);
+
+    // Use the smallest min_section_length across all presets for overlap detection
+    // This ensures we capture overlaps that any preset might need
+    let global_min_length = config
         .scale_presets
         .iter()
-        .map(|preset| {
-            process_scale_preset(
-                preset,
-                &tracks_by_sport,
-                &track_map,
-                &activity_to_route,
-                config,
-            )
-        })
-        .collect();
+        .map(|p| p.min_length)
+        .fold(f64::MAX, f64::min);
 
-    // Merge results from all scales
+    let overlap_config = SectionConfig {
+        min_section_length: global_min_length,
+        ..config.clone()
+    };
+
     let mut all_sections: Vec<FrequentSection> = Vec::new();
     let mut all_potentials: Vec<PotentialSection> = Vec::new();
 
-    for result in scale_results {
-        stats.overlaps_found += result.overlaps_found;
-        stats
-            .sections_by_scale
-            .insert(result.scale_name.clone(), result.sections.len() as u32);
-        stats
-            .potentials_by_scale
-            .insert(result.scale_name, result.potentials.len() as u32);
-        all_sections.extend(result.sections);
-        all_potentials.extend(result.potentials);
+    // Process each sport type: build R-trees ONCE, find overlaps ONCE, then filter per preset
+    for (sport_type, sport_tracks) in &tracks_by_sport {
+        let min_tracks_for_processing = if config.include_potentials {
+            1
+        } else {
+            config
+                .scale_presets
+                .iter()
+                .map(|p| p.min_activities as usize)
+                .min()
+                .unwrap_or(1)
+        };
+        if sport_tracks.len() < min_tracks_for_processing {
+            continue;
+        }
+
+        // Downsample tracks for R-tree building and overlap detection (~10x memory reduction)
+        let downsample_target = 100;
+        let downsampled: Vec<Vec<GpsPoint>> = sport_tracks
+            .iter()
+            .map(|(_, pts)| optimized::downsample_track(pts, downsample_target))
+            .collect();
+
+        // Build R-trees from DOWNSAMPLED tracks
+        let rtree_start = std::time::Instant::now();
+        #[cfg(feature = "parallel")]
+        let rtrees: Vec<rstar::RTree<IndexedPoint>> = downsampled
+            .par_iter()
+            .map(|ds| {
+                let tree = build_rtree(ds);
+                progress.on_progress();
+                tree
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let rtrees: Vec<rstar::RTree<IndexedPoint>> = downsampled
+            .iter()
+            .map(|ds| {
+                let tree = build_rtree(ds);
+                progress.on_progress();
+                tree
+            })
+            .collect();
+
+        info!(
+            "[MultiScale] Built {} R-trees (downsampled to ~{}) for {} in {}ms",
+            rtrees.len(),
+            downsample_target,
+            sport_type,
+            rtree_start.elapsed().as_millis()
+        );
+
+        // Use grid-based spatial filtering to skip geographically distant pairs
+        let track_cells: Vec<std::collections::HashSet<optimized::GridCell>> = downsampled
+            .iter()
+            .map(|ds| optimized::compute_grid_cells(ds))
+            .collect();
+        let pairs = optimized::grid_filtered_pairs(&track_cells);
+        drop(track_cells);
+
+        let exhaustive_pairs = sport_tracks.len() * sport_tracks.len().saturating_sub(1) / 2;
+        info!(
+            "[MultiScale] Grid filtering: {} candidate pairs (of {} possible) for {}",
+            pairs.len(),
+            exhaustive_pairs,
+            sport_type,
+        );
+
+        // Find ALL pairwise overlaps ONCE using downsampled tracks
+        let grid_pair_count: u32 = pairs.len() as u32;
+        progress.on_phase(DetectionPhase::FindingOverlaps, grid_pair_count);
+
+        let overlap_start = std::time::Instant::now();
+
+        // Use downsampled tracks for overlap detection, then map indices back
+        let full_lengths: Vec<usize> = sport_tracks.iter().map(|(_, pts)| pts.len()).collect();
+        let ds_lengths: Vec<usize> = downsampled.iter().map(|ds| ds.len()).collect();
+
+        // Batch progress: report every 1% or every 100 pairs, whichever is smaller
+        let progress_interval = (pairs.len() / 100).max(1).min(100);
+
+        #[cfg(feature = "parallel")]
+        let all_overlaps: Vec<FullTrackOverlap> = {
+            let counter = AtomicUsize::new(0);
+            pairs
+                .into_par_iter()
+                .filter_map(|(i, j)| {
+                    let result = {
+                        let (id_a, _) = sport_tracks[i];
+                        let (id_b, _) = sport_tracks[j];
+                        let ds_a = &downsampled[i];
+                        let ds_b = &downsampled[j];
+                        if !bounds_overlap_tracks(ds_a, ds_b, overlap_config.proximity_threshold) {
+                            None
+                        } else {
+                            find_full_track_overlap(
+                                id_a, ds_a, id_b, ds_b, &rtrees[j], &overlap_config,
+                            )
+                            .map(|mut overlap| {
+                                // Map downsampled indices back to full-resolution
+                                let step_a =
+                                    full_lengths[i] as f64 / ds_lengths[i].max(1) as f64;
+                                let step_b =
+                                    full_lengths[j] as f64 / ds_lengths[j].max(1) as f64;
+                                overlap.range_a = (
+                                    (overlap.range_a.0 as f64 * step_a) as usize,
+                                    ((overlap.range_a.1 as f64 * step_a) as usize)
+                                        .min(full_lengths[i]),
+                                );
+                                overlap.range_b = (
+                                    (overlap.range_b.0 as f64 * step_b) as usize,
+                                    ((overlap.range_b.1 as f64 * step_b) as usize)
+                                        .min(full_lengths[j]),
+                                );
+                                overlap
+                            })
+                        }
+                    };
+                    let prev = counter.fetch_add(1, Ordering::Relaxed);
+                    if prev % progress_interval == 0 {
+                        // Batch report: advance progress by the interval amount
+                        for _ in 0..progress_interval.min(grid_pair_count as usize - prev) {
+                            progress.on_progress();
+                        }
+                    }
+                    result
+                })
+                .collect()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let all_overlaps: Vec<FullTrackOverlap> = {
+            let mut counter: usize = 0;
+            pairs
+                .into_iter()
+                .filter_map(|(i, j)| {
+                    let result = {
+                        let (id_a, _) = sport_tracks[i];
+                        let (id_b, _) = sport_tracks[j];
+                        let ds_a = &downsampled[i];
+                        let ds_b = &downsampled[j];
+                        if !bounds_overlap_tracks(ds_a, ds_b, overlap_config.proximity_threshold) {
+                            None
+                        } else {
+                            find_full_track_overlap(
+                                id_a, ds_a, id_b, ds_b, &rtrees[j], &overlap_config,
+                            )
+                            .map(|mut overlap| {
+                                let step_a =
+                                    full_lengths[i] as f64 / ds_lengths[i].max(1) as f64;
+                                let step_b =
+                                    full_lengths[j] as f64 / ds_lengths[j].max(1) as f64;
+                                overlap.range_a = (
+                                    (overlap.range_a.0 as f64 * step_a) as usize,
+                                    ((overlap.range_a.1 as f64 * step_a) as usize)
+                                        .min(full_lengths[i]),
+                                );
+                                overlap.range_b = (
+                                    (overlap.range_b.0 as f64 * step_b) as usize,
+                                    ((overlap.range_b.1 as f64 * step_b) as usize)
+                                        .min(full_lengths[j]),
+                                );
+                                overlap
+                            })
+                        }
+                    };
+                    counter += 1;
+                    if counter % progress_interval == 0 {
+                        for _ in 0..progress_interval {
+                            progress.on_progress();
+                        }
+                    }
+                    result
+                })
+                .collect()
+        };
+        // Report any remaining progress not covered by batch reporting
+        // The progress tracker is atomic and handles over-reporting gracefully
+
+        stats.overlaps_found += all_overlaps.len() as u32;
+        info!(
+            "[MultiScale] Found {} total overlaps for {} in {}ms",
+            all_overlaps.len(),
+            sport_type,
+            overlap_start.elapsed().as_millis()
+        );
+
+        // Drop R-trees and downsampled tracks to free memory before clustering
+        drop(rtrees);
+        drop(downsampled);
+
+        // For each scale preset, filter overlaps by length, cluster, and convert to sections
+        for preset in &config.scale_presets {
+            let scale_config = SectionConfig {
+                min_section_length: preset.min_length,
+                max_section_length: preset.max_length,
+                min_activities: preset.min_activities,
+                ..config.clone()
+            };
+
+            // Filter overlaps by this preset's length range
+            let filtered_overlaps: Vec<FullTrackOverlap> = all_overlaps
+                .iter()
+                .filter(|o| o.overlap_length >= preset.min_length)
+                .cloned()
+                .collect();
+
+            info!(
+                "[MultiScale] {} scale: {} overlaps (of {}) for {}",
+                preset.name,
+                filtered_overlaps.len(),
+                all_overlaps.len(),
+                sport_type,
+            );
+
+            // Cluster overlaps for this scale
+            let clusters = cluster_overlaps(filtered_overlaps, &scale_config, sport_tracks);
+
+            // Separate into confirmed sections and potential sections
+            let (significant, potential): (Vec<_>, Vec<_>) = clusters
+                .into_iter()
+                .partition(|c| c.activity_ids.len() >= preset.min_activities as usize);
+
+            // Process confirmed sections
+            #[cfg(feature = "parallel")]
+            let sport_sections: Vec<FrequentSection> = significant
+                .into_par_iter()
+                .enumerate()
+                .filter_map(|(idx, cluster)| {
+                    process_cluster(
+                        idx,
+                        cluster,
+                        sport_type,
+                        &track_map,
+                        &activity_to_route,
+                        &scale_config,
+                        Some(&preset.name),
+                    )
+                })
+                .collect();
+
+            #[cfg(not(feature = "parallel"))]
+            let sport_sections: Vec<FrequentSection> = significant
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, cluster)| {
+                    process_cluster(
+                        idx,
+                        cluster,
+                        sport_type,
+                        &track_map,
+                        &activity_to_route,
+                        &scale_config,
+                        Some(&preset.name),
+                    )
+                })
+                .collect();
+
+            stats
+                .sections_by_scale
+                .entry(preset.name.clone())
+                .and_modify(|n| *n += sport_sections.len() as u32)
+                .or_insert(sport_sections.len() as u32);
+            all_sections.extend(sport_sections);
+
+            // Process potential sections if enabled
+            if config.include_potentials {
+                for (idx, cluster) in potential.into_iter().enumerate() {
+                    let activity_count = cluster.activity_ids.len();
+                    if activity_count >= 1
+                        && activity_count < preset.min_activities as usize
+                        && let Some((_rep_id, rep_polyline)) =
+                            Some(select_medoid(&cluster, &track_map))
+                        && !rep_polyline.is_empty()
+                    {
+                        let distance = calculate_route_distance(&rep_polyline);
+                        if distance >= preset.min_length && distance <= preset.max_length {
+                            all_potentials.push(PotentialSection {
+                                id: format!(
+                                    "pot_{}_{}_{}",
+                                    preset.name,
+                                    sport_type.to_lowercase(),
+                                    idx
+                                ),
+                                sport_type: sport_type.to_string(),
+                                polyline: rep_polyline,
+                                activity_ids: cluster.activity_ids.into_iter().collect(),
+                                visit_count: activity_count as u32,
+                                distance_meters: distance,
+                                confidence: 0.3 + (activity_count as f64 * 0.2),
+                                scale: preset.name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            stats
+                .potentials_by_scale
+                .entry(preset.name.clone())
+                .and_modify(|n| *n += all_potentials.len() as u32)
+                .or_insert(0);
+
+            info!(
+                "[MultiScale] {} scale: {} sections for {}",
+                preset.name,
+                stats
+                    .sections_by_scale
+                    .get(&preset.name)
+                    .copied()
+                    .unwrap_or(0),
+                sport_type,
+            );
+        }
     }
+
+    // Phase 3: Post-processing (6 steps)
+    progress.on_phase(DetectionPhase::Postprocessing, 6);
 
     // Apply post-processing
     let fold_start = std::time::Instant::now();
     let fold_sections = split_folding_sections(all_sections, config);
+    progress.on_progress();
     info!(
         "[MultiScale] After fold splitting: {} sections in {}ms",
         fold_sections.len(),
@@ -1038,6 +1215,7 @@ pub fn detect_sections_multiscale(
     // Split at heading inflection points
     let heading_start = std::time::Instant::now();
     let heading_sections = split_at_heading_changes(fold_sections, config);
+    progress.on_progress();
     info!(
         "[MultiScale] After heading splitting: {} sections in {}ms",
         heading_sections.len(),
@@ -1047,6 +1225,7 @@ pub fn detect_sections_multiscale(
     // Split at gradient changes (if elevation available)
     let gradient_start = std::time::Instant::now();
     let gradient_sections = split_at_gradient_changes(heading_sections, config);
+    progress.on_progress();
     info!(
         "[MultiScale] After gradient splitting: {} sections in {}ms",
         gradient_sections.len(),
@@ -1055,6 +1234,7 @@ pub fn detect_sections_multiscale(
 
     let merge_start = std::time::Instant::now();
     let merged_sections = merge_nearby_sections(gradient_sections, config);
+    progress.on_progress();
     info!(
         "[MultiScale] After nearby merge: {} sections in {}ms",
         merged_sections.len(),
@@ -1068,6 +1248,7 @@ pub fn detect_sections_multiscale(
     } else {
         remove_overlapping_sections(merged_sections, config)
     };
+    progress.on_progress();
     info!(
         "[MultiScale] After dedup: {} sections in {}ms",
         deduped_sections.len(),
@@ -1076,6 +1257,9 @@ pub fn detect_sections_multiscale(
 
     let split_start = std::time::Instant::now();
     let final_sections = split_high_variance_sections(deduped_sections, &track_map, config);
+    // Explicitly drop track_map — it's no longer needed and all borrows into `tracks` are released
+    drop(track_map);
+    progress.on_progress();
     info!(
         "[MultiScale] After density splitting: {} sections in {}ms",
         final_sections.len(),
@@ -1224,31 +1408,3 @@ fn compute_polyline_containment_with_rtree(
     contained_count as f64 / polyline_a.len() as f64
 }
 
-/// Compute what fraction of polyline A is contained within proximity of polyline B
-/// (Brute-force version - kept for backward compatibility)
-#[allow(dead_code)]
-fn compute_polyline_containment(
-    polyline_a: &[GpsPoint],
-    polyline_b: &[GpsPoint],
-    proximity_threshold: f64,
-) -> f64 {
-    use crate::geo_utils::haversine_distance;
-
-    if polyline_a.is_empty() || polyline_b.is_empty() {
-        return 0.0;
-    }
-
-    let mut contained_count = 0;
-    for point_a in polyline_a {
-        let min_dist = polyline_b
-            .iter()
-            .map(|point_b| haversine_distance(point_a, point_b))
-            .fold(f64::MAX, |a, b| a.min(b));
-
-        if min_dist <= proximity_threshold {
-            contained_count += 1;
-        }
-    }
-
-    contained_count as f64 / polyline_a.len() as f64
-}

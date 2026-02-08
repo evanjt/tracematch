@@ -7,20 +7,36 @@ use super::overlap::OverlapCluster;
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 
-/// Select the medoid trace from a cluster.
+/// Select the medoid trace from a cluster using a track map for point resolution.
 /// The medoid is the actual GPS trace with minimum total AMD to all other traces.
 /// This ensures we return REAL GPS points, not artificial interpolations.
-pub fn select_medoid(cluster: &OverlapCluster) -> (String, Vec<GpsPoint>) {
+pub fn select_medoid(
+    cluster: &OverlapCluster,
+    track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
+) -> (String, Vec<GpsPoint>) {
     // Collect all unique activity portions in this cluster
-    let mut traces: Vec<(&str, &[GpsPoint])> = Vec::new();
+    let mut traces: Vec<(&str, Vec<GpsPoint>)> = Vec::new();
 
     for overlap in &cluster.overlaps {
-        // Add both sides of each overlap
+        // Add track A's overlapping portion
         if !traces.iter().any(|(id, _)| *id == overlap.activity_a) {
-            traces.push((&overlap.activity_a, &overlap.points_a));
+            if let Some(track) = track_map.get(overlap.activity_a.as_str()) {
+                let end = overlap.range_a.1.min(track.len());
+                let points = track[overlap.range_a.0..end].to_vec();
+                if !points.is_empty() {
+                    traces.push((&overlap.activity_a, points));
+                }
+            }
         }
+        // Add track B's overlapping portion
         if !traces.iter().any(|(id, _)| *id == overlap.activity_b) {
-            traces.push((&overlap.activity_b, &overlap.points_b));
+            if let Some(track) = track_map.get(overlap.activity_b.as_str()) {
+                let end = overlap.range_b.1.min(track.len());
+                let points = track[overlap.range_b.0..end].to_vec();
+                if !points.is_empty() {
+                    traces.push((&overlap.activity_b, points));
+                }
+            }
         }
     }
 
@@ -29,7 +45,7 @@ pub fn select_medoid(cluster: &OverlapCluster) -> (String, Vec<GpsPoint>) {
     }
 
     if traces.len() == 1 {
-        return (traces[0].0.to_string(), traces[0].1.to_vec());
+        return (traces[0].0.to_string(), traces[0].1.clone());
     }
 
     // For small clusters, compute full pairwise AMD
@@ -67,7 +83,7 @@ pub fn select_medoid(cluster: &OverlapCluster) -> (String, Vec<GpsPoint>) {
             let step = traces.len() / sample_size;
             for j in (0..traces.len()).step_by(step.max(1)).take(sample_size) {
                 if i != j {
-                    total_amd += average_min_distance(trace_i, traces[j].1);
+                    total_amd += average_min_distance(trace_i, &traces[j].1);
                     count += 1;
                 }
             }
@@ -82,7 +98,7 @@ pub fn select_medoid(cluster: &OverlapCluster) -> (String, Vec<GpsPoint>) {
         }
     }
 
-    (traces[best_idx].0.to_string(), traces[best_idx].1.to_vec())
+    (traces[best_idx].0.to_string(), traces[best_idx].1.clone())
 }
 
 /// Average Minimum Distance between two polylines

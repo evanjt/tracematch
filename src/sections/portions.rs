@@ -6,20 +6,19 @@ use super::{SectionConfig, SectionPortion};
 use crate::GpsPoint;
 use crate::matching::calculate_route_distance;
 use rstar::{PointDistance, RTree};
-use std::collections::HashMap;
 
 /// Compute each activity's portion of a section.
 /// Returns ALL traversals of the section by each activity (supports out-and-back, track laps).
 pub fn compute_activity_portions(
     cluster: &OverlapCluster,
     representative_polyline: &[GpsPoint],
-    all_tracks: &HashMap<String, Vec<GpsPoint>>,
+    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
     let mut portions = Vec::new();
 
     for activity_id in &cluster.activity_ids {
-        if let Some(track) = all_tracks.get(activity_id) {
+        if let Some(track) = all_tracks.get(activity_id.as_str()) {
             // Find ALL portions of this track that overlap with the representative
             let all_traversals =
                 find_all_track_portions(track, representative_polyline, config.proximity_threshold);
