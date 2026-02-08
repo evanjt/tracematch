@@ -547,6 +547,36 @@ impl SyntheticScenario {
         }
     }
 
+    /// 2000 activities, 3 corridors (10km/5km/30km), realistic mix. Production scale.
+    pub fn extreme_scale_2000() -> Self {
+        Self {
+            origin: ZURICH,
+            activity_count: 2000,
+            corridors: vec![
+                CorridorConfig {
+                    length_meters: 10_000.0,
+                    overlap_fraction: 0.4,
+                    pattern: CorridorPattern::Winding,
+                    approach_length: 500.0,
+                },
+                CorridorConfig {
+                    length_meters: 5_000.0,
+                    overlap_fraction: 0.3,
+                    pattern: CorridorPattern::Winding,
+                    approach_length: 300.0,
+                },
+                CorridorConfig {
+                    length_meters: 30_000.0,
+                    overlap_fraction: 0.15,
+                    pattern: CorridorPattern::Winding,
+                    approach_length: 800.0,
+                },
+            ],
+            gps_noise_sigma_meters: 3.5,
+            seed: 48,
+        }
+    }
+
     /// Configurable scenario for benchmarks: N activities, single corridor.
     pub fn with_activity_count(count: usize, corridor_length: f64, overlap: f64) -> Self {
         Self {
@@ -760,6 +790,28 @@ mod tests {
         assert_eq!(dataset.tracks.len(), 50);
         assert!(dataset.expected_sections.is_empty());
         assert_eq!(dataset.metadata.total_pairs, 1225); // 50*49/2
+    }
+
+    #[test]
+    fn test_extreme_scale_2000_generation() {
+        let scenario = SyntheticScenario::extreme_scale_2000();
+        let dataset = scenario.generate();
+
+        assert_eq!(dataset.tracks.len(), 2000);
+        assert_eq!(dataset.expected_sections.len(), 3);
+
+        // Check corridor lengths: ~10km, ~5km, ~30km
+        let lengths: Vec<f64> = dataset
+            .expected_sections
+            .iter()
+            .map(|s| s.length_meters)
+            .collect();
+        assert!(lengths[0] > 8_000.0 && lengths[0] < 12_000.0, "10km corridor: {}m", lengths[0]);
+        assert!(lengths[1] > 4_000.0 && lengths[1] < 6_000.0, "5km corridor: {}m", lengths[1]);
+        assert!(lengths[2] > 25_000.0 && lengths[2] < 35_000.0, "30km corridor: {}m", lengths[2]);
+
+        // Verify pairs count
+        assert_eq!(dataset.metadata.total_pairs, 2000 * 1999 / 2);
     }
 
     #[test]

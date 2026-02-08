@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use rayon::ThreadPoolBuilder;
 use tracematch::synthetic::SyntheticScenario;
-use tracematch::{SectionConfig, detect_sections_multiscale};
+use tracematch::{SectionConfig, detect_sections_optimized};
 
 #[global_allocator]
 static ALLOCATOR: common::TrackingAllocator = common::TrackingAllocator;
@@ -22,14 +22,12 @@ fn run_with_threads(n_threads: usize, scenario: &SyntheticScenario) -> (Duration
         .unwrap();
 
     let dataset = scenario.generate();
-    let groups = dataset.route_groups();
     let config = SectionConfig::default();
 
     pool.install(|| {
         let start = Instant::now();
-        let result =
-            detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
-        (start.elapsed(), result.sections.len())
+        let result = detect_sections_optimized(&dataset.tracks, &dataset.sport_types, &config);
+        (start.elapsed(), result.len())
     })
 }
 
@@ -66,19 +64,19 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(8);
 
-    println!("# Parallel Scaling Report\n");
+    println!("# Parallel Scaling Report (Optimized Detection)\n");
     println!("Host: {} logical cores\n", host_cores);
 
     // Test scenarios at different scales
     let test_configs: Vec<(&str, usize)> = vec![
-        ("100 activities, 10km", 100),
         ("200 activities, 10km", 200),
+        ("500 activities, 10km", 500),
+        ("2000 activities, 10km", 2000),
     ];
-
-    let runs = 4;
 
     for (label, count) in &test_configs {
         let scenario = SyntheticScenario::with_activity_count(*count, 10_000.0, 0.8);
+        let runs = if *count >= 2000 { 2 } else { 4 };
 
         println!("## {} ({} median runs)\n", label, runs);
         println!("| Threads | Time       | Speedup | Sections |");
@@ -113,24 +111,31 @@ fn main() {
         // Mobile estimates
         let devices = vec![
             DeviceProfile {
-                name: "iPhone 13 (A15)",
+                name: "iPhone 15 Pro (A17)",
                 // 2 performance + 4 efficiency (~0.5x perf each) ≈ 4 effective
                 effective_threads: 4,
-                // A15 sustained single-core is ~60% of Ryzen 5950X (lower clock, thermal limits)
-                sustained_factor: 0.60,
+                // A17 sustained single-core is ~65% of desktop
+                sustained_factor: 0.65,
             },
             DeviceProfile {
-                name: "OnePlus 13 (SD 8 Elite)",
+                name: "Flagship Android (SD 8 Elite)",
                 // 2 prime (4.32GHz) + 6 perf (3.53GHz, ~0.82x prime) ≈ 7 effective
                 effective_threads: 7,
-                // SD 8 Elite sustained single-core is ~55% of Ryzen 5950X (thermal throttle)
+                // SD 8 Elite sustained single-core is ~55% of desktop (thermal throttle)
                 sustained_factor: 0.55,
+            },
+            DeviceProfile {
+                name: "Mid-range Android (SD 7+ Gen 2)",
+                // 1 prime + 3 perf (~0.7x) + 4 eff (~0.3x) ≈ 4 effective
+                effective_threads: 4,
+                // SD 7+ Gen 2 sustained is ~35% of desktop
+                sustained_factor: 0.35,
             },
         ];
 
         println!("\n### Estimated Mobile Performance\n");
-        println!("| Device                 | Est. threads | Est. time  | vs 1-thread |");
-        println!("|------------------------|--------------|------------|-------------|");
+        println!("| Device                          | Est. threads | Est. time  | vs 1-thread |");
+        println!("|---------------------------------|--------------|------------|-------------|");
 
         for device in &devices {
             // Find closest measured thread count
@@ -145,7 +150,7 @@ fn main() {
             let vs_single = baseline_ms as f64 / device.sustained_factor / estimated_ms.max(1) as f64;
 
             println!(
-                "| {:>22} | {:>12} | {:>8}ms | {:>9.2}x |",
+                "| {:>31} | {:>12} | {:>8}ms | {:>9.2}x |",
                 device.name,
                 device.effective_threads,
                 estimated_ms,

@@ -163,7 +163,7 @@ pub fn bench_scaling_optimized() {
     println!("| Activities | Points    | Sections | Time       | Peak Alloc |");
     println!("|------------|-----------|----------|------------|------------|");
 
-    for count in [50, 100, 250, 500, 1000] {
+    for count in [50, 100, 250, 500, 1000, 2000] {
         let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
         let r = run_scenario_optimized("scaling_opt", &scenario);
         println!(
@@ -219,7 +219,7 @@ pub fn bench_no_overlap() {
     println!("| Activities | Pairs      | Time       | Peak Alloc |");
     println!("|------------|------------|------------|------------|");
 
-    for count in [50, 100, 250, 500] {
+    for count in [50, 100, 250, 500, 1000, 2000] {
         let scenario = SyntheticScenario::with_no_overlap(count);
         let r = run_scenario("no_overlap", &scenario);
         println!(
@@ -260,7 +260,7 @@ pub fn bench_grid_filtering() {
     println!("| Activities | Exhaustive | Grid-filt. | Reduction | Speedup |");
     println!("|------------|------------|------------|-----------|---------|");
 
-    for count in [50, 100, 250, 500] {
+    for count in [50, 100, 250, 500, 1000, 2000] {
         let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
         let dataset = scenario.generate();
         let n = dataset.tracks.len();
@@ -299,7 +299,7 @@ pub fn bench_incremental() {
 
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
 
-    for (existing_count, new_count) in [(50, 5), (100, 10), (250, 25)] {
+    for (existing_count, new_count) in [(50, 5), (100, 10), (250, 25), (500, 50), (1000, 100)] {
         let scenario = SyntheticScenario::with_activity_count(existing_count, 10_000.0, 0.8);
         let dataset = scenario.generate();
         let config = SectionConfig::default();
@@ -398,7 +398,7 @@ pub fn bench_chaos() {
     println!("| Activities | Corridor | Sections | Overlaps | Time       | Peak Alloc |");
     println!("|------------|----------|----------|----------|------------|------------|");
 
-    for count in [100, 200, 500] {
+    for count in [100, 200, 500, 1000, 2000] {
         let scenario = SyntheticScenario {
             origin: GpsPoint::new(47.37, 8.55),
             activity_count: count,
@@ -427,4 +427,78 @@ pub fn bench_chaos() {
             r.peak_memory_mb,
         );
     }
+}
+
+pub fn bench_predefined_scenarios_large() {
+    println!("## Predefined Scenarios — Large Scale (optimized)\n");
+    println!("| Scenario            | Activities | Corridors | Sections | Time       | Peak Alloc |");
+    println!("|---------------------|------------|-----------|----------|------------|------------|");
+
+    let scenarios: Vec<(&str, SyntheticScenario)> = vec![
+        ("extreme_scale", SyntheticScenario::extreme_scale()),
+        ("extreme_scale_2000", SyntheticScenario::extreme_scale_2000()),
+    ];
+
+    for (name, scenario) in &scenarios {
+        let corridors = scenario.corridors.len();
+        let r = run_scenario_optimized(name, scenario);
+        println!(
+            "| {:>19} | {:>10} | {:>9} | {:>8} | {:>8}ms | {:>7.1} MB |",
+            name, r.activities, corridors, r.sections_found, r.time_ms, r.peak_memory_mb,
+        );
+    }
+}
+
+pub fn bench_mobile_estimates() {
+    println!("## Mobile Performance Estimates (optimized detection)\n");
+
+    struct DeviceProfile {
+        name: &'static str,
+        sustained_factor: f64,
+    }
+
+    let devices = [
+        DeviceProfile { name: "Desktop (baseline)", sustained_factor: 1.0 },
+        DeviceProfile { name: "iPhone 15 Pro (A17)", sustained_factor: 0.65 },
+        DeviceProfile { name: "Flagship Android (SD 8 Elite)", sustained_factor: 0.55 },
+        DeviceProfile { name: "Mid-range Android (SD 7+ Gen 2)", sustained_factor: 0.35 },
+    ];
+
+    println!(
+        "| Device                          | {:>8} | {:>8} | {:>8} |",
+        "500", "1000", "2000"
+    );
+    println!(
+        "|---------------------------------|----------|----------|----------|"
+    );
+
+    // Run desktop benchmarks first
+    let mut desktop_times = Vec::new();
+    for count in [500, 1000, 2000] {
+        let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
+        let r = run_scenario_optimized("mobile_est", &scenario);
+        desktop_times.push(r.time_ms);
+    }
+
+    for device in &devices {
+        let times: Vec<String> = desktop_times
+            .iter()
+            .map(|&t| {
+                let estimated = (t as f64 / device.sustained_factor) as u128;
+                if estimated >= 1000 {
+                    format!("{:.1}s", estimated as f64 / 1000.0)
+                } else {
+                    format!("{}ms", estimated)
+                }
+            })
+            .collect();
+
+        println!(
+            "| {:>31} | {:>8} | {:>8} | {:>8} |",
+            device.name, times[0], times[1], times[2],
+        );
+    }
+
+    println!("\n_Estimates use sustained performance factors (not peak burst).");
+    println!("Actual mobile performance depends on thermal state, memory bandwidth, and OS scheduling._");
 }
