@@ -53,8 +53,11 @@ fn bench_scaling_curve_optimized(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.warm_up_time(Duration::from_secs(5));
 
-    for count in [50, 100, 250, 500, 1000] {
-        if count >= 500 {
+    for count in [50, 100, 250, 500, 1000, 2000] {
+        if count >= 2000 {
+            group.sample_size(2);
+            group.measurement_time(Duration::from_secs(120));
+        } else if count >= 500 {
             group.sample_size(2);
             group.measurement_time(Duration::from_secs(30));
         } else {
@@ -157,8 +160,11 @@ fn bench_no_overlap_worst_case(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.warm_up_time(Duration::from_secs(5));
 
-    for count in [50, 100, 250, 500] {
-        if count >= 500 {
+    for count in [50, 100, 250, 500, 1000, 2000] {
+        if count >= 2000 {
+            group.sample_size(2);
+            group.measurement_time(Duration::from_secs(120));
+        } else if count >= 500 {
             group.sample_size(2);
             group.measurement_time(Duration::from_secs(30));
         } else {
