@@ -1486,7 +1486,7 @@ fn split_section_by_density(
                 observation_count: candidate.avg_density as u32,
                 average_spread: section.average_spread,
                 point_density: split_density,
-                scale: section.scale.clone(),
+                scale: section.scale,
                 is_user_defined: section.is_user_defined,
                 stability: 0.0, // Needs recalculation
                 version: 1,
