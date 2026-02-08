@@ -12,14 +12,16 @@
 //! Fallback to full detection when >30% of activities are new.
 
 use super::optimized::find_sections_in_route;
-use super::{
-    FrequentSection, SectionConfig, SectionPortion,
-    compute_consensus_polyline, compute_initial_stability, extract_all_activity_traces,
-};
 use super::progress::{DetectionPhase, DetectionProgressCallback};
+use super::{
+    FrequentSection, SectionConfig, SectionPortion, compute_consensus_polyline,
+    compute_initial_stability, extract_all_activity_traces,
+};
 use crate::matching::calculate_route_distance;
 use crate::{GpsPoint, RouteGroup};
 use log::info;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -73,18 +75,38 @@ pub fn detect_sections_incremental(
     // Phase 1: Match new activities against existing sections
     progress.on_phase(DetectionPhase::FindingOverlaps, new_tracks.len() as u32);
 
-    let mut matched_activity_ids: Vec<String> = Vec::new();
-    let mut unmatched_activity_ids: Vec<String> = Vec::new();
     // section_id -> list of (activity_id, SectionMatch) for each new match
     let mut section_matches: HashMap<String, Vec<(String, super::optimized::SectionMatch)>> =
         HashMap::new();
 
-    for (activity_id, track) in new_tracks {
-        let matches = find_sections_in_route(track, existing_sections, config);
+    // Each activity's matching is independent — parallelize
+    #[cfg(feature = "parallel")]
+    let per_activity_results: Vec<(String, Vec<super::optimized::SectionMatch>)> = new_tracks
+        .par_iter()
+        .map(|(activity_id, track)| {
+            let matches = find_sections_in_route(track, existing_sections, config);
+            (activity_id.clone(), matches)
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let per_activity_results: Vec<(String, Vec<super::optimized::SectionMatch>)> = new_tracks
+        .iter()
+        .map(|(activity_id, track)| {
+            let matches = find_sections_in_route(track, existing_sections, config);
+            (activity_id.clone(), matches)
+        })
+        .collect();
+
+    // Reduce results sequentially (progress reporting + HashMap building)
+    let mut matched_activity_ids: Vec<String> = Vec::new();
+    let mut unmatched_activity_ids: Vec<String> = Vec::new();
+
+    for (activity_id, matches) in per_activity_results {
         progress.on_progress();
 
         if matches.is_empty() {
-            unmatched_activity_ids.push(activity_id.clone());
+            unmatched_activity_ids.push(activity_id);
         } else {
             matched_activity_ids.push(activity_id.clone());
             for m in matches {
@@ -138,8 +160,7 @@ pub fn detect_sections_incremental(
                         };
                         let start = section_match.start_index as u32;
                         let end = section_match.end_index as u32;
-                        let portion_slice =
-                            &track[start as usize..(end as usize).min(track.len())];
+                        let portion_slice = &track[start as usize..(end as usize).min(track.len())];
                         let distance = calculate_route_distance(portion_slice);
 
                         updated.activity_portions.push(SectionPortion {
@@ -196,10 +217,8 @@ pub fn detect_sections_incremental(
             unmatched_activity_ids.len()
         );
 
-        let unmatched_set: HashSet<&str> = unmatched_activity_ids
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
+        let unmatched_set: HashSet<&str> =
+            unmatched_activity_ids.iter().map(|s| s.as_str()).collect();
         let unmatched_tracks: Vec<(String, Vec<GpsPoint>)> = new_tracks
             .iter()
             .filter(|(id, _)| unmatched_set.contains(id.as_str()))

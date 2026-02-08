@@ -34,20 +34,11 @@ fn bench_scaling_curve(c: &mut Criterion) {
         let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
-        group.bench_with_input(
-            BenchmarkId::new("activities", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    detect_sections_multiscale(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &groups,
-                        &config,
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
+            b.iter(|| {
+                detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config)
+            });
+        });
     }
 
     group.finish();
@@ -75,19 +66,9 @@ fn bench_scaling_curve_optimized(c: &mut Criterion) {
         let dataset = scenario.generate();
         let config = SectionConfig::default();
 
-        group.bench_with_input(
-            BenchmarkId::new("activities", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    detect_sections_optimized(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &config,
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
+            b.iter(|| detect_sections_optimized(&dataset.tracks, &dataset.sport_types, &config));
+        });
     }
 
     group.finish();
@@ -190,20 +171,11 @@ fn bench_no_overlap_worst_case(c: &mut Criterion) {
         let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
-        group.bench_with_input(
-            BenchmarkId::new("activities", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    detect_sections_multiscale(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &groups,
-                        &config,
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
+            b.iter(|| {
+                detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config)
+            });
+        });
     }
 
     group.finish();
@@ -234,36 +206,28 @@ fn bench_component_breakdown(c: &mut Criterion) {
                 .map(|(id, pts)| (id.as_str(), pts.as_slice()))
                 .collect();
 
-            group.bench_with_input(
-                BenchmarkId::new("rtree_build", count),
-                &count,
-                |b, _| {
-                    b.iter(|| {
-                        for (_, track) in &tracks_for_rtree {
-                            build_rtree(track);
-                        }
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("rtree_build", count), &count, |b, _| {
+                b.iter(|| {
+                    for (_, track) in &tracks_for_rtree {
+                        build_rtree(track);
+                    }
+                });
+            });
         }
 
         // Benchmark full pipeline (for comparison with component times)
         {
             let config = SectionConfig::default();
-            group.bench_with_input(
-                BenchmarkId::new("full_pipeline", count),
-                &count,
-                |b, _| {
-                    b.iter(|| {
-                        detect_sections_multiscale(
-                            &dataset.tracks,
-                            &dataset.sport_types,
-                            &groups,
-                            &config,
-                        )
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("full_pipeline", count), &count, |b, _| {
+                b.iter(|| {
+                    detect_sections_multiscale(
+                        &dataset.tracks,
+                        &dataset.sport_types,
+                        &groups,
+                        &config,
+                    )
+                });
+            });
         }
     }
 
