@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
-use tracematch::{
-    GpsPoint, SectionConfig, detect_sections_incremental,
-    detect_sections_multiscale, detect_sections_optimized,
-};
 use tracematch::sections::NoopProgress;
 use tracematch::sections::optimized::{compute_grid_cells, grid_filtered_pairs};
+use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
+use tracematch::{
+    GpsPoint, SectionConfig, detect_sections_incremental, detect_sections_multiscale,
+    detect_sections_optimized,
+};
 
 // ============================================================================
 // Peak Memory Tracking Allocator
@@ -433,12 +433,19 @@ pub fn bench_chaos() {
 
 pub fn bench_predefined_scenarios_large() {
     println!("## Predefined Scenarios — Large Scale (optimized)\n");
-    println!("| Scenario            | Activities | Corridors | Sections | Time       | Peak Alloc |");
-    println!("|---------------------|------------|-----------|----------|------------|------------|");
+    println!(
+        "| Scenario            | Activities | Corridors | Sections | Time       | Peak Alloc |"
+    );
+    println!(
+        "|---------------------|------------|-----------|----------|------------|------------|"
+    );
 
     let scenarios: Vec<(&str, SyntheticScenario)> = vec![
         ("extreme_scale", SyntheticScenario::extreme_scale()),
-        ("extreme_scale_2000", SyntheticScenario::extreme_scale_2000()),
+        (
+            "extreme_scale_2000",
+            SyntheticScenario::extreme_scale_2000(),
+        ),
     ];
 
     for (name, scenario) in &scenarios {
@@ -460,19 +467,29 @@ pub fn bench_mobile_estimates() {
     }
 
     let devices = [
-        DeviceProfile { name: "Desktop (baseline)", sustained_factor: 1.0 },
-        DeviceProfile { name: "iPhone 15 Pro (A17)", sustained_factor: 0.65 },
-        DeviceProfile { name: "Flagship Android (SD 8 Elite)", sustained_factor: 0.55 },
-        DeviceProfile { name: "Mid-range Android (SD 7+ Gen 2)", sustained_factor: 0.35 },
+        DeviceProfile {
+            name: "Desktop (baseline)",
+            sustained_factor: 1.0,
+        },
+        DeviceProfile {
+            name: "iPhone 15 Pro (A17)",
+            sustained_factor: 0.65,
+        },
+        DeviceProfile {
+            name: "Flagship Android (SD 8 Elite)",
+            sustained_factor: 0.55,
+        },
+        DeviceProfile {
+            name: "Mid-range Android (SD 7+ Gen 2)",
+            sustained_factor: 0.35,
+        },
     ];
 
     println!(
         "| Device                          | {:>8} | {:>8} | {:>8} |",
         "500", "1000", "2000"
     );
-    println!(
-        "|---------------------------------|----------|----------|----------|"
-    );
+    println!("|---------------------------------|----------|----------|----------|");
 
     // Run desktop benchmarks first
     let mut desktop_times = Vec::new();
@@ -502,5 +519,7 @@ pub fn bench_mobile_estimates() {
     }
 
     println!("\n_Estimates use sustained performance factors (not peak burst).");
-    println!("Actual mobile performance depends on thermal state, memory bandwidth, and OS scheduling._");
+    println!(
+        "Actual mobile performance depends on thermal state, memory bandwidth, and OS scheduling._"
+    );
 }

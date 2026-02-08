@@ -40,4 +40,3 @@ pub fn build_rtree(points: &[GpsPoint]) -> RTree<IndexedPoint> {
         .collect();
     RTree::bulk_load(indexed)
 }
-

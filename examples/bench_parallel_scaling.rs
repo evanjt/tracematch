@@ -32,11 +32,7 @@ fn run_with_threads(n_threads: usize, scenario: &SyntheticScenario) -> (Duration
 }
 
 /// Run detection N times and return median duration.
-fn median_of(
-    runs: usize,
-    n_threads: usize,
-    scenario: &SyntheticScenario,
-) -> (Duration, usize) {
+fn median_of(runs: usize, n_threads: usize, scenario: &SyntheticScenario) -> (Duration, usize) {
     let mut durations = Vec::with_capacity(runs);
     let mut sections = 0;
 
@@ -141,20 +137,20 @@ fn main() {
             // Find closest measured thread count
             let closest = results
                 .iter()
-                .min_by_key(|(t, _, _)| (*t as i32 - device.effective_threads as i32).unsigned_abs())
+                .min_by_key(|(t, _, _)| {
+                    (*t as i32 - device.effective_threads as i32).unsigned_abs()
+                })
                 .unwrap();
 
             // Scale by sustained performance factor
             // Mobile time = desktop time at similar thread count / sustained_factor
             let estimated_ms = (closest.1 as f64 / device.sustained_factor) as u128;
-            let vs_single = baseline_ms as f64 / device.sustained_factor / estimated_ms.max(1) as f64;
+            let vs_single =
+                baseline_ms as f64 / device.sustained_factor / estimated_ms.max(1) as f64;
 
             println!(
                 "| {:>31} | {:>12} | {:>8}ms | {:>9.2}x |",
-                device.name,
-                device.effective_threads,
-                estimated_ms,
-                vs_single,
+                device.name, device.effective_threads, estimated_ms, vs_single,
             );
         }
 
@@ -162,6 +158,10 @@ fn main() {
     }
 
     println!("_Note: Mobile estimates use sustained performance factors (not peak).");
-    println!("Actual mobile performance depends on thermal state, memory bandwidth, and OS scheduling.");
-    println!("Thread counts for mobile reflect effective compute threads (efficiency cores count as ~0.5x)._");
+    println!(
+        "Actual mobile performance depends on thermal state, memory bandwidth, and OS scheduling."
+    );
+    println!(
+        "Thread counts for mobile reflect effective compute threads (efficiency cores count as ~0.5x)._"
+    );
 }

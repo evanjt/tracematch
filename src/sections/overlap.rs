@@ -131,7 +131,11 @@ pub(crate) fn has_any_overlap(
 
         for ss in 0..sub_k {
             let sub_start = seg_start + ss * sub_size;
-            let sub_end = if ss == sub_k - 1 { *seg_end } else { seg_start + (ss + 1) * sub_size };
+            let sub_end = if ss == sub_k - 1 {
+                *seg_end
+            } else {
+                seg_start + (ss + 1) * sub_size
+            };
 
             let center = &track_a[sub_start + (sub_end - sub_start) / 2];
 

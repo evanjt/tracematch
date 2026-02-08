@@ -631,7 +631,12 @@ fn compute_group_bounds(
 /// Create search bounds for spatial index query.
 fn create_search_bounds(points: &[GpsPoint], tolerance: f64) -> AABB<[f64; 2]> {
     let bounds = crate::geo_utils::compute_bounds(points);
-    let (min_lat, max_lat, min_lng, max_lng) = (bounds.min_lat, bounds.max_lat, bounds.min_lng, bounds.max_lng);
+    let (min_lat, max_lat, min_lng, max_lng) = (
+        bounds.min_lat,
+        bounds.max_lat,
+        bounds.min_lng,
+        bounds.max_lng,
+    );
     AABB::from_corners(
         [min_lng - tolerance, min_lat - tolerance],
         [max_lng + tolerance, max_lat + tolerance],
