@@ -3,8 +3,8 @@
 use super::overlap::OverlapCluster;
 use super::rtree::{IndexedPoint, build_rtree};
 use super::{SectionConfig, SectionPortion};
-use crate::{Direction, GpsPoint};
 use crate::matching::calculate_route_distance;
+use crate::{Direction, GpsPoint};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use rstar::{PointDistance, RTree};
@@ -50,10 +50,7 @@ pub fn compute_activity_portions(
 
     #[cfg(not(feature = "parallel"))]
     {
-        activity_ids
-            .iter()
-            .flat_map(compute_for_activity)
-            .collect()
+        activity_ids.iter().flat_map(compute_for_activity).collect()
     }
 }
 

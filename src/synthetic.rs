@@ -806,9 +806,21 @@ mod tests {
             .iter()
             .map(|s| s.length_meters)
             .collect();
-        assert!(lengths[0] > 8_000.0 && lengths[0] < 12_000.0, "10km corridor: {}m", lengths[0]);
-        assert!(lengths[1] > 4_000.0 && lengths[1] < 6_000.0, "5km corridor: {}m", lengths[1]);
-        assert!(lengths[2] > 25_000.0 && lengths[2] < 35_000.0, "30km corridor: {}m", lengths[2]);
+        assert!(
+            lengths[0] > 8_000.0 && lengths[0] < 12_000.0,
+            "10km corridor: {}m",
+            lengths[0]
+        );
+        assert!(
+            lengths[1] > 4_000.0 && lengths[1] < 6_000.0,
+            "5km corridor: {}m",
+            lengths[1]
+        );
+        assert!(
+            lengths[2] > 25_000.0 && lengths[2] < 35_000.0,
+            "30km corridor: {}m",
+            lengths[2]
+        );
 
         // Verify pairs count
         assert_eq!(dataset.metadata.total_pairs, 2000 * 1999 / 2);

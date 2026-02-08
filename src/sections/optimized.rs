@@ -17,14 +17,14 @@ use rayon::prelude::*;
 use super::rtree::{IndexedPoint, build_rtree};
 use super::{
     FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps_with_map,
-    compute_consensus_polyline, consolidate_fragments,
-    extract_all_activity_traces, filter_low_quality_sections, make_sections_exclusive,
-    merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
+    compute_consensus_polyline, consolidate_fragments, extract_all_activity_traces,
+    filter_low_quality_sections, make_sections_exclusive, merge_nearby_sections,
+    remove_overlapping_sections, select_medoid, split_at_gradient_changes,
     split_at_heading_changes,
 };
 use crate::geo_utils::{bounds_overlap, compute_bounds, haversine_distance};
-use crate::{Bounds, GpsPoint};
 use crate::matching::calculate_route_distance;
+use crate::{Bounds, GpsPoint};
 use log::info;
 use rstar::{PointDistance, RTree};
 use std::collections::{HashMap, HashSet};
@@ -258,7 +258,10 @@ pub fn detect_sections_optimized(
 
         // Early exit: no candidate pairs means no overlaps possible
         if candidate_vec.is_empty() {
-            info!("[OptimizedSections] No candidate pairs for {}, skipping", sport_type);
+            info!(
+                "[OptimizedSections] No candidate pairs for {}, skipping",
+                sport_type
+            );
             continue;
         }
 
@@ -309,8 +312,14 @@ pub fn detect_sections_optimized(
             .into_par_iter()
             .filter_map(|(i, j)| {
                 // Quick bounding box check using pre-computed bounds
-                let ref_lat = (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
-                if !bounds_overlap(&sport_tracks[i].bounds, &sport_tracks[j].bounds, config.proximity_threshold, ref_lat) {
+                let ref_lat =
+                    (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
+                if !bounds_overlap(
+                    &sport_tracks[i].bounds,
+                    &sport_tracks[j].bounds,
+                    config.proximity_threshold,
+                    ref_lat,
+                ) {
                     return None;
                 }
                 let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
@@ -323,8 +332,14 @@ pub fn detect_sections_optimized(
             .into_iter()
             .filter_map(|(i, j)| {
                 // Quick bounding box check using pre-computed bounds
-                let ref_lat = (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
-                if !bounds_overlap(&sport_tracks[i].bounds, &sport_tracks[j].bounds, config.proximity_threshold, ref_lat) {
+                let ref_lat =
+                    (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
+                if !bounds_overlap(
+                    &sport_tracks[i].bounds,
+                    &sport_tracks[j].bounds,
+                    config.proximity_threshold,
+                    ref_lat,
+                ) {
                     return None;
                 }
                 let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
@@ -630,7 +645,9 @@ fn convert_cluster_to_section(
     // Compute initial stability of the selected medoid against the consensus
     let stability = track_map
         .get(representative_id.as_str())
-        .map(|track| super::medoid::compute_stability(track, &consensus.polyline, config.proximity_threshold))
+        .map(|track| {
+            super::medoid::compute_stability(track, &consensus.polyline, config.proximity_threshold)
+        })
         .unwrap_or(0.0);
 
     Some(FrequentSection {
@@ -722,10 +739,8 @@ pub fn find_sections_in_route(
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let mut matches: Vec<SectionMatch> = sections
-        .iter()
-        .flat_map(find_matches_for_section)
-        .collect();
+    let mut matches: Vec<SectionMatch> =
+        sections.iter().flat_map(find_matches_for_section).collect();
 
     // Sort by start index
     matches.sort_by_key(|m| m.start_index);
@@ -953,7 +968,7 @@ pub fn split_section_at_index(
             point_density: vec![], // Need recalculation
             scale: section.scale.clone(),
             is_user_defined: true, // Mark as user-modified
-            stability: 0.0, // Needs recalculation
+            stability: 0.0,        // Needs recalculation
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),

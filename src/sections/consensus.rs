@@ -48,8 +48,10 @@ pub fn compute_consensus_polyline(
 
     // Build R-trees for all traces for efficient spatial queries
     #[cfg(feature = "parallel")]
-    let trace_trees: Vec<RTree<IndexedPoint>> =
-        all_traces.par_iter().map(|trace| build_rtree(trace)).collect();
+    let trace_trees: Vec<RTree<IndexedPoint>> = all_traces
+        .par_iter()
+        .map(|trace| build_rtree(trace))
+        .collect();
 
     #[cfg(not(feature = "parallel"))]
     let trace_trees: Vec<RTree<IndexedPoint>> =

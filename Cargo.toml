@@ -53,6 +53,10 @@ name = "stress"
 harness = false
 required-features = ["synthetic"]
 
+[[test]]
+name = "optimization_efficiency"
+required-features = ["synthetic"]
+
 [profile.release]
 lto = true
 codegen-units = 1
