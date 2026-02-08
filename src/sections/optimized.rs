@@ -14,7 +14,7 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::rtree::{IndexedPoint, bounds_overlap_tracks, build_rtree};
+use super::rtree::{IndexedPoint, build_rtree};
 use super::{
     FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps_with_map,
     compute_consensus_polyline, compute_initial_stability, consolidate_fragments,
@@ -22,8 +22,8 @@ use super::{
     merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
     split_at_heading_changes,
 };
-use crate::GpsPoint;
-use crate::geo_utils::haversine_distance;
+use crate::geo_utils::{bounds_overlap, compute_bounds, haversine_distance};
+use crate::{Bounds, GpsPoint};
 use crate::matching::calculate_route_distance;
 use log::info;
 use rstar::{PointDistance, RTree};
@@ -145,6 +145,7 @@ struct TrackInfo {
     full_track: Vec<GpsPoint>,
     downsampled: Vec<GpsPoint>,
     cells: HashSet<GridCell>,
+    bounds: Bounds,
 }
 
 impl TrackInfo {
@@ -157,11 +158,15 @@ impl TrackInfo {
             cells.insert(GridCell::from_point(point.latitude, point.longitude));
         }
 
+        // Pre-compute bounding box once (avoids O(P) per pair comparison)
+        let bounds = compute_bounds(&downsampled);
+
         Self {
             activity_id,
             full_track: track,
             downsampled,
             cells,
+            bounds,
         }
     }
 }
@@ -249,41 +254,67 @@ pub fn detect_sections_optimized(
             grid_start.elapsed().as_millis()
         );
 
-        let rtree_start = std::time::Instant::now();
-        #[cfg(feature = "parallel")]
-        let rtrees: Vec<RTree<IndexedPoint>> = sport_tracks
-            .par_iter()
-            .map(|t| build_rtree(&t.downsampled))
-            .collect();
+        let candidate_vec: Vec<(usize, usize)> = candidate_pairs.into_iter().collect();
 
-        #[cfg(not(feature = "parallel"))]
-        let rtrees: Vec<RTree<IndexedPoint>> = sport_tracks
-            .iter()
-            .map(|t| build_rtree(&t.downsampled))
-            .collect();
+        // Early exit: no candidate pairs means no overlaps possible
+        if candidate_vec.is_empty() {
+            info!("[OptimizedSections] No candidate pairs for {}, skipping", sport_type);
+            continue;
+        }
+
+        // Build R-trees only for tracks that appear as j-index in pairs (lazy construction)
+        let rtree_start = std::time::Instant::now();
+        let mut needed_rtrees: HashSet<usize> = HashSet::new();
+        for &(_, j) in &candidate_vec {
+            needed_rtrees.insert(j);
+        }
+
+        let mut rtrees: Vec<Option<RTree<IndexedPoint>>> = Vec::with_capacity(sport_tracks.len());
+        for _ in 0..sport_tracks.len() {
+            rtrees.push(None);
+        }
+
+        {
+            let needed_indices: Vec<usize> = needed_rtrees.iter().copied().collect();
+            #[cfg(feature = "parallel")]
+            {
+                let built: Vec<(usize, RTree<IndexedPoint>)> = needed_indices
+                    .into_par_iter()
+                    .map(|idx| (idx, build_rtree(&sport_tracks[idx].downsampled)))
+                    .collect();
+                for (idx, tree) in built {
+                    rtrees[idx] = Some(tree);
+                }
+            }
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in needed_indices {
+                    rtrees[idx] = Some(build_rtree(&sport_tracks[idx].downsampled));
+                }
+            }
+        }
 
         info!(
-            "[OptimizedSections] Built {} R-trees in {}ms",
-            rtrees.len(),
+            "[OptimizedSections] Built {} R-trees (of {}) in {}ms",
+            needed_rtrees.len(),
+            sport_tracks.len(),
             rtree_start.elapsed().as_millis()
         );
 
         let overlap_start = std::time::Instant::now();
 
-        let candidate_vec: Vec<(usize, usize)> = candidate_pairs.into_iter().collect();
-
         #[cfg(feature = "parallel")]
         let overlaps: Vec<FullTrackOverlap> = candidate_vec
             .into_par_iter()
             .filter_map(|(i, j)| {
-                if !bounds_overlap_tracks(
-                    &sport_tracks[i].downsampled,
-                    &sport_tracks[j].downsampled,
-                    config.proximity_threshold,
-                ) {
+                // Quick bounding box check using pre-computed bounds
+                let ref_lat = (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
+                if !bounds_overlap(&sport_tracks[i].bounds, &sport_tracks[j].bounds, config.proximity_threshold, ref_lat) {
                     return None;
                 }
-                find_overlap_downsampled(&sport_tracks[i], &sport_tracks[j], &rtrees[j], config)
+                let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
+                find_overlap_downsampled(&sport_tracks[i], &sport_tracks[j], tree_j, config)
             })
             .collect();
 
@@ -291,14 +322,13 @@ pub fn detect_sections_optimized(
         let overlaps: Vec<FullTrackOverlap> = candidate_vec
             .into_iter()
             .filter_map(|(i, j)| {
-                if !bounds_overlap_tracks(
-                    &sport_tracks[i].downsampled,
-                    &sport_tracks[j].downsampled,
-                    config.proximity_threshold,
-                ) {
+                // Quick bounding box check using pre-computed bounds
+                let ref_lat = (sport_tracks[i].bounds.min_lat + sport_tracks[i].bounds.max_lat) / 2.0;
+                if !bounds_overlap(&sport_tracks[i].bounds, &sport_tracks[j].bounds, config.proximity_threshold, ref_lat) {
                     return None;
                 }
-                find_overlap_downsampled(&sport_tracks[i], &sport_tracks[j], &rtrees[j], config)
+                let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
+                find_overlap_downsampled(&sport_tracks[i], &sport_tracks[j], tree_j, config)
             })
             .collect();
 
@@ -460,6 +490,12 @@ fn find_overlap_downsampled(
 ) -> Option<FullTrackOverlap> {
     let threshold_deg = config.proximity_threshold / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
+
+    // Adaptive pre-check: skip full scan if provably no overlap
+    match super::overlap::has_any_overlap(&track_a.downsampled, tree_b, threshold_deg_sq) {
+        Some(false) => return None,
+        _ => {} // Some(true) or None → proceed to full scan
+    }
 
     // Track the downsampled indices of the overlap for mapping back
     let mut overlap_start_ds_a: Option<usize> = None;

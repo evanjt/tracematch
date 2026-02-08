@@ -1,7 +1,6 @@
 //! R-tree indexed point types and spatial query utilities.
 
 use crate::GpsPoint;
-use crate::geo_utils::{bounds_overlap, compute_bounds};
 use rstar::{AABB, PointDistance, RTree, RTreeObject};
 
 /// A GPS point with its index for R-tree queries
@@ -42,16 +41,3 @@ pub fn build_rtree(points: &[GpsPoint]) -> RTree<IndexedPoint> {
     RTree::bulk_load(indexed)
 }
 
-/// Check if two tracks' bounding boxes overlap
-pub fn bounds_overlap_tracks(track_a: &[GpsPoint], track_b: &[GpsPoint], buffer: f64) -> bool {
-    if track_a.is_empty() || track_b.is_empty() {
-        return false;
-    }
-
-    let bounds_a = compute_bounds(track_a);
-    let bounds_b = compute_bounds(track_b);
-
-    // Use reference latitude from center of bounds_a for meter-to-degree conversion
-    let ref_lat = (bounds_a.min_lat + bounds_a.max_lat) / 2.0;
-    bounds_overlap(&bounds_a, &bounds_b, buffer, ref_lat)
-}
