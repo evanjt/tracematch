@@ -6,7 +6,7 @@
 //! - Direction detection (same vs reverse)
 
 use crate::geo_utils::haversine_distance;
-use crate::{GpsPoint, MatchConfig, MatchResult, RouteSignature};
+use crate::{Direction, GpsPoint, MatchConfig, MatchResult, RouteSignature};
 
 /// Compare two routes and return a match result using Average Minimum Distance (AMD).
 ///
@@ -74,17 +74,17 @@ pub fn compare_routes(
     let direction = determine_direction_by_endpoints(sig1, sig2, config.endpoint_threshold);
 
     // Direction type based on match quality
-    let direction_str = if match_percentage >= 70.0 {
+    let final_direction = if match_percentage >= 70.0 {
         direction
     } else {
-        "partial".to_string()
+        Direction::Partial
     };
 
     Some(MatchResult {
         activity_id_1: sig1.activity_id.clone(),
         activity_id_2: sig2.activity_id.clone(),
         match_percentage,
-        direction: direction_str,
+        direction: final_direction,
         amd: avg_amd,
     })
 }
@@ -213,12 +213,13 @@ pub fn calculate_route_distance(points: &[GpsPoint]) -> f64 {
 
 /// Determine direction using endpoint comparison.
 ///
-/// Returns "same" if sig2 starts near sig1's start, "reverse" if near sig1's end.
+/// Returns `Direction::Same` if sig2 starts near sig1's start,
+/// `Direction::Reverse` if near sig1's end.
 pub fn determine_direction_by_endpoints(
     sig1: &RouteSignature,
     sig2: &RouteSignature,
     loop_threshold: f64,
-) -> String {
+) -> Direction {
     let start1 = &sig1.start_point;
     let end1 = &sig1.end_point;
     let start2 = &sig2.start_point;
@@ -230,7 +231,7 @@ pub fn determine_direction_by_endpoints(
 
     // If both are loops, direction is meaningless
     if sig1_is_loop && sig2_is_loop {
-        return "same".to_string();
+        return Direction::Same;
     }
 
     // Score for same direction: start2→start1 + end2→end1
@@ -242,9 +243,9 @@ pub fn determine_direction_by_endpoints(
     let min_direction_diff = 100.0;
 
     if reverse_score < same_score - min_direction_diff {
-        "reverse".to_string()
+        Direction::Reverse
     } else {
-        "same".to_string()
+        Direction::Same
     }
 }
 

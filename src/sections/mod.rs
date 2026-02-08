@@ -53,7 +53,7 @@ pub use progress::{
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
-pub(crate) use medoid::select_medoid;
+pub(crate) use medoid::{compute_stability, select_medoid};
 pub(crate) use overlap::{
     FullTrackOverlap, OverlapCluster, cluster_overlaps, cluster_overlaps_with_map,
     find_full_track_overlap,
@@ -75,29 +75,110 @@ pub use optimized::{
     split_section_at_point,
 };
 
-/// Compute initial stability score from consensus metrics.
-/// Stability increases with more observations and tighter spread.
-pub(crate) fn compute_initial_stability(
-    observation_count: u32,
-    average_spread: f64,
-    proximity_threshold: f64,
-) -> f64 {
-    // Observation factor: saturates at 10 observations
-    let obs_factor = (observation_count as f64 / 10.0).min(1.0);
+/// Detection mode for section detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectionMode {
+    /// Lower thresholds, more sections detected
+    Discovery,
+    /// Higher thresholds, fewer but more confident sections
+    Conservative,
+    /// Single-scale backward-compatible mode
+    Legacy,
+}
 
-    // Spread factor: lower spread = more stable
-    let spread_factor = 1.0 - (average_spread / proximity_threshold).clamp(0.0, 1.0);
+impl DetectionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DetectionMode::Discovery => "discovery",
+            DetectionMode::Conservative => "conservative",
+            DetectionMode::Legacy => "legacy",
+        }
+    }
+}
 
-    // Combined stability: weighted average
-    (obs_factor * 0.6 + spread_factor * 0.4).clamp(0.0, 1.0)
+impl std::fmt::Display for DetectionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DetectionMode {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "discovery" => Ok(DetectionMode::Discovery),
+            "conservative" => Ok(DetectionMode::Conservative),
+            "legacy" => Ok(DetectionMode::Legacy),
+            _ => Ok(DetectionMode::Discovery),
+        }
+    }
+}
+
+impl Default for DetectionMode {
+    fn default() -> Self {
+        DetectionMode::Discovery
+    }
+}
+
+/// Scale name for multi-scale section detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleName {
+    Short,
+    Medium,
+    Long,
+    ExtraLong,
+    UltraLong,
+    Optimized,
+}
+
+impl ScaleName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScaleName::Short => "short",
+            ScaleName::Medium => "medium",
+            ScaleName::Long => "long",
+            ScaleName::ExtraLong => "extra_long",
+            ScaleName::UltraLong => "ultra_long",
+            ScaleName::Optimized => "optimized",
+        }
+    }
+}
+
+impl std::fmt::Display for ScaleName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScaleName {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "short" => Ok(ScaleName::Short),
+            "medium" => Ok(ScaleName::Medium),
+            "long" => Ok(ScaleName::Long),
+            "extra_long" | "extralong" => Ok(ScaleName::ExtraLong),
+            "ultra_long" | "ultralong" => Ok(ScaleName::UltraLong),
+            "optimized" => Ok(ScaleName::Optimized),
+            _ => Ok(ScaleName::Medium),
+        }
+    }
+}
+
+impl Default for ScaleName {
+    fn default() -> Self {
+        ScaleName::Medium
+    }
 }
 
 /// Scale preset for multi-scale section detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScalePreset {
-    /// Scale name: "short", "medium", "long"
-    pub name: String,
+    /// Scale name
+    pub name: ScaleName,
     /// Minimum section length for this scale (meters)
     pub min_length: f64,
     /// Maximum section length for this scale (meters)
@@ -109,7 +190,7 @@ pub struct ScalePreset {
 impl ScalePreset {
     pub fn short() -> Self {
         Self {
-            name: "short".to_string(),
+            name: ScaleName::Short,
             min_length: 100.0,
             max_length: 500.0,
             min_activities: 2,
@@ -118,7 +199,7 @@ impl ScalePreset {
 
     pub fn medium() -> Self {
         Self {
-            name: "medium".to_string(),
+            name: ScaleName::Medium,
             min_length: 500.0,
             max_length: 2000.0,
             min_activities: 2,
@@ -127,7 +208,7 @@ impl ScalePreset {
 
     pub fn long() -> Self {
         Self {
-            name: "long".to_string(),
+            name: ScaleName::Long,
             min_length: 2000.0,
             max_length: 5000.0,
             min_activities: 3,
@@ -137,7 +218,7 @@ impl ScalePreset {
     /// Extra long sections: 5km-50km (long cycling climbs, rail trails).
     pub fn extra_long() -> Self {
         Self {
-            name: "extra_long".to_string(),
+            name: ScaleName::ExtraLong,
             min_length: 5_000.0,
             max_length: 50_000.0,
             min_activities: 3,
@@ -147,7 +228,7 @@ impl ScalePreset {
     /// Ultra long sections: 50km-200km (century routes, multi-day corridors).
     pub fn ultra_long() -> Self {
         Self {
-            name: "ultra_long".to_string(),
+            name: ScaleName::UltraLong,
             min_length: 50_000.0,
             max_length: 200_000.0,
             min_activities: 3,
@@ -181,8 +262,8 @@ pub struct SectionConfig {
     pub cluster_tolerance: f64,
     /// Number of sample points for AMD comparison (not for output!)
     pub sample_points: u32,
-    /// Detection mode: "discovery" (lower thresholds) or "conservative"
-    pub detection_mode: String,
+    /// Detection mode
+    pub detection_mode: DetectionMode,
     /// Include potential sections with only 1-2 activities as suggestions
     pub include_potentials: bool,
     /// Scale presets for multi-scale detection (empty = single-scale with min/max_section_length)
@@ -200,7 +281,7 @@ impl Default for SectionConfig {
             min_activities: 3,         // Need 3+ activities (used when scale_presets is empty)
             cluster_tolerance: 80.0,   // 80m for clustering similar overlaps
             sample_points: 50,         // For AMD comparison only
-            detection_mode: "discovery".to_string(),
+            detection_mode: DetectionMode::Discovery,
             include_potentials: true,
             scale_presets: ScalePreset::default_presets(),
             preserve_hierarchy: true,
@@ -212,7 +293,7 @@ impl SectionConfig {
     /// Create a discovery-mode config (lower thresholds, more sections)
     pub fn discovery() -> Self {
         Self {
-            detection_mode: "discovery".to_string(),
+            detection_mode: DetectionMode::Discovery,
             include_potentials: true,
             scale_presets: ScalePreset::default_presets(),
             preserve_hierarchy: true,
@@ -223,7 +304,7 @@ impl SectionConfig {
     /// Create a conservative config (higher thresholds, fewer sections)
     pub fn conservative() -> Self {
         Self {
-            detection_mode: "conservative".to_string(),
+            detection_mode: DetectionMode::Conservative,
             include_potentials: false,
             min_activities: 4,
             scale_presets: vec![ScalePreset::medium(), ScalePreset::long()],
@@ -235,7 +316,7 @@ impl SectionConfig {
     /// Create a legacy single-scale config (for backward compatibility)
     pub fn legacy() -> Self {
         Self {
-            detection_mode: "legacy".to_string(),
+            detection_mode: DetectionMode::Legacy,
             include_potentials: false,
             scale_presets: vec![], // Empty = use min/max_section_length directly
             preserve_hierarchy: false,
@@ -261,8 +342,8 @@ pub struct SectionPortion {
     /// Distance of this portion in meters
     #[serde(alias = "distance_meters")]
     pub distance_meters: f64,
-    /// Direction relative to representative: "same" or "reverse"
-    pub direction: String,
+    /// Direction relative to representative
+    pub direction: crate::Direction,
 }
 
 /// A frequently-traveled section with adaptive consensus representation
@@ -315,24 +396,57 @@ pub struct FrequentSection {
     /// Used for detecting high-traffic portions that should become separate sections
     #[serde(alias = "point_density")]
     pub point_density: Vec<u32>,
-    /// Scale at which this section was detected: "short", "medium", "long", or "legacy"
-    pub scale: Option<String>,
+    /// Scale at which this section was detected
+    pub scale: Option<ScaleName>,
 
-    // === Evolution fields (Phase 3) ===
-    /// Section version - incremented each time the section is updated
-    pub version: u32,
     /// Whether this section was user-defined (prevents automatic updates)
     #[serde(alias = "is_user_defined")]
     pub is_user_defined: bool,
+
+    /// How well the reference trace aligns with the consensus polyline (0.0-1.0).
+    /// 1.0 = perfect alignment, 0.0 = maximum deviation.
+    /// Computed as 1.0 - (amd_to_consensus / proximity_threshold).clamp(0.0, 1.0)
+    #[serde(default)]
+    pub stability: f64,
+
+    /// Number of times this section has been recalibrated
+    #[serde(default = "default_version")]
+    pub version: u32,
+
+    /// ISO timestamp of last recalibration (reference change or consensus update)
+    #[serde(alias = "updated_at")]
+    pub updated_at: Option<String>,
+
     /// ISO timestamp when section was created
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
-    /// ISO timestamp when section was last updated
-    #[serde(alias = "updated_at")]
-    pub updated_at: Option<String>,
-    /// Stability score (0.0-1.0) - how stable the consensus has become
-    /// High stability = consensus is well-established, unlikely to change significantly
-    pub stability: f64,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+impl FrequentSection {
+    /// Split this section at a polyline index.
+    ///
+    /// Convenience wrapper around [`split_section_at_index`].
+    pub fn split_at_index(&self, split_index: usize) -> Option<SplitResult> {
+        optimized::split_section_at_index(self, split_index)
+    }
+
+    /// Split this section at a geographic point (finds nearest polyline index).
+    ///
+    /// Convenience wrapper around [`split_section_at_point`].
+    pub fn split_at_point(&self, point: &GpsPoint, max_distance: f64) -> Option<SplitResult> {
+        optimized::split_section_at_point(self, point, max_distance)
+    }
+
+    /// Recalculate this section's polyline from stored activity traces.
+    ///
+    /// Convenience wrapper around [`recalculate_section_polyline`].
+    pub fn recalculate_polyline(&self, config: &SectionConfig) -> FrequentSection {
+        optimized::recalculate_section_polyline(self, config)
+    }
 }
 
 /// A potential section detected from 1-2 activities.
@@ -359,7 +473,7 @@ pub struct PotentialSection {
     /// Confidence score (0.0-1.0), lower than FrequentSection
     pub confidence: f64,
     /// Scale at which this was detected
-    pub scale: String,
+    pub scale: ScaleName,
 }
 
 /// Result of multi-scale section detection
@@ -396,7 +510,7 @@ fn process_cluster(
     track_map: &HashMap<&str, &[GpsPoint]>,
     activity_to_route: &HashMap<&str, &str>,
     config: &SectionConfig,
-    scale_name: Option<&str>,
+    scale_name: Option<ScaleName>,
 ) -> Option<FrequentSection> {
     // Select medoid - an ACTUAL GPS trace (resolved from track_map via index ranges)
     let (representative_id, representative_polyline) = select_medoid(&cluster, track_map);
@@ -453,15 +567,32 @@ fn process_cluster(
         return None;
     }
 
-    // Compute stability: more observations + tighter spread = more stable
-    let stability = compute_initial_stability(
-        consensus.observation_count,
-        consensus.average_spread,
-        config.proximity_threshold,
-    );
-
     // Count activity_ids before moving
     let activity_count = cluster.activity_ids.len();
+
+    // Compute initial stability of the selected medoid against the consensus
+    let medoid_trace = track_map
+        .get(representative_id.as_str())
+        .map(|track| {
+            // Find the overlap range from cluster overlaps for this activity
+            cluster.overlaps.iter()
+                .find(|o| o.activity_a == representative_id || o.activity_b == representative_id)
+                .map(|o| {
+                    let (range, track_ref) = if o.activity_a == representative_id {
+                        (o.range_a, *track)
+                    } else {
+                        (o.range_b, *track)
+                    };
+                    let end = range.1.min(track_ref.len());
+                    track_ref[range.0..end].to_vec()
+                })
+                .unwrap_or_else(|| track.to_vec())
+        });
+
+    let stability = medoid_trace
+        .as_ref()
+        .map(|trace| compute_stability(trace, &consensus.polyline, config.proximity_threshold))
+        .unwrap_or(0.0);
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
@@ -481,13 +612,12 @@ fn process_cluster(
         observation_count: consensus.observation_count,
         average_spread: consensus.average_spread,
         point_density: consensus.point_density,
-        scale: scale_name.map(|s| s.to_string()),
-        // Evolution fields (callers should set created_at if needed)
-        version: 1,
+        scale: scale_name,
         is_user_defined: false,
-        created_at: None,
-        updated_at: None,
         stability,
+        version: 1,
+        updated_at: None,
+        created_at: None,
     })
 }
 
@@ -1193,7 +1323,7 @@ pub fn detect_sections_multiscale_with_progress(
                         &track_map,
                         &activity_to_route,
                         &scale_config,
-                        Some(&preset.name),
+                        Some(preset.name),
                     )
                 })
                 .collect();
@@ -1224,7 +1354,7 @@ pub fn detect_sections_multiscale_with_progress(
                                 visit_count: activity_count as u32,
                                 distance_meters: distance,
                                 confidence: 0.3 + (activity_count as f64 * 0.2),
-                                scale: preset.name.clone(),
+                                scale: preset.name,
                             });
                         }
                     }
@@ -1257,7 +1387,7 @@ pub fn detect_sections_multiscale_with_progress(
 
         // Merge results from all presets
         for (idx, (sections, potentials)) in preset_results.into_iter().enumerate() {
-            let preset_name = &config.scale_presets[idx].name;
+            let preset_name = config.scale_presets[idx].name.as_str().to_string();
             stats
                 .sections_by_scale
                 .entry(preset_name.clone())
@@ -1265,7 +1395,7 @@ pub fn detect_sections_multiscale_with_progress(
                 .or_insert(sections.len() as u32);
             stats
                 .potentials_by_scale
-                .entry(preset_name.clone())
+                .entry(preset_name)
                 .and_modify(|n| *n += potentials.len() as u32)
                 .or_insert(potentials.len() as u32);
             all_sections.extend(sections);

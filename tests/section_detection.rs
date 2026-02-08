@@ -15,8 +15,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use tracematch::{
-    GpsPoint, MatchConfig, RouteSignature, ScalePreset, SectionConfig, detect_sections_from_tracks,
-    detect_sections_multiscale, group_signatures,
+    GpsPoint, MatchConfig, RouteSignature, ScaleName, ScalePreset, SectionConfig,
+    detect_sections_from_tracks, detect_sections_multiscale, group_signatures,
 };
 
 /// Check if the raw trace fixtures are available.
@@ -346,13 +346,13 @@ fn test_multiscale_detection() {
         cluster_tolerance: 100.0,
         scale_presets: vec![
             ScalePreset {
-                name: "short".to_string(),
+                name: ScaleName::Short,
                 min_length: 200.0,
                 max_length: 600.0,
                 min_activities: 2,
             },
             ScalePreset {
-                name: "medium".to_string(),
+                name: ScaleName::Medium,
                 min_length: 500.0,
                 max_length: 1500.0,
                 min_activities: 2,
@@ -375,7 +375,7 @@ fn test_multiscale_detection() {
     for section in &result.sections {
         println!(
             "  [{}] {}: {:.0}m, {} activities",
-            section.scale.as_deref().unwrap_or("?"),
+            section.scale.as_ref().map(|s| s.as_str()).unwrap_or("?"),
             section.id,
             section.distance_meters,
             section.activity_ids.len()
@@ -764,19 +764,19 @@ fn test_no_sparse_linestrings_in_output() {
         cluster_tolerance: 100.0,
         scale_presets: vec![
             ScalePreset {
-                name: "short".to_string(),
+                name: ScaleName::Short,
                 min_length: 100.0,
                 max_length: 500.0,
                 min_activities: 2,
             },
             ScalePreset {
-                name: "medium".to_string(),
+                name: ScaleName::Medium,
                 min_length: 400.0,
                 max_length: 1500.0,
                 min_activities: 2,
             },
             ScalePreset {
-                name: "long".to_string(),
+                name: ScaleName::Long,
                 min_length: 1000.0,
                 max_length: 5000.0,
                 min_activities: 2,
