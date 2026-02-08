@@ -14,9 +14,11 @@ use std::time::Instant;
 
 use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
 use tracematch::{
-    GpsPoint, NoopProgress, SectionConfig, compute_grid_cells, detect_sections_incremental,
-    detect_sections_multiscale, detect_sections_optimized, grid_filtered_pairs,
+    GpsPoint, SectionConfig, detect_sections_incremental,
+    detect_sections_multiscale, detect_sections_optimized,
 };
+use tracematch::sections::NoopProgress;
+use tracematch::sections::optimized::{compute_grid_cells, grid_filtered_pairs};
 
 // ============================================================================
 // Peak Memory Tracking Allocator

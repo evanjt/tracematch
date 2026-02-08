@@ -17,9 +17,6 @@ use crate::{
 /// Spatial search tolerance in degrees (~1km).
 const SPATIAL_TOLERANCE: f64 = 0.01;
 
-/// Result type for parallel group processing - groups and their match info.
-type GroupProcessingResult = (Vec<RouteGroup>, HashMap<String, Vec<ActivityMatchInfo>>);
-
 /// Check if two routes should be GROUPED into the same route.
 ///
 /// A "route" is a complete, repeated JOURNEY - not just a shared section.
@@ -229,98 +226,14 @@ pub fn group_signatures_with_matches(
         };
     }
 
-    // First, do the normal grouping
     let initial_groups = group_signatures(signatures, config);
 
-    // Create signature lookup
     let sig_map: HashMap<&str, &RouteSignature> = signatures
         .iter()
         .map(|s| (s.activity_id.as_str(), s))
         .collect();
 
-    // Calculate match info and split divergent groups
-    let mut final_groups: Vec<RouteGroup> = Vec::new();
-    let mut activity_matches: HashMap<String, Vec<ActivityMatchInfo>> = HashMap::new();
-
-    for group in &initial_groups {
-        let representative_sig = match sig_map.get(group.representative_id.as_str()) {
-            Some(sig) => *sig,
-            None => {
-                final_groups.push(group.clone());
-                continue;
-            }
-        };
-
-        // Calculate match info for each activity using AMD-based matching
-        let mut matches = Vec::new();
-        for activity_id in &group.activity_ids {
-            if let Some(activity_sig) = sig_map.get(activity_id.as_str()) {
-                // Use AMD match percentage directly - no fallbacks
-                let match_result = compare_routes(activity_sig, representative_sig, config);
-                let Some(result) = match_result else {
-                    // Skip activities without valid match data
-                    continue;
-                };
-
-                log::debug!(
-                    "tracematch: amd_match for {}: {:.1}% ({})",
-                    activity_id,
-                    result.match_percentage,
-                    result.direction
-                );
-
-                matches.push(ActivityMatchInfo {
-                    activity_id: activity_id.clone(),
-                    match_percentage: result.match_percentage,
-                    direction: result.direction,
-                });
-            }
-        }
-
-        // Check if this group should be split
-        let split_groups = split_divergent_routes(group, &matches, &sig_map, config);
-
-        if split_groups.len() == 1 {
-            // No split occurred - use original group and matches
-            final_groups.push(group.clone());
-            activity_matches.insert(group.group_id.clone(), matches);
-        } else {
-            // Group was split - recalculate matches for each sub-group
-            for split_group in split_groups {
-                let split_rep_sig = match sig_map.get(split_group.representative_id.as_str()) {
-                    Some(sig) => sig,
-                    None => {
-                        final_groups.push(split_group);
-                        continue;
-                    }
-                };
-
-                let split_matches: Vec<ActivityMatchInfo> = split_group
-                    .activity_ids
-                    .iter()
-                    .filter_map(|activity_id| {
-                        let activity_sig = sig_map.get(activity_id.as_str())?;
-                        // Use AMD match percentage directly - no fallbacks
-                        let result = compare_routes(activity_sig, split_rep_sig, config)?;
-
-                        Some(ActivityMatchInfo {
-                            activity_id: activity_id.clone(),
-                            match_percentage: result.match_percentage,
-                            direction: result.direction,
-                        })
-                    })
-                    .collect();
-
-                activity_matches.insert(split_group.group_id.clone(), split_matches);
-                final_groups.push(split_group);
-            }
-        }
-    }
-
-    GroupingResult {
-        groups: final_groups,
-        activity_matches,
-    }
+    compute_matches_and_split(&initial_groups, &sig_map, config)
 }
 
 /// Group signatures using parallel processing.
@@ -399,8 +312,6 @@ pub fn group_signatures_parallel_with_matches(
     signatures: &[RouteSignature],
     config: &MatchConfig,
 ) -> GroupingResult {
-    use rayon::prelude::*;
-
     if signatures.is_empty() {
         return GroupingResult {
             groups: vec![],
@@ -408,99 +319,14 @@ pub fn group_signatures_parallel_with_matches(
         };
     }
 
-    // First, do the parallel grouping
     let initial_groups = group_signatures_parallel(signatures, config);
 
-    // Create signature lookup
     let sig_map: HashMap<&str, &RouteSignature> = signatures
         .iter()
         .map(|s| (s.activity_id.as_str(), s))
         .collect();
 
-    // Calculate match info for each activity and check for splits
-    // Process groups in parallel, collect results
-    let group_results: Vec<GroupProcessingResult> = initial_groups
-        .par_iter()
-        .filter_map(|group| {
-            let representative_sig = sig_map.get(group.representative_id.as_str())?;
-
-            // Calculate matches for all activities in group
-            let matches: Vec<ActivityMatchInfo> = group
-                .activity_ids
-                .iter()
-                .filter_map(|activity_id| {
-                    let activity_sig = sig_map.get(activity_id.as_str())?;
-                    // Use AMD match percentage directly - no fallbacks
-                    let result = compare_routes(activity_sig, representative_sig, config)?;
-
-                    Some(ActivityMatchInfo {
-                        activity_id: activity_id.clone(),
-                        match_percentage: result.match_percentage,
-                        direction: result.direction,
-                    })
-                })
-                .collect();
-
-            // Check for splits
-            let split_groups = split_divergent_routes(group, &matches, &sig_map, config);
-
-            if split_groups.len() == 1 {
-                // No split - return original
-                let mut result_matches = HashMap::new();
-                result_matches.insert(group.group_id.clone(), matches);
-                Some((vec![group.clone()], result_matches))
-            } else {
-                // Split occurred - recalculate matches for each sub-group
-                let mut result_groups = Vec::new();
-                let mut result_matches = HashMap::new();
-
-                for split_group in split_groups {
-                    let split_rep_sig = match sig_map.get(split_group.representative_id.as_str()) {
-                        Some(sig) => sig,
-                        None => {
-                            result_groups.push(split_group);
-                            continue;
-                        }
-                    };
-
-                    let split_match_info: Vec<ActivityMatchInfo> = split_group
-                        .activity_ids
-                        .iter()
-                        .filter_map(|activity_id| {
-                            let activity_sig = sig_map.get(activity_id.as_str())?;
-                            // Use AMD match percentage directly - no fallbacks
-                            let result = compare_routes(activity_sig, split_rep_sig, config)?;
-
-                            Some(ActivityMatchInfo {
-                                activity_id: activity_id.clone(),
-                                match_percentage: result.match_percentage,
-                                direction: result.direction,
-                            })
-                        })
-                        .collect();
-
-                    result_matches.insert(split_group.group_id.clone(), split_match_info);
-                    result_groups.push(split_group);
-                }
-
-                Some((result_groups, result_matches))
-            }
-        })
-        .collect();
-
-    // Flatten results
-    let mut final_groups = Vec::new();
-    let mut activity_matches = HashMap::new();
-
-    for (groups, matches) in group_results {
-        final_groups.extend(groups);
-        activity_matches.extend(matches);
-    }
-
-    GroupingResult {
-        groups: final_groups,
-        activity_matches,
-    }
+    compute_matches_and_split(&initial_groups, &sig_map, config)
 }
 
 /// Incremental grouping: efficiently add new signatures to existing groups.
@@ -630,6 +456,95 @@ pub fn group_incremental(
     build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps)
 }
 
+/// Calculate match info for each activity in each group and split divergent groups.
+///
+/// Shared logic between `group_signatures_with_matches` and
+/// `group_signatures_parallel_with_matches`.
+fn compute_matches_and_split(
+    initial_groups: &[RouteGroup],
+    sig_map: &HashMap<&str, &RouteSignature>,
+    config: &MatchConfig,
+) -> GroupingResult {
+    let mut final_groups: Vec<RouteGroup> = Vec::new();
+    let mut activity_matches: HashMap<String, Vec<ActivityMatchInfo>> = HashMap::new();
+
+    for group in initial_groups {
+        let representative_sig = match sig_map.get(group.representative_id.as_str()) {
+            Some(sig) => *sig,
+            None => {
+                final_groups.push(group.clone());
+                continue;
+            }
+        };
+
+        // Calculate match info for each activity using AMD-based matching
+        let matches: Vec<ActivityMatchInfo> = group
+            .activity_ids
+            .iter()
+            .filter_map(|activity_id| {
+                let activity_sig = sig_map.get(activity_id.as_str())?;
+                let result = compare_routes(activity_sig, representative_sig, config)?;
+
+                log::debug!(
+                    "tracematch: amd_match for {}: {:.1}% ({})",
+                    activity_id,
+                    result.match_percentage,
+                    result.direction
+                );
+
+                Some(ActivityMatchInfo {
+                    activity_id: activity_id.clone(),
+                    match_percentage: result.match_percentage,
+                    direction: result.direction,
+                })
+            })
+            .collect();
+
+        // Check if this group should be split
+        let split_groups = split_divergent_routes(group, &matches, sig_map, config);
+
+        if split_groups.len() == 1 {
+            // No split occurred - use original group and matches
+            final_groups.push(group.clone());
+            activity_matches.insert(group.group_id.clone(), matches);
+        } else {
+            // Group was split - recalculate matches for each sub-group
+            for split_group in split_groups {
+                let split_rep_sig = match sig_map.get(split_group.representative_id.as_str()) {
+                    Some(sig) => sig,
+                    None => {
+                        final_groups.push(split_group);
+                        continue;
+                    }
+                };
+
+                let split_matches: Vec<ActivityMatchInfo> = split_group
+                    .activity_ids
+                    .iter()
+                    .filter_map(|activity_id| {
+                        let activity_sig = sig_map.get(activity_id.as_str())?;
+                        let result = compare_routes(activity_sig, split_rep_sig, config)?;
+
+                        Some(ActivityMatchInfo {
+                            activity_id: activity_id.clone(),
+                            match_percentage: result.match_percentage,
+                            direction: result.direction,
+                        })
+                    })
+                    .collect();
+
+                activity_matches.insert(split_group.group_id.clone(), split_matches);
+                final_groups.push(split_group);
+            }
+        }
+    }
+
+    GroupingResult {
+        groups: final_groups,
+        activity_matches,
+    }
+}
+
 /// Build RouteGroup instances with full metadata from grouped activity IDs.
 fn build_route_groups(
     groups_map: HashMap<String, Vec<String>>,
@@ -715,7 +630,8 @@ fn compute_group_bounds(
 
 /// Create search bounds for spatial index query.
 fn create_search_bounds(points: &[GpsPoint], tolerance: f64) -> AABB<[f64; 2]> {
-    let (min_lat, max_lat, min_lng, max_lng) = crate::geo_utils::compute_bounds_tuple(points);
+    let bounds = crate::geo_utils::compute_bounds(points);
+    let (min_lat, max_lat, min_lng, max_lng) = (bounds.min_lat, bounds.max_lat, bounds.min_lng, bounds.max_lng);
     AABB::from_corners(
         [min_lng - tolerance, min_lat - tolerance],
         [max_lng + tolerance, max_lat + tolerance],

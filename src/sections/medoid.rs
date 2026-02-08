@@ -5,7 +5,7 @@
 
 use super::overlap::OverlapCluster;
 use crate::GpsPoint;
-use crate::geo_utils::haversine_distance;
+use crate::matching;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -18,10 +18,11 @@ pub fn select_medoid(
 ) -> (String, Vec<GpsPoint>) {
     // Collect all unique activity portions in this cluster
     let mut traces: Vec<(&str, Vec<GpsPoint>)> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for overlap in &cluster.overlaps {
         // Add track A's overlapping portion
-        if !traces.iter().any(|(id, _)| *id == overlap.activity_a) {
+        if seen.insert(overlap.activity_a.as_str()) {
             if let Some(track) = track_map.get(overlap.activity_a.as_str()) {
                 let end = overlap.range_a.1.min(track.len());
                 let points = track[overlap.range_a.0..end].to_vec();
@@ -31,7 +32,7 @@ pub fn select_medoid(
             }
         }
         // Add track B's overlapping portion
-        if !traces.iter().any(|(id, _)| *id == overlap.activity_b) {
+        if seen.insert(overlap.activity_b.as_str()) {
             if let Some(track) = track_map.get(overlap.activity_b.as_str()) {
                 let end = overlap.range_b.1.min(track.len());
                 let points = track[overlap.range_b.0..end].to_vec();
@@ -125,91 +126,40 @@ pub fn select_medoid(
     (traces[best_idx].0.to_string(), traces[best_idx].1.clone())
 }
 
-/// Average Minimum Distance between two polylines
-fn average_min_distance(poly_a: &[GpsPoint], poly_b: &[GpsPoint]) -> f64 {
+/// Compute stability: how well a trace aligns with a reference polyline.
+/// Returns 0.0-1.0 where 1.0 = perfect alignment.
+pub(crate) fn compute_stability(
+    trace: &[GpsPoint],
+    consensus: &[GpsPoint],
+    proximity_threshold: f64,
+) -> f64 {
+    if trace.is_empty() || consensus.is_empty() || proximity_threshold <= 0.0 {
+        return 0.0;
+    }
+    let amd = average_min_distance(trace, consensus);
+    if amd == f64::MAX {
+        return 0.0;
+    }
+    (1.0 - (amd / proximity_threshold)).clamp(0.0, 1.0)
+}
+
+/// Average Minimum Distance between two polylines.
+///
+/// Resamples both polylines to 50 points for fair comparison,
+/// then delegates to `matching::average_min_distance` for the actual computation.
+pub(crate) fn average_min_distance(poly_a: &[GpsPoint], poly_b: &[GpsPoint]) -> f64 {
     if poly_a.is_empty() || poly_b.is_empty() {
         return f64::MAX;
     }
 
     // Resample both to same number of points for fair comparison
     let n = 50;
-    let resampled_a = resample_by_distance(poly_a, n);
-    let resampled_b = resample_by_distance(poly_b, n);
+    let resampled_a = matching::resample_route(poly_a, n);
+    let resampled_b = matching::resample_route(poly_b, n);
 
-    // Compute AMD from A to B
-    let mut sum_a_to_b = 0.0;
-    for point_a in &resampled_a {
-        let min_dist = resampled_b
-            .iter()
-            .map(|p| haversine_distance(point_a, p))
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(0.0);
-        sum_a_to_b += min_dist;
-    }
+    // Compute symmetric AMD using the canonical implementation
+    let amd_a_to_b = matching::average_min_distance(&resampled_a, &resampled_b);
+    let amd_b_to_a = matching::average_min_distance(&resampled_b, &resampled_a);
 
-    // Compute AMD from B to A
-    let mut sum_b_to_a = 0.0;
-    for point_b in &resampled_b {
-        let min_dist = resampled_a
-            .iter()
-            .map(|p| haversine_distance(point_b, p))
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(0.0);
-        sum_b_to_a += min_dist;
-    }
-
-    // Average of both directions
-    (sum_a_to_b + sum_b_to_a) / (2.0 * n as f64)
-}
-
-/// Resample polyline to N points by distance
-pub fn resample_by_distance(points: &[GpsPoint], n: usize) -> Vec<GpsPoint> {
-    if points.len() <= n {
-        return points.to_vec();
-    }
-
-    // Compute cumulative distances
-    let mut cumulative = vec![0.0];
-    for i in 1..points.len() {
-        let d = haversine_distance(&points[i - 1], &points[i]);
-        cumulative.push(cumulative.last().unwrap() + d);
-    }
-
-    let total_length = *cumulative.last().unwrap();
-    if total_length < 1.0 {
-        return points.to_vec();
-    }
-
-    let mut resampled = Vec::with_capacity(n);
-    for i in 0..n {
-        let target_dist = (i as f64 / (n - 1) as f64) * total_length;
-
-        // Find segment containing target distance
-        let seg_idx = cumulative
-            .iter()
-            .skip(1)
-            .position(|&d| d >= target_dist)
-            .unwrap_or(cumulative.len() - 2);
-
-        // Interpolate within segment
-        let seg_start = cumulative[seg_idx];
-        let seg_end = cumulative.get(seg_idx + 1).copied().unwrap_or(seg_start);
-        let seg_len = seg_end - seg_start;
-
-        let t = if seg_len > 0.001 {
-            (target_dist - seg_start) / seg_len
-        } else {
-            0.0
-        };
-
-        let p1 = &points[seg_idx];
-        let p2 = points.get(seg_idx + 1).unwrap_or(p1);
-
-        resampled.push(GpsPoint::new(
-            p1.latitude + t * (p2.latitude - p1.latitude),
-            p1.longitude + t * (p2.longitude - p1.longitude),
-        ));
-    }
-
-    resampled
+    (amd_a_to_b + amd_b_to_a) / 2.0
 }

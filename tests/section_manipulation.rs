@@ -8,8 +8,8 @@
 
 use std::path::Path;
 use tracematch::{
-    FrequentSection, GpsPoint, SectionConfig, find_sections_in_route, recalculate_section_polyline,
-    split_section_at_index, split_section_at_point,
+    FrequentSection, GpsPoint, ScaleName, SectionConfig, find_sections_in_route,
+    recalculate_section_polyline, split_section_at_index, split_section_at_point,
 };
 
 /// Load GPX file and extract GPS points
@@ -103,7 +103,7 @@ fn test_find_sections_in_route() {
         observation_count: 1,
         average_spread: 10.0,
         point_density: vec![1; section_polyline.len()],
-        scale: Some("test".to_string()),
+        scale: Some(ScaleName::Short),
         version: 1,
         is_user_defined: false,
         created_at: None,
@@ -172,7 +172,7 @@ fn test_split_section_at_index() {
         observation_count: 5,
         average_spread: 10.0,
         point_density: vec![5; polyline.len()],
-        scale: Some("test".to_string()),
+        scale: Some(ScaleName::Short),
         version: 1,
         is_user_defined: false,
         created_at: None,
@@ -246,7 +246,7 @@ fn test_split_section_at_point() {
         observation_count: 5,
         average_spread: 10.0,
         point_density: vec![5; polyline.len()],
-        scale: Some("test".to_string()),
+        scale: Some(ScaleName::Short),
         version: 1,
         is_user_defined: false,
         created_at: None,
@@ -327,7 +327,7 @@ fn test_recalculate_section_polyline() {
         observation_count: 3,
         average_spread: 10.0,
         point_density: vec![3; base_polyline.len()],
-        scale: Some("test".to_string()),
+        scale: Some(ScaleName::Short),
         version: 1,
         is_user_defined: false,
         created_at: None,

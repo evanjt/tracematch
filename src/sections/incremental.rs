@@ -15,10 +15,10 @@ use super::optimized::find_sections_in_route;
 use super::progress::{DetectionPhase, DetectionProgressCallback};
 use super::{
     FrequentSection, SectionConfig, SectionPortion, compute_consensus_polyline,
-    compute_initial_stability, extract_all_activity_traces,
+    extract_all_activity_traces,
 };
 use crate::matching::calculate_route_distance;
-use crate::{GpsPoint, RouteGroup};
+use crate::{Direction, GpsPoint, RouteGroup};
 use log::info;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -154,9 +154,9 @@ pub fn detect_sections_incremental(
                     // Compute portion for this new activity
                     if let Some(track) = track_map.get(activity_id.as_str()) {
                         let direction = if section_match.same_direction {
-                            "same"
+                            Direction::Same
                         } else {
-                            "reverse"
+                            Direction::Reverse
                         };
                         let start = section_match.start_index as u32;
                         let end = section_match.end_index as u32;
@@ -168,7 +168,7 @@ pub fn detect_sections_incremental(
                             start_index: start,
                             end_index: end,
                             distance_meters: distance,
-                            direction: direction.to_string(),
+                            direction,
                         });
                     }
                 }
@@ -194,15 +194,9 @@ pub fn detect_sections_incremental(
                     updated.observation_count = consensus.observation_count;
                     updated.average_spread = consensus.average_spread;
                     updated.point_density = consensus.point_density;
-                    updated.stability = compute_initial_stability(
-                        consensus.observation_count,
-                        consensus.average_spread,
-                        config.proximity_threshold,
-                    );
                 }
             }
 
-            updated.version += 1;
             updated_sections.push(updated);
         } else {
             // No new matches — keep section as-is

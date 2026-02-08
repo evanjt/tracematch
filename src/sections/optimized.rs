@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use super::rtree::{IndexedPoint, build_rtree};
 use super::{
     FrequentSection, FullTrackOverlap, SectionConfig, cluster_overlaps_with_map,
-    compute_consensus_polyline, compute_initial_stability, consolidate_fragments,
+    compute_consensus_polyline, consolidate_fragments,
     extract_all_activity_traces, filter_low_quality_sections, make_sections_exclusive,
     merge_nearby_sections, remove_overlapping_sections, select_medoid, split_at_gradient_changes,
     split_at_heading_changes,
@@ -624,14 +624,14 @@ fn convert_cluster_to_section(
         return None;
     }
 
-    let stability = super::compute_initial_stability(
-        consensus.observation_count,
-        consensus.average_spread,
-        config.proximity_threshold,
-    );
-
     // Count activity_ids before moving
     let activity_count = cluster.activity_ids.len();
+
+    // Compute initial stability of the selected medoid against the consensus
+    let stability = track_map
+        .get(representative_id.as_str())
+        .map(|track| super::medoid::compute_stability(track, &consensus.polyline, config.proximity_threshold))
+        .unwrap_or(0.0);
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
@@ -642,21 +642,19 @@ fn convert_cluster_to_section(
         activity_ids: cluster.activity_ids.into_iter().collect(),
         activity_portions: vec![], // Skip for optimized mode
         route_ids: vec![],
-        // visit_count should equal unique activities
         visit_count: activity_count as u32,
-        distance_meters: consensus_distance, // Use consensus distance, not representative
-        // Lazy activity_traces: empty during detection, populated on-demand
+        distance_meters: consensus_distance,
         activity_traces: HashMap::new(),
         confidence: consensus.confidence,
         observation_count: consensus.observation_count,
         average_spread: consensus.average_spread,
         point_density: consensus.point_density,
-        scale: Some("optimized".to_string()),
-        version: 1,
+        scale: Some(super::ScaleName::Optimized),
         is_user_defined: false,
-        created_at: None,
-        updated_at: None,
         stability,
+        version: 1,
+        updated_at: None,
+        created_at: None,
     })
 }
 
@@ -954,11 +952,11 @@ pub fn split_section_at_index(
             average_spread: section.average_spread,
             point_density: vec![], // Need recalculation
             scale: section.scale.clone(),
-            version: section.version + 1,
             is_user_defined: true, // Mark as user-modified
-            created_at: section.created_at.clone(),
+            stability: 0.0, // Needs recalculation
+            version: 1,
             updated_at: None,
-            stability: section.stability,
+            created_at: section.created_at.clone(),
         },
         second: FrequentSection {
             id: format!("{}_b", base_id),
@@ -971,18 +969,17 @@ pub fn split_section_at_index(
             route_ids: section.route_ids.clone(),
             visit_count: section.visit_count,
             distance_meters: second_distance,
-            // Lazy: traces need re-extraction for the new polyline
             activity_traces: HashMap::new(),
             confidence: section.confidence * 0.9,
             observation_count: section.observation_count,
             average_spread: section.average_spread,
             point_density: vec![],
             scale: section.scale.clone(),
-            version: section.version + 1,
             is_user_defined: true,
-            created_at: section.created_at.clone(),
+            stability: 0.0, // Needs recalculation
+            version: 1,
             updated_at: None,
-            stability: section.stability,
+            created_at: section.created_at.clone(),
         },
     })
 }
@@ -1061,21 +1058,25 @@ pub fn recalculate_section_polyline(
         super::compute_consensus_polyline(reference, &traces, config.proximity_threshold);
 
     let new_distance = crate::matching::calculate_route_distance(&consensus.polyline);
-    let new_confidence = compute_initial_stability(
-        consensus.observation_count,
-        consensus.average_spread,
-        config.proximity_threshold,
-    );
+
+    // Recompute stability of representative against new consensus
+    let stability = section
+        .activity_traces
+        .get(&section.representative_activity_id)
+        .map(|trace| {
+            super::medoid::compute_stability(trace, &consensus.polyline, config.proximity_threshold)
+        })
+        .unwrap_or(section.stability);
 
     FrequentSection {
         polyline: consensus.polyline,
         distance_meters: new_distance,
         average_spread: consensus.average_spread,
         point_density: consensus.point_density,
-        confidence: new_confidence,
+        confidence: consensus.confidence,
         observation_count: consensus.observation_count,
         version: section.version + 1,
-        updated_at: None,
+        stability,
         ..section.clone()
     }
 }

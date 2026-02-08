@@ -51,7 +51,7 @@
 //! standard used by GPS receivers and mapping services.
 
 use crate::{Bounds, GpsPoint};
-use geo::{Distance, Haversine, Point};
+use geo::{Bearing, Distance, Haversine, Point};
 
 // =============================================================================
 // Distance Functions
@@ -163,47 +163,12 @@ pub fn meters_to_degrees(meters: f64, latitude: f64) -> f64 {
 /// assert_eq!(bounds.max_lng, -0.1200);
 /// ```
 pub fn compute_bounds(points: &[GpsPoint]) -> Bounds {
-    let mut min_lat = f64::MAX;
-    let mut max_lat = f64::MIN;
-    let mut min_lng = f64::MAX;
-    let mut max_lng = f64::MIN;
-
-    for p in points {
-        min_lat = min_lat.min(p.latitude);
-        max_lat = max_lat.max(p.latitude);
-        min_lng = min_lng.min(p.longitude);
-        max_lng = max_lng.max(p.longitude);
-    }
-
-    Bounds {
-        min_lat,
-        max_lat,
-        min_lng,
-        max_lng,
-    }
-}
-
-/// Compute the bounding box as a tuple (min_lat, max_lat, min_lng, max_lng).
-///
-/// This is a convenience function that returns the bounds as a tuple instead
-/// of a [`Bounds`] struct. Useful for quick destructuring.
-///
-/// # Arguments
-///
-/// * `points` - Slice of GPS points
-///
-/// # Returns
-///
-/// Tuple of (min_lat, max_lat, min_lng, max_lng).
-#[inline]
-pub fn compute_bounds_tuple(points: &[GpsPoint]) -> (f64, f64, f64, f64) {
-    let bounds = compute_bounds(points);
-    (
-        bounds.min_lat,
-        bounds.max_lat,
-        bounds.min_lng,
-        bounds.max_lng,
-    )
+    Bounds::from_points(points).unwrap_or(Bounds {
+        min_lat: f64::MAX,
+        max_lat: f64::MIN,
+        min_lng: f64::MAX,
+        max_lng: f64::MIN,
+    })
 }
 
 /// Check if two bounding boxes overlap, with an optional buffer.
@@ -316,14 +281,11 @@ pub fn compute_center(points: &[GpsPoint]) -> GpsPoint {
 /// Uses the spherical law of cosines for azimuth calculation.
 #[inline]
 pub fn calculate_bearing(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
-    let lat1 = p1.latitude.to_radians();
-    let lat2 = p2.latitude.to_radians();
-    let delta_lng = (p2.longitude - p1.longitude).to_radians();
-
-    let x = delta_lng.sin() * lat2.cos();
-    let y = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * delta_lng.cos();
-
-    (x.atan2(y).to_degrees() + 360.0) % 360.0
+    let point1 = Point::new(p1.longitude, p1.latitude);
+    let point2 = Point::new(p2.longitude, p2.latitude);
+    let bearing = Haversine::bearing(point1, point2);
+    // geo returns [-180, 180], normalize to [0, 360)
+    (bearing + 360.0) % 360.0
 }
 
 /// Calculate the absolute angular difference between two bearings.

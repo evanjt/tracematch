@@ -1,6 +1,6 @@
 //! Tests for lib.rs core types and functions
 
-use tracematch::{GpsPoint, MatchConfig, RouteSignature, compare_routes, group_signatures};
+use tracematch::{Direction, GpsPoint, MatchConfig, RouteSignature, compare_routes, group_signatures};
 
 fn sample_route() -> Vec<GpsPoint> {
     vec![
@@ -41,8 +41,8 @@ fn test_identical_routes_match() {
     assert!(result.is_some());
     let result = result.unwrap();
     assert!(result.match_percentage > 95.0);
-    // Direction is "same" when routes go the same direction
-    assert_eq!(result.direction, "same");
+    // Direction is Same when routes go the same direction
+    assert_eq!(result.direction, Direction::Same);
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn test_reverse_routes_match() {
 
     let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
     assert!(result.is_some());
-    assert_eq!(result.unwrap().direction, "reverse");
+    assert_eq!(result.unwrap().direction, Direction::Reverse);
 }
 
 #[test]
