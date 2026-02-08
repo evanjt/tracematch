@@ -200,11 +200,7 @@ pub fn cluster_overlaps(
             if center_dist <= config.cluster_tolerance {
                 // Additional check: verify overlaps are geometrically similar
                 let other_points = resolve_points_a(other, tracks);
-                if overlaps_match(
-                    seed_points,
-                    other_points,
-                    config.proximity_threshold,
-                ) {
+                if overlaps_match(seed_points, other_points, config.proximity_threshold) {
                     cluster_overlaps.push(other.clone());
                     cluster_activities.insert(other.activity_a.clone());
                     cluster_activities.insert(other.activity_b.clone());
@@ -257,11 +253,7 @@ pub fn cluster_overlaps_with_map(
             let center_dist = haversine_distance(&overlap.center, &other.center);
             if center_dist <= config.cluster_tolerance {
                 let other_points = resolve_points_a_from_map(other, track_map);
-                if overlaps_match(
-                    seed_points,
-                    other_points,
-                    config.proximity_threshold,
-                ) {
+                if overlaps_match(seed_points, other_points, config.proximity_threshold) {
                     cluster_overlaps.push(other.clone());
                     cluster_activities.insert(other.activity_a.clone());
                     cluster_activities.insert(other.activity_b.clone());

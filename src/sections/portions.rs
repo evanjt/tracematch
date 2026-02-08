@@ -5,6 +5,8 @@ use super::rtree::{IndexedPoint, build_rtree};
 use super::{SectionConfig, SectionPortion};
 use crate::GpsPoint;
 use crate::matching::calculate_route_distance;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use rstar::{PointDistance, RTree};
 
 /// Compute each activity's portion of a section.
@@ -15,11 +17,11 @@ pub fn compute_activity_portions(
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
-    let mut portions = Vec::new();
+    let activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
 
-    for activity_id in &cluster.activity_ids {
+    let compute_for_activity = |activity_id: &&String| -> Vec<SectionPortion> {
+        let mut portions = Vec::new();
         if let Some(track) = all_tracks.get(activity_id.as_str()) {
-            // Find ALL portions of this track that overlap with the representative
             let all_traversals =
                 find_all_track_portions(track, representative_polyline, config.proximity_threshold);
 
@@ -27,7 +29,7 @@ pub fn compute_activity_portions(
                 let distance = calculate_route_distance(&track[start_idx..end_idx]);
 
                 portions.push(SectionPortion {
-                    activity_id: activity_id.clone(),
+                    activity_id: (*activity_id).clone(),
                     start_index: start_idx as u32,
                     end_index: end_idx as u32,
                     distance_meters: distance,
@@ -35,9 +37,24 @@ pub fn compute_activity_portions(
                 });
             }
         }
+        portions
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        activity_ids
+            .par_iter()
+            .flat_map(compute_for_activity)
+            .collect()
     }
 
-    portions
+    #[cfg(not(feature = "parallel"))]
+    {
+        activity_ids
+            .iter()
+            .flat_map(compute_for_activity)
+            .collect()
+    }
 }
 
 /// A contiguous segment of a track that overlaps with the reference

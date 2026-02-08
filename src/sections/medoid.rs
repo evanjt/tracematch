@@ -6,6 +6,8 @@
 use super::overlap::OverlapCluster;
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Select the medoid trace from a cluster using a track map for point resolution.
 /// The medoid is the actual GPS trace with minimum total AMD to all other traces.
@@ -57,18 +59,40 @@ pub fn select_medoid(
 
     if use_full_pairwise {
         // Compute AMD for each trace to all others
-        for (i, (_, trace_i)) in traces.iter().enumerate() {
-            let mut total_amd = 0.0;
+        #[cfg(feature = "parallel")]
+        {
+            let (idx, _) = traces
+                .par_iter()
+                .enumerate()
+                .map(|(i, (_, trace_i))| {
+                    let total: f64 = traces
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, (_, trace_j))| average_min_distance(trace_i, trace_j))
+                        .sum();
+                    (i, total)
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, f64::MAX));
+            best_idx = idx;
+        }
 
-            for (j, (_, trace_j)) in traces.iter().enumerate() {
-                if i != j {
-                    total_amd += average_min_distance(trace_i, trace_j);
+        #[cfg(not(feature = "parallel"))]
+        {
+            for (i, (_, trace_i)) in traces.iter().enumerate() {
+                let mut total_amd = 0.0;
+
+                for (j, (_, trace_j)) in traces.iter().enumerate() {
+                    if i != j {
+                        total_amd += average_min_distance(trace_i, trace_j);
+                    }
                 }
-            }
 
-            if total_amd < best_total_amd {
-                best_total_amd = total_amd;
-                best_idx = i;
+                if total_amd < best_total_amd {
+                    best_total_amd = total_amd;
+                    best_idx = i;
+                }
             }
         }
     } else {
