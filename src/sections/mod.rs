@@ -78,8 +78,10 @@ pub use optimized::{
 /// Detection mode for section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DetectionMode {
     /// Lower thresholds, more sections detected
+    #[default]
     Discovery,
     /// Higher thresholds, fewer but more confident sections
     Conservative,
@@ -115,17 +117,13 @@ impl std::str::FromStr for DetectionMode {
     }
 }
 
-impl Default for DetectionMode {
-    fn default() -> Self {
-        DetectionMode::Discovery
-    }
-}
-
 /// Scale name for multi-scale section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ScaleName {
     Short,
+    #[default]
     Medium,
     Long,
     ExtraLong,
@@ -164,12 +162,6 @@ impl std::str::FromStr for ScaleName {
             "optimized" => Ok(ScaleName::Optimized),
             _ => Ok(ScaleName::Medium),
         }
-    }
-}
-
-impl Default for ScaleName {
-    fn default() -> Self {
-        ScaleName::Medium
     }
 }
 
@@ -1167,7 +1159,7 @@ pub fn detect_sections_multiscale_with_progress(
         let ds_lengths: Vec<usize> = downsampled.iter().map(|ds| ds.len()).collect();
 
         // Batch progress: report every 1% or every 100 pairs, whichever is smaller
-        let progress_interval = (pairs.len() / 100).max(1).min(100);
+        let progress_interval = (pairs.len() / 100).clamp(1, 100);
 
         #[cfg(feature = "parallel")]
         let all_overlaps: Vec<FullTrackOverlap> = {
@@ -1213,7 +1205,7 @@ pub fn detect_sections_multiscale_with_progress(
                         }
                     };
                     let prev = counter.fetch_add(1, Ordering::Relaxed);
-                    if prev % progress_interval == 0 {
+                    if prev.is_multiple_of(progress_interval) {
                         // Batch report: advance progress by the interval amount
                         for _ in 0..progress_interval.min(grid_pair_count as usize - prev) {
                             progress.on_progress();

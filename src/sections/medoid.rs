@@ -22,23 +22,23 @@ pub fn select_medoid(
 
     for overlap in &cluster.overlaps {
         // Add track A's overlapping portion
-        if seen.insert(overlap.activity_a.as_str()) {
-            if let Some(track) = track_map.get(overlap.activity_a.as_str()) {
-                let end = overlap.range_a.1.min(track.len());
-                let points = track[overlap.range_a.0..end].to_vec();
-                if !points.is_empty() {
-                    traces.push((&overlap.activity_a, points));
-                }
+        if seen.insert(overlap.activity_a.as_str())
+            && let Some(track) = track_map.get(overlap.activity_a.as_str())
+        {
+            let end = overlap.range_a.1.min(track.len());
+            let points = track[overlap.range_a.0..end].to_vec();
+            if !points.is_empty() {
+                traces.push((&overlap.activity_a, points));
             }
         }
         // Add track B's overlapping portion
-        if seen.insert(overlap.activity_b.as_str()) {
-            if let Some(track) = track_map.get(overlap.activity_b.as_str()) {
-                let end = overlap.range_b.1.min(track.len());
-                let points = track[overlap.range_b.0..end].to_vec();
-                if !points.is_empty() {
-                    traces.push((&overlap.activity_b, points));
-                }
+        if seen.insert(overlap.activity_b.as_str())
+            && let Some(track) = track_map.get(overlap.activity_b.as_str())
+        {
+            let end = overlap.range_b.1.min(track.len());
+            let points = track[overlap.range_b.0..end].to_vec();
+            if !points.is_empty() {
+                traces.push((&overlap.activity_b, points));
             }
         }
     }

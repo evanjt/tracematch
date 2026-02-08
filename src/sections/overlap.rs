@@ -191,9 +191,8 @@ pub fn find_full_track_overlap(
     let threshold_deg_sq = threshold_deg * threshold_deg;
 
     // Adaptive pre-check: skip full scan if provably no overlap
-    match has_any_overlap(track_a, tree_b, threshold_deg_sq) {
-        Some(false) => return None,
-        _ => {} // Some(true) or None → proceed to full scan
+    if let Some(false) = has_any_overlap(track_a, tree_b, threshold_deg_sq) {
+        return None;
     }
 
     let mut best_start_a: Option<usize> = None;

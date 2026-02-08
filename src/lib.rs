@@ -91,8 +91,10 @@ pub use sections::{
 /// a route/section in the same or opposite direction as the reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Direction {
     /// Same direction as reference
+    #[default]
     Same,
     /// Opposite direction to reference
     Reverse,
@@ -145,12 +147,6 @@ impl FromStr for Direction {
             "backward" => Ok(Direction::Backward),
             _ => Ok(Direction::Same), // Defensive fallback for corrupt data
         }
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Same
     }
 }
 

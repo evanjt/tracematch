@@ -507,9 +507,10 @@ fn find_overlap_downsampled(
     let threshold_deg_sq = threshold_deg * threshold_deg;
 
     // Adaptive pre-check: skip full scan if provably no overlap
-    match super::overlap::has_any_overlap(&track_a.downsampled, tree_b, threshold_deg_sq) {
-        Some(false) => return None,
-        _ => {} // Some(true) or None → proceed to full scan
+    if let Some(false) =
+        super::overlap::has_any_overlap(&track_a.downsampled, tree_b, threshold_deg_sq)
+    {
+        return None;
     }
 
     // Track the downsampled indices of the overlap for mapping back
@@ -564,8 +565,9 @@ fn find_overlap_downsampled(
     }
 
     // Check final overlap
-    if overlap_length >= config.min_section_length && overlap_start_ds_a.is_some() {
-        let ds_start_a = overlap_start_ds_a.unwrap();
+    if let Some(ds_start_a) =
+        overlap_start_ds_a.filter(|_| overlap_length >= config.min_section_length)
+    {
         let ds_end_a = overlap_end_ds_a;
 
         // Map downsampled indices back to full-resolution indices
@@ -966,7 +968,7 @@ pub fn split_section_at_index(
             observation_count: section.observation_count,
             average_spread: section.average_spread,
             point_density: vec![], // Need recalculation
-            scale: section.scale.clone(),
+            scale: section.scale,
             is_user_defined: true, // Mark as user-modified
             stability: 0.0,        // Needs recalculation
             version: 1,
@@ -989,7 +991,7 @@ pub fn split_section_at_index(
             observation_count: section.observation_count,
             average_spread: section.average_spread,
             point_density: vec![],
-            scale: section.scale.clone(),
+            scale: section.scale,
             is_user_defined: true,
             stability: 0.0, // Needs recalculation
             version: 1,
