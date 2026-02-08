@@ -70,6 +70,10 @@ pub mod algorithms;
 
 // Frequent sections detection (medoid-based algorithm for smooth polylines)
 pub mod sections;
+
+// Synthetic data generation for stress testing and benchmarking
+#[cfg(feature = "synthetic")]
+pub mod synthetic;
 pub use sections::{
     DetectionStats,
     FrequentSection,
@@ -83,11 +87,25 @@ pub use sections::{
     SplitResult,
     detect_sections_from_tracks,
     detect_sections_multiscale,
-    // New section manipulation functions
+    detect_sections_multiscale_with_progress,
+    detect_sections_optimized,
+    // Progress callback types
+    AtomicProgressTracker,
+    DetectionPhase,
+    DetectionProgressCallback,
+    NoopProgress,
+    // Section manipulation functions
     find_sections_in_route,
     recalculate_section_polyline,
     split_section_at_index,
     split_section_at_point,
+    // Incremental detection
+    incremental::IncrementalResult,
+    incremental::detect_sections_incremental,
+    // Grid-based spatial filtering
+    optimized::GridCell,
+    optimized::compute_grid_cells,
+    optimized::grid_filtered_pairs,
 };
 
 // ============================================================================

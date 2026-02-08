@@ -7,17 +7,21 @@ use crate::geo_utils::{compute_center, haversine_distance};
 use rstar::{PointDistance, RTree};
 use std::collections::HashSet;
 
-/// A detected overlap between two full GPS tracks
+/// A detected overlap between two full GPS tracks.
+/// Uses index ranges into original tracks instead of copying GPS points,
+/// reducing memory from ~48KB to ~100 bytes per overlap (~480x reduction).
 #[derive(Debug, Clone)]
 pub struct FullTrackOverlap {
     pub activity_a: String,
     pub activity_b: String,
-    /// The actual GPS points from track A (for medoid selection)
-    pub points_a: Vec<GpsPoint>,
-    /// The actual GPS points from track B
-    pub points_b: Vec<GpsPoint>,
+    /// Index range into track A's original points (start..end)
+    pub range_a: (usize, usize),
+    /// Index range into track B's original points (start..end)
+    pub range_b: (usize, usize),
     /// Center point for clustering
     pub center: GpsPoint,
+    /// Pre-computed overlap length in meters
+    pub overlap_length: f64,
 }
 
 /// A cluster of overlaps representing the same physical section
@@ -29,7 +33,8 @@ pub struct OverlapCluster {
     pub activity_ids: HashSet<String>,
 }
 
-/// Find overlapping portion between two FULL GPS tracks
+/// Find overlapping portion between two FULL GPS tracks.
+/// Returns index ranges into the original tracks instead of copying points.
 pub fn find_full_track_overlap(
     activity_a: &str,
     track_a: &[GpsPoint],
@@ -106,7 +111,7 @@ pub fn find_full_track_overlap(
         best_end_a = track_a.len();
         best_min_b = current_min_b;
         best_max_b = current_max_b;
-        // best_length not needed after this point
+        best_length = current_length;
     }
 
     // Build result if we found a substantial overlap
@@ -115,25 +120,52 @@ pub fn find_full_track_overlap(
         let b_start = best_min_b;
         let b_end = (best_max_b + 1).min(track_b.len());
 
-        let points_a = track_a[start_a..a_end].to_vec();
-        let points_b = track_b[b_start..b_end].to_vec();
-
-        let center = compute_center(&points_a);
+        let center = compute_center(&track_a[start_a..a_end]);
 
         FullTrackOverlap {
             activity_a: activity_a.to_string(),
             activity_b: activity_b.to_string(),
-            points_a,
-            points_b,
+            range_a: (start_a, a_end),
+            range_b: (b_start, b_end),
             center,
+            overlap_length: best_length,
         }
     })
 }
 
-/// Cluster overlaps that represent the same physical section
+/// Resolve overlap points from original tracks using stored index ranges.
+pub fn resolve_points_a<'a>(
+    overlap: &FullTrackOverlap,
+    tracks: &'a [(&str, &[GpsPoint])],
+) -> &'a [GpsPoint] {
+    for (id, pts) in tracks {
+        if *id == overlap.activity_a {
+            let end = overlap.range_a.1.min(pts.len());
+            return &pts[overlap.range_a.0..end];
+        }
+    }
+    &[]
+}
+
+/// Resolve overlap points from track_map using stored index ranges.
+pub fn resolve_points_a_from_map<'a>(
+    overlap: &FullTrackOverlap,
+    track_map: &'a std::collections::HashMap<&str, &[GpsPoint]>,
+) -> &'a [GpsPoint] {
+    if let Some(pts) = track_map.get(overlap.activity_a.as_str()) {
+        let end = overlap.range_a.1.min(pts.len());
+        &pts[overlap.range_a.0..end]
+    } else {
+        &[]
+    }
+}
+
+/// Cluster overlaps that represent the same physical section.
+/// Requires access to original tracks to resolve points for geometric matching.
 pub fn cluster_overlaps(
     overlaps: Vec<FullTrackOverlap>,
     config: &SectionConfig,
+    tracks: &[(&str, &[GpsPoint])],
 ) -> Vec<OverlapCluster> {
     if overlaps.is_empty() {
         return vec![];
@@ -154,6 +186,9 @@ pub fn cluster_overlaps(
         cluster_activities.insert(overlap.activity_b.clone());
         assigned.insert(i);
 
+        // Resolve points for the seed overlap
+        let seed_points = resolve_points_a(overlap, tracks);
+
         // Find other overlaps that belong to this cluster
         for (j, other) in overlaps.iter().enumerate() {
             if assigned.contains(&j) {
@@ -164,9 +199,67 @@ pub fn cluster_overlaps(
             let center_dist = haversine_distance(&overlap.center, &other.center);
             if center_dist <= config.cluster_tolerance {
                 // Additional check: verify overlaps are geometrically similar
+                let other_points = resolve_points_a(other, tracks);
                 if overlaps_match(
-                    &overlap.points_a,
-                    &other.points_a,
+                    seed_points,
+                    other_points,
+                    config.proximity_threshold,
+                ) {
+                    cluster_overlaps.push(other.clone());
+                    cluster_activities.insert(other.activity_a.clone());
+                    cluster_activities.insert(other.activity_b.clone());
+                    assigned.insert(j);
+                }
+            }
+        }
+
+        clusters.push(OverlapCluster {
+            overlaps: cluster_overlaps,
+            activity_ids: cluster_activities,
+        });
+    }
+
+    clusters
+}
+
+/// Cluster overlaps using a HashMap-based track lookup.
+/// Used by the multiscale path where tracks are stored in a HashMap.
+pub fn cluster_overlaps_with_map(
+    overlaps: Vec<FullTrackOverlap>,
+    config: &SectionConfig,
+    track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
+) -> Vec<OverlapCluster> {
+    if overlaps.is_empty() {
+        return vec![];
+    }
+
+    let mut clusters: Vec<OverlapCluster> = Vec::new();
+    let mut assigned: HashSet<usize> = HashSet::new();
+
+    for (i, overlap) in overlaps.iter().enumerate() {
+        if assigned.contains(&i) {
+            continue;
+        }
+
+        let mut cluster_overlaps = vec![overlap.clone()];
+        let mut cluster_activities: HashSet<String> = HashSet::new();
+        cluster_activities.insert(overlap.activity_a.clone());
+        cluster_activities.insert(overlap.activity_b.clone());
+        assigned.insert(i);
+
+        let seed_points = resolve_points_a_from_map(overlap, track_map);
+
+        for (j, other) in overlaps.iter().enumerate() {
+            if assigned.contains(&j) {
+                continue;
+            }
+
+            let center_dist = haversine_distance(&overlap.center, &other.center);
+            if center_dist <= config.cluster_tolerance {
+                let other_points = resolve_points_a_from_map(other, track_map);
+                if overlaps_match(
+                    seed_points,
+                    other_points,
                     config.proximity_threshold,
                 ) {
                     cluster_overlaps.push(other.clone());
