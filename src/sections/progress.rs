@@ -54,6 +54,12 @@ pub struct AtomicProgressTracker {
     pub total: AtomicU32,
 }
 
+impl Default for AtomicProgressTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtomicProgressTracker {
     pub fn new() -> Self {
         Self {
