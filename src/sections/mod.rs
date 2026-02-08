@@ -35,8 +35,9 @@ pub mod progress;
 mod rtree;
 mod traces;
 
+use crate::geo_utils::{bounds_overlap, compute_bounds};
 use crate::matching::calculate_route_distance;
-use crate::{GpsPoint, RouteGroup};
+use crate::{Bounds, GpsPoint, RouteGroup};
 use log::info;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -64,7 +65,7 @@ pub(crate) use postprocess::{
     split_at_heading_changes, split_folding_sections, split_high_variance_sections,
 };
 pub use rtree::build_rtree;
-pub(crate) use rtree::{IndexedPoint, bounds_overlap_tracks};
+pub(crate) use rtree::IndexedPoint;
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
 
 // Re-export optimized detection functions
@@ -562,6 +563,12 @@ pub fn detect_sections_from_tracks(
             sport_type
         );
 
+        // Pre-compute bounding boxes once per track (avoids O(N²×P) recomputation)
+        let track_bounds: Vec<Bounds> = sport_tracks
+            .iter()
+            .map(|(_, pts)| compute_bounds(pts))
+            .collect();
+
         let rtree_start = std::time::Instant::now();
         #[cfg(feature = "parallel")]
         let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
@@ -599,8 +606,9 @@ pub fn detect_sections_from_tracks(
                 let (id_a, track_a) = sport_tracks[i];
                 let (id_b, track_b) = sport_tracks[j];
 
-                // Quick bounding box check
-                if !bounds_overlap_tracks(track_a, track_b, config.proximity_threshold) {
+                // Quick bounding box check using pre-computed bounds
+                let ref_lat = (track_bounds[i].min_lat + track_bounds[i].max_lat) / 2.0;
+                if !bounds_overlap(&track_bounds[i], &track_bounds[j], config.proximity_threshold, ref_lat) {
                     return None;
                 }
 
@@ -616,8 +624,9 @@ pub fn detect_sections_from_tracks(
                 let (id_a, track_a) = sport_tracks[i];
                 let (id_b, track_b) = sport_tracks[j];
 
-                // Quick bounding box check
-                if !bounds_overlap_tracks(track_a, track_b, config.proximity_threshold) {
+                // Quick bounding box check using pre-computed bounds
+                let ref_lat = (track_bounds[i].min_lat + track_bounds[i].max_lat) / 2.0;
+                if !bounds_overlap(&track_bounds[i], &track_bounds[j], config.proximity_threshold, ref_lat) {
                     return None;
                 }
 
@@ -898,7 +907,7 @@ pub fn detect_sections_multiscale_with_progress(
             continue;
         }
 
-        // Downsample tracks for R-tree building and overlap detection (~10x memory reduction)
+        // Downsample tracks for overlap detection (~10x memory reduction)
         let downsample_target = 100;
         #[cfg(feature = "parallel")]
         let downsampled: Vec<Vec<GpsPoint>> = sport_tracks
@@ -912,37 +921,13 @@ pub fn detect_sections_multiscale_with_progress(
             .map(|(_, pts)| optimized::downsample_track(pts, downsample_target))
             .collect();
 
-        // Build R-trees from DOWNSAMPLED tracks
-        let rtree_start = std::time::Instant::now();
-        #[cfg(feature = "parallel")]
-        let rtrees: Vec<rstar::RTree<IndexedPoint>> = downsampled
-            .par_iter()
-            .map(|ds| {
-                let tree = build_rtree(ds);
-                progress.on_progress();
-                tree
-            })
-            .collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let rtrees: Vec<rstar::RTree<IndexedPoint>> = downsampled
+        // Pre-compute bounding boxes once per track (avoids O(N²×P) recomputation)
+        let ds_bounds: Vec<Bounds> = downsampled
             .iter()
-            .map(|ds| {
-                let tree = build_rtree(ds);
-                progress.on_progress();
-                tree
-            })
+            .map(|ds| compute_bounds(ds))
             .collect();
 
-        info!(
-            "[MultiScale] Built {} R-trees (downsampled to ~{}) for {} in {}ms",
-            rtrees.len(),
-            downsample_target,
-            sport_type,
-            rtree_start.elapsed().as_millis()
-        );
-
-        // Use grid-based spatial filtering to skip geographically distant pairs
+        // Grid filter BEFORE R-tree construction — skip R-trees for unpaired tracks
         #[cfg(feature = "parallel")]
         let track_cells: Vec<std::collections::HashSet<optimized::GridCell>> = downsampled
             .par_iter()
@@ -963,6 +948,71 @@ pub fn detect_sections_multiscale_with_progress(
             pairs.len(),
             exhaustive_pairs,
             sport_type,
+        );
+
+        // Early exit: no candidate pairs means no overlaps possible
+        if pairs.is_empty() {
+            info!("[MultiScale] No candidate pairs for {}, skipping", sport_type);
+            // Report progress for skipped phases
+            for _ in 0..sport_tracks.len() {
+                progress.on_progress();
+            }
+            continue;
+        }
+
+        // Build R-trees only for tracks that appear as j-index in pairs (lazy construction)
+        let rtree_start = std::time::Instant::now();
+        let mut needed_rtrees: HashSet<usize> = HashSet::new();
+        for &(_, j) in &pairs {
+            needed_rtrees.insert(j);
+        }
+
+        let mut rtrees: Vec<Option<rstar::RTree<IndexedPoint>>> = Vec::with_capacity(downsampled.len());
+        for _ in 0..downsampled.len() {
+            rtrees.push(None);
+        }
+
+        // Build only needed R-trees
+        {
+            let needed_indices: Vec<usize> = needed_rtrees.iter().copied().collect();
+            #[cfg(feature = "parallel")]
+            {
+                let built: Vec<(usize, rstar::RTree<IndexedPoint>)> = needed_indices
+                    .into_par_iter()
+                    .map(|idx| {
+                        let tree = build_rtree(&downsampled[idx]);
+                        progress.on_progress();
+                        (idx, tree)
+                    })
+                    .collect();
+                for (idx, tree) in built {
+                    rtrees[idx] = Some(tree);
+                }
+            }
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in needed_indices {
+                    let tree = build_rtree(&downsampled[idx]);
+                    progress.on_progress();
+                    rtrees[idx] = Some(tree);
+                }
+            }
+        }
+
+        // Report progress for skipped R-trees
+        let skipped_rtrees = sport_tracks.len() - needed_rtrees.len();
+        for _ in 0..skipped_rtrees {
+            progress.on_progress();
+        }
+
+        info!(
+            "[MultiScale] Built {} R-trees (of {}, downsampled to ~{}) for {} in {}ms",
+            needed_rtrees.len(),
+            downsampled.len(),
+            downsample_target,
+            sport_type,
+            rtree_start.elapsed().as_millis()
         );
 
         // Find ALL pairwise overlaps ONCE using downsampled tracks
@@ -989,15 +1039,18 @@ pub fn detect_sections_multiscale_with_progress(
                         let (id_b, _) = sport_tracks[j];
                         let ds_a = &downsampled[i];
                         let ds_b = &downsampled[j];
-                        if !bounds_overlap_tracks(ds_a, ds_b, overlap_config.proximity_threshold) {
+                        // Quick bounding box check using pre-computed bounds
+                        let ref_lat = (ds_bounds[i].min_lat + ds_bounds[i].max_lat) / 2.0;
+                        if !bounds_overlap(&ds_bounds[i], &ds_bounds[j], overlap_config.proximity_threshold, ref_lat) {
                             None
                         } else {
+                            let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
                             find_full_track_overlap(
                                 id_a,
                                 ds_a,
                                 id_b,
                                 ds_b,
-                                &rtrees[j],
+                                tree_j,
                                 &overlap_config,
                             )
                             .map(|mut overlap| {
@@ -1041,15 +1094,18 @@ pub fn detect_sections_multiscale_with_progress(
                         let (id_b, _) = sport_tracks[j];
                         let ds_a = &downsampled[i];
                         let ds_b = &downsampled[j];
-                        if !bounds_overlap_tracks(ds_a, ds_b, overlap_config.proximity_threshold) {
+                        // Quick bounding box check using pre-computed bounds
+                        let ref_lat = (ds_bounds[i].min_lat + ds_bounds[i].max_lat) / 2.0;
+                        if !bounds_overlap(&ds_bounds[i], &ds_bounds[j], overlap_config.proximity_threshold, ref_lat) {
                             None
                         } else {
+                            let tree_j = rtrees[j].as_ref().expect("R-tree must exist for j-index");
                             find_full_track_overlap(
                                 id_a,
                                 ds_a,
                                 id_b,
                                 ds_b,
-                                &rtrees[j],
+                                tree_j,
                                 &overlap_config,
                             )
                             .map(|mut overlap| {
@@ -1079,8 +1135,6 @@ pub fn detect_sections_multiscale_with_progress(
                 })
                 .collect()
         };
-        // Report any remaining progress not covered by batch reporting
-        // The progress tracker is atomic and handles over-reporting gracefully
 
         stats.overlaps_found += all_overlaps.len() as u32;
         info!(

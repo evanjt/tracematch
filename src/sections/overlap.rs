@@ -33,6 +33,144 @@ pub struct OverlapCluster {
     pub activity_ids: HashSet<String>,
 }
 
+/// Adaptive hierarchical overlap pre-check.
+///
+/// Uses a two-level segment-based approach to quickly determine if two tracks
+/// could possibly overlap, without scanning all points. Mathematically proven
+/// to have zero false negatives via the triangle inequality.
+///
+/// Returns:
+/// - `Some(true)` if overlap is proven (at least one point is within threshold)
+/// - `Some(false)` if no overlap is proven (all segments provably outside threshold)
+/// - `None` if inconclusive (must fall through to full scan)
+pub(crate) fn has_any_overlap(
+    track_a: &[GpsPoint],
+    tree_b: &RTree<IndexedPoint>,
+    threshold_deg_sq: f64,
+) -> Option<bool> {
+    let n = track_a.len();
+    if n < 2 {
+        return None;
+    }
+
+    let threshold_deg = threshold_deg_sq.sqrt();
+
+    // Level 1: divide track_a into K segments
+    let k = 10.min(n);
+    let seg_size = n / k;
+    if seg_size == 0 {
+        return None;
+    }
+
+    let mut warm_segments: Vec<(usize, usize)> = Vec::new();
+
+    for s in 0..k {
+        let seg_start = s * seg_size;
+        let seg_end = if s == k - 1 { n } else { (s + 1) * seg_size };
+
+        // Compute segment center
+        let center = &track_a[seg_start + (seg_end - seg_start) / 2];
+
+        // Compute segment radius: max distance from center to any point in segment
+        // Using degree-space for consistency with R-tree queries
+        let mut radius_sq: f64 = 0.0;
+        for p in &track_a[seg_start..seg_end] {
+            let dlat = p.latitude - center.latitude;
+            let dlng = p.longitude - center.longitude;
+            let d_sq = dlat * dlat + dlng * dlng;
+            if d_sq > radius_sq {
+                radius_sq = d_sq;
+            }
+        }
+        let radius = radius_sq.sqrt();
+
+        // Query R-tree for nearest neighbor to segment center
+        let query = [center.latitude, center.longitude];
+        if let Some(nearest) = tree_b.nearest_neighbor(&query) {
+            let dist_sq = nearest.distance_2(&query);
+            let dist = dist_sq.sqrt();
+
+            // DIRECT HIT: center itself is within threshold
+            if dist_sq <= threshold_deg_sq {
+                return Some(true);
+            }
+
+            // COLD: proven no overlap in this segment (triangle inequality)
+            // If dist >= threshold + radius, then for ANY point p in segment:
+            //   dist(p, nearest_in_B) >= dist(center, nearest_in_B) - dist(center, p)
+            //                         >= dist - radius >= threshold
+            if dist >= threshold_deg + radius {
+                continue; // Proven cold
+            }
+
+            // WARM: can't rule out overlap
+            warm_segments.push((seg_start, seg_end));
+        }
+    }
+
+    // If no warm segments, all are cold → proven no overlap
+    if warm_segments.is_empty() {
+        return Some(false);
+    }
+
+    // Level 2: subdivide warm segments into 3 sub-segments
+    let mut any_still_warm = false;
+
+    for (seg_start, seg_end) in &warm_segments {
+        let seg_len = seg_end - seg_start;
+        let sub_k = 3.min(seg_len);
+        if sub_k == 0 {
+            any_still_warm = true;
+            continue;
+        }
+        let sub_size = seg_len / sub_k;
+        if sub_size == 0 {
+            any_still_warm = true;
+            continue;
+        }
+
+        for ss in 0..sub_k {
+            let sub_start = seg_start + ss * sub_size;
+            let sub_end = if ss == sub_k - 1 { *seg_end } else { seg_start + (ss + 1) * sub_size };
+
+            let center = &track_a[sub_start + (sub_end - sub_start) / 2];
+
+            let mut radius_sq: f64 = 0.0;
+            for p in &track_a[sub_start..sub_end] {
+                let dlat = p.latitude - center.latitude;
+                let dlng = p.longitude - center.longitude;
+                let d_sq = dlat * dlat + dlng * dlng;
+                if d_sq > radius_sq {
+                    radius_sq = d_sq;
+                }
+            }
+            let radius = radius_sq.sqrt();
+
+            let query = [center.latitude, center.longitude];
+            if let Some(nearest) = tree_b.nearest_neighbor(&query) {
+                let dist_sq = nearest.distance_2(&query);
+                let dist = dist_sq.sqrt();
+
+                if dist_sq <= threshold_deg_sq {
+                    return Some(true);
+                }
+
+                if dist >= threshold_deg + radius {
+                    continue; // Proven cold at sub-segment level
+                }
+
+                any_still_warm = true;
+            }
+        }
+    }
+
+    if !any_still_warm {
+        return Some(false);
+    }
+
+    None // Inconclusive → fall through to full scan
+}
+
 /// Find overlapping portion between two FULL GPS tracks.
 /// Returns index ranges into the original tracks instead of copying points.
 pub fn find_full_track_overlap(
@@ -47,6 +185,12 @@ pub fn find_full_track_overlap(
     // 1 degree ≈ 111km, so 30m ≈ 0.00027 degrees
     let threshold_deg = config.proximity_threshold / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
+
+    // Adaptive pre-check: skip full scan if provably no overlap
+    match has_any_overlap(track_a, tree_b, threshold_deg_sq) {
+        Some(false) => return None,
+        _ => {} // Some(true) or None → proceed to full scan
+    }
 
     let mut best_start_a: Option<usize> = None;
     let mut best_end_a = 0;
