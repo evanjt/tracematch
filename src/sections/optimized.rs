@@ -574,8 +574,7 @@ fn convert_cluster_to_section(
     let activity_traces_for_consensus =
         extract_all_activity_traces(&activity_ids, &representative_polyline, track_map);
 
-    let all_traces: Vec<Vec<GpsPoint>> =
-        activity_traces_for_consensus.values().cloned().collect();
+    let all_traces: Vec<Vec<GpsPoint>> = activity_traces_for_consensus.values().cloned().collect();
 
     let consensus = compute_consensus_polyline(
         &representative_polyline,
@@ -662,26 +661,37 @@ pub fn find_sections_in_route(
         return Vec::new();
     }
 
-    let mut matches = Vec::new();
     let threshold = config.proximity_threshold * 1.5;
 
-    for section in sections {
+    let find_matches_for_section = |section: &FrequentSection| -> Vec<SectionMatch> {
         if section.polyline.is_empty() {
-            continue;
+            return Vec::new();
         }
 
-        // Find ALL places where this section appears in the route
         let all_spans = find_all_section_spans_in_route(route, &section.polyline, threshold);
-        for (start, end, quality, same_dir) in all_spans {
-            matches.push(SectionMatch {
+        all_spans
+            .into_iter()
+            .map(|(start, end, quality, same_dir)| SectionMatch {
                 section_id: section.id.clone(),
                 start_index: start as u64,
                 end_index: end as u64,
                 match_quality: quality,
                 same_direction: same_dir,
-            });
-        }
-    }
+            })
+            .collect()
+    };
+
+    #[cfg(feature = "parallel")]
+    let mut matches: Vec<SectionMatch> = sections
+        .par_iter()
+        .flat_map(find_matches_for_section)
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let mut matches: Vec<SectionMatch> = sections
+        .iter()
+        .flat_map(find_matches_for_section)
+        .collect();
 
     // Sort by start index
     matches.sort_by_key(|m| m.start_index);

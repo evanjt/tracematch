@@ -295,8 +295,7 @@ impl SyntheticScenario {
         let mut expected_sections: Vec<ExpectedSection> = Vec::new();
 
         // Track which activities use each corridor
-        let mut corridor_activity_ids: Vec<Vec<String>> =
-            vec![Vec::new(); self.corridors.len()];
+        let mut corridor_activity_ids: Vec<Vec<String>> = vec![Vec::new(); self.corridors.len()];
 
         for activity_idx in 0..self.activity_count {
             let activity_id = format!("synth_{:04}", activity_idx);
@@ -347,8 +346,11 @@ impl SyntheticScenario {
                     full_track.extend(approach);
 
                     // Add corridor with noise
-                    let noisy_corridor =
-                        add_gps_noise(&corridor_polylines[ci], self.gps_noise_sigma_meters, &mut rng);
+                    let noisy_corridor = add_gps_noise(
+                        &corridor_polylines[ci],
+                        self.gps_noise_sigma_meters,
+                        &mut rng,
+                    );
                     full_track.extend(noisy_corridor);
 
                     // Generate departure from corridor end
@@ -367,12 +369,8 @@ impl SyntheticScenario {
                 // Activity with no corridor: purely random route
                 let random_length: f64 = rng.gen_range(3000.0..15000.0);
                 let random_heading: f64 = rng.gen_range(0.0..(2.0 * PI));
-                full_track = generate_random_segment(
-                    &self.origin,
-                    random_length,
-                    random_heading,
-                    &mut rng,
-                );
+                full_track =
+                    generate_random_segment(&self.origin, random_length, random_heading, &mut rng);
             }
 
             tracks.push((activity_id, full_track));

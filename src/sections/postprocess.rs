@@ -10,6 +10,8 @@ use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
 use log::info;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use rstar::{PointDistance, RTree};
 use std::collections::HashMap;
 
@@ -635,13 +637,10 @@ pub fn merge_nearby_sections(
 
     // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
     #[cfg(feature = "parallel")]
-    let rtrees: Vec<RTree<IndexedPoint>> = {
-        use rayon::prelude::*;
-        sections
-            .par_iter()
-            .map(|s| build_rtree(&s.polyline))
-            .collect()
-    };
+    let rtrees: Vec<RTree<IndexedPoint>> = sections
+        .par_iter()
+        .map(|s| build_rtree(&s.polyline))
+        .collect();
 
     #[cfg(not(feature = "parallel"))]
     let rtrees: Vec<RTree<IndexedPoint>> =
@@ -653,56 +652,69 @@ pub fn merge_nearby_sections(
     // Wide roads can be 30m+, GPS error can add 20m, so use 2x the base threshold
     let merge_threshold = config.proximity_threshold * 2.0;
 
+    // Generate candidate pairs (i, j) where lengths are comparable
+    let mut candidate_pairs: Vec<(usize, usize)> = Vec::new();
     for i in 0..sections.len() {
-        if !keep[i] {
+        for j in (i + 1)..sections.len() {
+            let length_ratio =
+                sections[i].distance_meters / sections[j].distance_meters.max(1.0);
+            if (0.33..=3.0).contains(&length_ratio) {
+                candidate_pairs.push((i, j));
+            }
+        }
+    }
+
+    // Pre-compute containment values for all candidate pairs in parallel
+    // Each pair produces (i, j, forward_containment, reverse_containment)
+    #[cfg(feature = "parallel")]
+    let containment_results: Vec<(usize, usize, f64, f64)> = candidate_pairs
+        .par_iter()
+        .map(|&(i, j)| {
+            let forward = compute_containment(&sections[j].polyline, &rtrees[i], merge_threshold);
+            let reversed_j: Vec<GpsPoint> =
+                sections[j].polyline.iter().rev().cloned().collect();
+            let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
+            (i, j, forward, reverse)
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let containment_results: Vec<(usize, usize, f64, f64)> = candidate_pairs
+        .iter()
+        .map(|&(i, j)| {
+            let forward = compute_containment(&sections[j].polyline, &rtrees[i], merge_threshold);
+            let reversed_j: Vec<GpsPoint> =
+                sections[j].polyline.iter().rev().cloned().collect();
+            let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
+            (i, j, forward, reverse)
+        })
+        .collect();
+
+    // Apply greedy merge decisions sequentially using pre-computed values
+    for (i, j, forward_containment, reverse_containment) in containment_results {
+        if !keep[i] || !keep[j] {
             continue;
         }
 
-        let section_i = &sections[i];
-        let tree_i = &rtrees[i]; // Use pre-computed R-tree (O(1) lookup)
+        let max_containment = forward_containment.max(reverse_containment);
 
-        for j in (i + 1)..sections.len() {
-            if !keep[j] {
-                continue;
-            }
+        if max_containment > 0.4 {
+            keep[j] = false;
 
-            let section_j = &sections[j];
+            let direction = if reverse_containment > forward_containment {
+                "reverse"
+            } else {
+                "same"
+            };
 
-            // Skip if sections are very different lengths (>3x difference)
-            let length_ratio = section_i.distance_meters / section_j.distance_meters.max(1.0);
-            if !(0.33..=3.0).contains(&length_ratio) {
-                continue;
-            }
-
-            // Check forward containment with generous threshold
-            let forward_containment =
-                compute_containment(&section_j.polyline, tree_i, merge_threshold);
-
-            // Check reverse containment
-            let reversed_j: Vec<GpsPoint> = section_j.polyline.iter().rev().cloned().collect();
-            let reverse_containment = compute_containment(&reversed_j, tree_i, merge_threshold);
-
-            let max_containment = forward_containment.max(reverse_containment);
-
-            // Merge if either direction shows overlap (lower threshold since we're using generous distance)
-            if max_containment > 0.4 {
-                keep[j] = false;
-
-                let direction = if reverse_containment > forward_containment {
-                    "reverse"
-                } else {
-                    "same"
-                };
-
-                info!(
-                    "[Sections] Merged nearby {} section {} into {} ({:.0}% overlap @ {}m threshold)",
-                    direction,
-                    section_j.id,
-                    section_i.id,
-                    max_containment * 100.0,
-                    merge_threshold as i32
-                );
-            }
+            info!(
+                "[Sections] Merged nearby {} section {} into {} ({:.0}% overlap @ {}m threshold)",
+                direction,
+                sections[j].id,
+                sections[i].id,
+                max_containment * 100.0,
+                merge_threshold as i32
+            );
         }
     }
 
@@ -1099,13 +1111,10 @@ pub fn remove_overlapping_sections(
 
     // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
     #[cfg(feature = "parallel")]
-    let rtrees: Vec<RTree<IndexedPoint>> = {
-        use rayon::prelude::*;
-        sections
-            .par_iter()
-            .map(|s| build_rtree(&s.polyline))
-            .collect()
-    };
+    let rtrees: Vec<RTree<IndexedPoint>> = sections
+        .par_iter()
+        .map(|s| build_rtree(&s.polyline))
+        .collect();
 
     #[cfg(not(feature = "parallel"))]
     let rtrees: Vec<RTree<IndexedPoint>> =
@@ -1119,69 +1128,80 @@ pub fn remove_overlapping_sections(
 
     let mut keep: Vec<bool> = vec![true; sections.len()];
 
-    // For each section, check if it's mostly contained in a shorter section
-    // If so, the longer section should be removed (or trimmed)
-    for i in 0..sections.len() {
-        if !keep[i] {
+    // Generate all (i, j) pairs for containment checking
+    let all_pairs: Vec<(usize, usize)> = (0..sections.len())
+        .flat_map(|i| ((i + 1)..sections.len()).map(move |j| (i, j)))
+        .collect();
+
+    // Pre-compute mutual containment for all pairs in parallel
+    // Each produces (i, j, j_in_i, i_in_j)
+    #[cfg(feature = "parallel")]
+    let containment_results: Vec<(usize, usize, f64, f64)> = all_pairs
+        .par_iter()
+        .map(|&(i, j)| {
+            let j_in_i =
+                compute_containment(&sections[j].polyline, &rtrees[i], config.proximity_threshold);
+            let i_in_j =
+                compute_containment(&sections[i].polyline, &rtrees[j], config.proximity_threshold);
+            (i, j, j_in_i, i_in_j)
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let containment_results: Vec<(usize, usize, f64, f64)> = all_pairs
+        .iter()
+        .map(|&(i, j)| {
+            let j_in_i =
+                compute_containment(&sections[j].polyline, &rtrees[i], config.proximity_threshold);
+            let i_in_j =
+                compute_containment(&sections[i].polyline, &rtrees[j], config.proximity_threshold);
+            (i, j, j_in_i, i_in_j)
+        })
+        .collect();
+
+    // Apply greedy removal decisions sequentially using pre-computed values
+    for (i, j, j_in_i, i_in_j) in containment_results {
+        if !keep[i] || !keep[j] {
             continue;
         }
 
-        let section_i = &sections[i];
-        let tree_i = &rtrees[i]; // Use pre-computed R-tree (O(1) lookup)
-
-        for j in (i + 1)..sections.len() {
-            if !keep[j] {
-                continue;
-            }
-
-            let section_j = &sections[j];
-            let tree_j = &rtrees[j]; // Use pre-computed R-tree (O(1) lookup)
-
-            // Check mutual containment
-            let j_in_i =
-                compute_containment(&section_j.polyline, tree_i, config.proximity_threshold);
-            let i_in_j =
-                compute_containment(&section_i.polyline, tree_j, config.proximity_threshold);
-
-            // If j is largely contained in i (j is the longer one since we sorted by length)
-            // j should be removed because i is the more specific section
-            // BUT: Don't remove j if it's a loop!
-            if j_in_i > 0.6 && !is_loop[j] {
-                info!(
-                    "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
-                    section_j.id,
-                    section_j.distance_meters as u32,
-                    (j_in_i * 100.0) as u32,
-                    section_i.id,
-                    section_i.distance_meters as u32
-                );
-                keep[j] = false;
-            } else if i_in_j > 0.8 && !is_loop[i] {
-                // If i is almost entirely contained in j, remove i (the smaller one)
-                // BUT: Don't remove i if it's a loop!
-                info!(
-                    "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
-                    section_i.id,
-                    section_i.distance_meters as u32,
-                    (i_in_j * 100.0) as u32,
-                    section_j.id,
-                    section_j.distance_meters as u32
-                );
-                keep[i] = false;
-                break; // Stop checking j's against removed i
-            } else if j_in_i > 0.4 && i_in_j > 0.4 && !is_loop[i] && !is_loop[j] {
-                // Significant mutual overlap - they're essentially the same
-                // Keep the shorter one (i, since sorted by length)
-                // BUT: Don't remove either if they're loops!
-                info!(
-                    "[Sections] Removing {} due to mutual overlap with {} ({}% vs {}%)",
-                    section_j.id,
-                    section_i.id,
-                    (j_in_i * 100.0) as u32,
-                    (i_in_j * 100.0) as u32
-                );
-                keep[j] = false;
-            }
+        // If j is largely contained in i (j is the longer one since we sorted by length)
+        // j should be removed because i is the more specific section
+        // BUT: Don't remove j if it's a loop!
+        if j_in_i > 0.6 && !is_loop[j] {
+            info!(
+                "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
+                sections[j].id,
+                sections[j].distance_meters as u32,
+                (j_in_i * 100.0) as u32,
+                sections[i].id,
+                sections[i].distance_meters as u32
+            );
+            keep[j] = false;
+        } else if i_in_j > 0.8 && !is_loop[i] {
+            // If i is almost entirely contained in j, remove i (the smaller one)
+            // BUT: Don't remove i if it's a loop!
+            info!(
+                "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
+                sections[i].id,
+                sections[i].distance_meters as u32,
+                (i_in_j * 100.0) as u32,
+                sections[j].id,
+                sections[j].distance_meters as u32
+            );
+            keep[i] = false;
+        } else if j_in_i > 0.4 && i_in_j > 0.4 && !is_loop[i] && !is_loop[j] {
+            // Significant mutual overlap - they're essentially the same
+            // Keep the shorter one (i, since sorted by length)
+            // BUT: Don't remove either if they're loops!
+            info!(
+                "[Sections] Removing {} due to mutual overlap with {} ({}% vs {}%)",
+                sections[j].id,
+                sections[i].id,
+                (j_in_i * 100.0) as u32,
+                (i_in_j * 100.0) as u32
+            );
+            keep[j] = false;
         }
     }
 
@@ -1414,8 +1434,7 @@ fn split_section_by_density(
                     {
                         overlap_count += 1;
                         if let Some(prev) = last_overlap_point {
-                            overlap_distance +=
-                                crate::geo_utils::haversine_distance(prev, point);
+                            overlap_distance += crate::geo_utils::haversine_distance(prev, point);
                         }
                         last_overlap_point = Some(point);
                     } else {

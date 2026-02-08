@@ -12,13 +12,18 @@ use std::time::Instant;
 
 use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
 use tracematch::{
-    GpsPoint, NoopProgress, SectionConfig,
-    compute_grid_cells, detect_sections_incremental, detect_sections_multiscale,
-    grid_filtered_pairs,
+    GpsPoint, NoopProgress, SectionConfig, compute_grid_cells, detect_sections_incremental,
+    detect_sections_multiscale, grid_filtered_pairs,
 };
 
 /// Create a simple linear track from point A to point B with `n` points.
-fn make_track(start_lat: f64, start_lng: f64, end_lat: f64, end_lng: f64, n: usize) -> Vec<GpsPoint> {
+fn make_track(
+    start_lat: f64,
+    start_lng: f64,
+    end_lat: f64,
+    end_lng: f64,
+    n: usize,
+) -> Vec<GpsPoint> {
     (0..n)
         .map(|i| {
             let t = i as f64 / (n - 1) as f64;
@@ -89,7 +94,10 @@ fn test_grid_filtering_reduces_pairs_across_cities() {
     println!("  Activities:        {} (20 per city × 3 cities)", n);
     println!("  Exhaustive pairs:  {}", exhaustive_pairs);
     println!("  Grid-filtered:     {}", filtered_count);
-    println!("  Within-city pairs: {} (theoretical minimum)", within_city_pairs);
+    println!(
+        "  Within-city pairs: {} (theoretical minimum)",
+        within_city_pairs
+    );
     println!("  Pairs eliminated:  {:.1}%", reduction_pct);
     println!(
         "  Speedup factor:    {:.1}x",
@@ -172,24 +180,29 @@ fn test_grid_filtering_scales_with_geographic_spread() {
                 let noise = i as f64 * 0.001;
                 tracks.push((
                     format!("city{}_{}", city, i),
-                    make_track(base_lat + noise, base_lng, base_lat + 0.03 + noise, base_lng + 0.03, 200),
+                    make_track(
+                        base_lat + noise,
+                        base_lng,
+                        base_lat + 0.03 + noise,
+                        base_lng + 0.03,
+                        200,
+                    ),
                 ));
             }
         }
 
         let n = tracks.len();
         let exhaustive = n * (n - 1) / 2;
-        let track_cells: Vec<_> = tracks.iter().map(|(_, pts)| compute_grid_cells(pts)).collect();
+        let track_cells: Vec<_> = tracks
+            .iter()
+            .map(|(_, pts)| compute_grid_cells(pts))
+            .collect();
         let filtered = grid_filtered_pairs(&track_cells).len();
         let reduction = (1.0 - filtered as f64 / exhaustive as f64) * 100.0;
 
         println!(
             "{:>10} {:>12} {:>12} {:>12} {:>9.1}%",
-            num_cities,
-            n,
-            exhaustive,
-            filtered,
-            reduction
+            num_cities, n, exhaustive, filtered, reduction
         );
     }
 
@@ -202,13 +215,22 @@ fn test_grid_filtering_scales_with_geographic_spread() {
             let noise = i as f64 * 0.001;
             tracks_8.push((
                 format!("c{}_{}", city, i),
-                make_track(base_lat + noise, base_lng, base_lat + 0.03 + noise, base_lng + 0.03, 200),
+                make_track(
+                    base_lat + noise,
+                    base_lng,
+                    base_lat + 0.03 + noise,
+                    base_lng + 0.03,
+                    200,
+                ),
             ));
         }
     }
     let n8 = tracks_8.len();
     let exhaustive_8 = n8 * (n8 - 1) / 2;
-    let cells_8: Vec<_> = tracks_8.iter().map(|(_, pts)| compute_grid_cells(pts)).collect();
+    let cells_8: Vec<_> = tracks_8
+        .iter()
+        .map(|(_, pts)| compute_grid_cells(pts))
+        .collect();
     let filtered_8 = grid_filtered_pairs(&cells_8).len();
 
     assert!(
@@ -234,12 +256,8 @@ fn test_incremental_faster_than_full_redetection() {
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
 
     let start_full = Instant::now();
-    let full_result = detect_sections_multiscale(
-        &dataset.tracks,
-        &dataset.sport_types,
-        &groups,
-        &config,
-    );
+    let full_result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
     let full_time = start_full.elapsed();
 
     let existing_sections = &full_result.sections;
@@ -307,12 +325,8 @@ fn test_incremental_faster_than_full_redetection() {
         .collect();
 
     let start_redo = Instant::now();
-    let _redo_result = detect_sections_multiscale(
-        &all_tracks,
-        &all_sport_types,
-        &all_groups,
-        &config,
-    );
+    let _redo_result =
+        detect_sections_multiscale(&all_tracks, &all_sport_types, &all_groups, &config);
     let redo_time = start_redo.elapsed();
 
     let speedup = redo_time.as_micros() as f64 / incr_time.as_micros().max(1) as f64;
@@ -327,9 +341,18 @@ fn test_incremental_faster_than_full_redetection() {
     println!("  Full re-detect (35):  {:?}", redo_time);
     println!("  Speedup:              {:.1}x faster", speedup);
     println!("  ---");
-    println!("  Matched activities:   {}", incr_result.matched_activity_ids.len());
-    println!("  Unmatched activities: {}", incr_result.unmatched_activity_ids.len());
-    println!("  Updated sections:     {}", incr_result.updated_sections.len());
+    println!(
+        "  Matched activities:   {}",
+        incr_result.matched_activity_ids.len()
+    );
+    println!(
+        "  Unmatched activities: {}",
+        incr_result.unmatched_activity_ids.len()
+    );
+    println!(
+        "  Updated sections:     {}",
+        incr_result.updated_sections.len()
+    );
     println!("  New sections:         {}", incr_result.new_sections.len());
 
     // Incremental should be faster than full re-detection
@@ -351,12 +374,8 @@ fn test_incremental_matches_activities_to_existing_sections() {
     let groups = dataset.route_groups();
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
 
-    let full_result = detect_sections_multiscale(
-        &dataset.tracks,
-        &dataset.sport_types,
-        &groups,
-        &config,
-    );
+    let full_result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
 
     let existing_sections = &full_result.sections;
     if existing_sections.is_empty() {
@@ -404,14 +423,21 @@ fn test_incremental_matches_activities_to_existing_sections() {
     println!("=== Incremental Correctness ===");
     println!("  Existing sections: {}", existing_sections.len());
     println!("  New activities:    {}", new_tracks.len());
-    println!("  Matched:           {}", incr_result.matched_activity_ids.len());
-    println!("  Unmatched:         {}", incr_result.unmatched_activity_ids.len());
+    println!(
+        "  Matched:           {}",
+        incr_result.matched_activity_ids.len()
+    );
+    println!(
+        "  Unmatched:         {}",
+        incr_result.unmatched_activity_ids.len()
+    );
 
     // Verify matched activities appear in updated sections
     for matched_id in &incr_result.matched_activity_ids {
-        let found_in_section = incr_result.updated_sections.iter().any(|s| {
-            s.activity_ids.contains(matched_id)
-        });
+        let found_in_section = incr_result
+            .updated_sections
+            .iter()
+            .any(|s| s.activity_ids.contains(matched_id));
         assert!(
             found_in_section,
             "Matched activity {} should appear in an updated section",
@@ -435,8 +461,8 @@ fn test_incremental_matches_activities_to_existing_sections() {
     println!("  Modified sections: {}", modified_sections.len());
 
     // All new activities should be classified
-    let total_processed = incr_result.matched_activity_ids.len()
-        + incr_result.unmatched_activity_ids.len();
+    let total_processed =
+        incr_result.matched_activity_ids.len() + incr_result.unmatched_activity_ids.len();
     assert_eq!(
         total_processed,
         new_tracks.len(),
@@ -483,12 +509,8 @@ fn test_incremental_zero_new_activities() {
     let config = SectionConfig::default();
     let groups = dataset.route_groups();
 
-    let full_result = detect_sections_multiscale(
-        &dataset.tracks,
-        &dataset.sport_types,
-        &groups,
-        &config,
-    );
+    let full_result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
 
     let empty_tracks: Vec<(String, Vec<GpsPoint>)> = vec![];
 
@@ -503,7 +525,10 @@ fn test_incremental_zero_new_activities() {
     );
 
     println!("=== Incremental: Zero New Activities ===");
-    println!("  Existing sections preserved: {}", result.updated_sections.len());
+    println!(
+        "  Existing sections preserved: {}",
+        result.updated_sections.len()
+    );
 
     assert_eq!(result.updated_sections.len(), full_result.sections.len());
     assert_eq!(result.matched_activity_ids.len(), 0);
@@ -536,12 +561,8 @@ fn test_incremental_operation_count_advantage() {
         let dataset = scenario.generate();
         let groups = dataset.route_groups();
 
-        let full_result = detect_sections_multiscale(
-            &dataset.tracks,
-            &dataset.sport_types,
-            &groups,
-            &config,
-        );
+        let full_result =
+            detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
 
         let sections_count = full_result.sections.len();
         let total = existing_count + new_count;
@@ -557,7 +578,9 @@ fn test_incremental_operation_count_advantage() {
 
     // Analytical projections for larger counts (section count scales ~linearly with activities)
     // Based on observed: 50 activities → ~40 sections, 100 → ~80 sections
-    for (existing_count, new_count, est_sections) in [(500, 50, 100), (1000, 100, 150), (5000, 500, 300)] {
+    for (existing_count, new_count, est_sections) in
+        [(500, 50, 100), (1000, 100, 150), (5000, 500, 300)]
+    {
         let total = existing_count + new_count;
         let full_pairs = total * (total - 1) / 2;
         let incr_ops = new_count * est_sections + new_count * (new_count - 1) / 2;
@@ -623,17 +646,17 @@ fn test_realistic_chaos_scenario() {
 
     // Run detection
     let start = Instant::now();
-    let result = detect_sections_multiscale(
-        &dataset.tracks,
-        &dataset.sport_types,
-        &groups,
-        &config,
-    );
+    let result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
     let detect_time = start.elapsed();
 
     println!("=== Realistic Chaos: 200 Activities, ~12% Corridor ===");
     println!("  Total activities:     {}", n);
-    println!("  Corridor users:       {} ({:.0}%)", corridor_users, corridor_users as f64 / n as f64 * 100.0);
+    println!(
+        "  Corridor users:       {} ({:.0}%)",
+        corridor_users,
+        corridor_users as f64 / n as f64 * 100.0
+    );
     println!("  Random activities:    {}", n - corridor_users);
     println!("  ---");
     println!("  Exhaustive pairs:     {}", exhaustive);
@@ -669,12 +692,8 @@ fn test_incremental_timing_comparison() {
     let groups = dataset.route_groups();
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
 
-    let full_result = detect_sections_multiscale(
-        &dataset.tracks,
-        &dataset.sport_types,
-        &groups,
-        &config,
-    );
+    let full_result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
 
     if full_result.sections.is_empty() {
         println!("Skipping: no sections detected");
@@ -740,12 +759,7 @@ fn test_incremental_timing_comparison() {
 
     // Time full re-detection
     let start_full = Instant::now();
-    let _full = detect_sections_multiscale(
-        &all_tracks,
-        &all_sport_types,
-        &all_groups,
-        &config,
-    );
+    let _full = detect_sections_multiscale(&all_tracks, &all_sport_types, &all_groups, &config);
     let full_time = start_full.elapsed();
 
     let speedup = full_time.as_micros() as f64 / incr_time.as_micros().max(1) as f64;
@@ -758,8 +772,14 @@ fn test_incremental_timing_comparison() {
     println!("  Full re-detect (55): {:?}", full_time);
     println!("  Speedup:             {:.1}x", speedup);
     println!("  ---");
-    println!("  Est. mobile incremental: {:?}", incr_time.mul_f64(mobile_factor));
-    println!("  Est. mobile full:        {:?}", full_time.mul_f64(mobile_factor));
+    println!(
+        "  Est. mobile incremental: {:?}",
+        incr_time.mul_f64(mobile_factor)
+    );
+    println!(
+        "  Est. mobile full:        {:?}",
+        full_time.mul_f64(mobile_factor)
+    );
 
     assert!(
         incr_time < full_time,

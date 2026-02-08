@@ -11,6 +11,8 @@
 
 use super::rtree::{IndexedPoint, build_rtree};
 use crate::GpsPoint;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use rstar::{PointDistance, RTree};
 
 /// Result of consensus computation including confidence metrics
@@ -45,6 +47,11 @@ pub fn compute_consensus_polyline(
     }
 
     // Build R-trees for all traces for efficient spatial queries
+    #[cfg(feature = "parallel")]
+    let trace_trees: Vec<RTree<IndexedPoint>> =
+        all_traces.par_iter().map(|trace| build_rtree(trace)).collect();
+
+    #[cfg(not(feature = "parallel"))]
     let trace_trees: Vec<RTree<IndexedPoint>> =
         all_traces.iter().map(|trace| build_rtree(trace)).collect();
 
@@ -52,15 +59,18 @@ pub fn compute_consensus_polyline(
     let threshold_deg_sq = threshold_deg * threshold_deg;
     let epsilon = 0.000001; // Small constant to avoid division by zero
 
-    let mut consensus_points = Vec::with_capacity(reference.len());
-    let mut point_density = Vec::with_capacity(reference.len());
-    let mut total_spread = 0.0;
-    let mut total_point_observations = 0u32;
+    // Per-point result for map-reduce consensus computation
+    struct PointResult {
+        point: GpsPoint,
+        density: u32,
+        spread_sum: f64,
+        observations: u32,
+    }
 
-    for ref_point in reference {
+    // Compute consensus for each reference point (parallel if feature enabled)
+    let compute_point = |ref_point: &GpsPoint| -> PointResult {
         let ref_coords = [ref_point.latitude, ref_point.longitude];
 
-        // Collect nearby points from all traces
         let mut weighted_lat = 0.0;
         let mut weighted_lng = 0.0;
         let mut weighted_elev = 0.0;
@@ -74,11 +84,9 @@ pub fn compute_consensus_polyline(
                 let dist_sq = nearest.distance_2(&ref_coords);
 
                 if dist_sq <= threshold_deg_sq {
-                    // Point is within threshold - include in weighted average
                     let trace = &all_traces[trace_idx];
                     let trace_point = &trace[nearest.idx];
 
-                    // Weight inversely proportional to distance
                     let dist_deg = dist_sq.sqrt();
                     let dist_meters = dist_deg * 111_000.0;
                     let weight = 1.0 / (dist_meters + epsilon);
@@ -89,7 +97,6 @@ pub fn compute_consensus_polyline(
                     nearby_distances.push(dist_meters);
                     this_point_observations += 1;
 
-                    // Track elevation if available
                     if let Some(elev) = trace_point.elevation {
                         weighted_elev += elev * weight;
                         elev_weight += weight;
@@ -98,11 +105,7 @@ pub fn compute_consensus_polyline(
             }
         }
 
-        // Track per-point density
-        point_density.push(this_point_observations);
-
         if total_weight > 0.0 {
-            // Compute weighted centroid
             let consensus_lat = weighted_lat / total_weight;
             let consensus_lng = weighted_lng / total_weight;
             let consensus_elev = if elev_weight > 0.0 {
@@ -111,23 +114,49 @@ pub fn compute_consensus_polyline(
                 ref_point.elevation
             };
 
-            consensus_points.push(GpsPoint {
-                latitude: consensus_lat,
-                longitude: consensus_lng,
-                elevation: consensus_elev,
-            });
+            let spread_sum = if !nearby_distances.is_empty() {
+                nearby_distances.iter().sum::<f64>() / nearby_distances.len() as f64
+            } else {
+                0.0
+            };
 
-            // Track spread (average distance of observations from consensus)
-            if !nearby_distances.is_empty() {
-                let avg_dist: f64 =
-                    nearby_distances.iter().sum::<f64>() / nearby_distances.len() as f64;
-                total_spread += avg_dist;
-                total_point_observations += nearby_distances.len() as u32;
+            PointResult {
+                point: GpsPoint {
+                    latitude: consensus_lat,
+                    longitude: consensus_lng,
+                    elevation: consensus_elev,
+                },
+                density: this_point_observations,
+                spread_sum,
+                observations: nearby_distances.len() as u32,
             }
         } else {
-            // No nearby points - keep reference point
-            consensus_points.push(*ref_point);
+            PointResult {
+                point: *ref_point,
+                density: 0,
+                spread_sum: 0.0,
+                observations: 0,
+            }
         }
+    };
+
+    #[cfg(feature = "parallel")]
+    let point_results: Vec<PointResult> = reference.par_iter().map(compute_point).collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let point_results: Vec<PointResult> = reference.iter().map(compute_point).collect();
+
+    // Reduce results
+    let mut consensus_points = Vec::with_capacity(reference.len());
+    let mut point_density = Vec::with_capacity(reference.len());
+    let mut total_spread = 0.0;
+    let mut total_point_observations = 0u32;
+
+    for result in point_results {
+        consensus_points.push(result.point);
+        point_density.push(result.density);
+        total_spread += result.spread_sum;
+        total_point_observations += result.observations;
     }
 
     // Compute overall metrics
