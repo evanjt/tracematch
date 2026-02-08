@@ -656,8 +656,7 @@ pub fn merge_nearby_sections(
     let mut candidate_pairs: Vec<(usize, usize)> = Vec::new();
     for i in 0..sections.len() {
         for j in (i + 1)..sections.len() {
-            let length_ratio =
-                sections[i].distance_meters / sections[j].distance_meters.max(1.0);
+            let length_ratio = sections[i].distance_meters / sections[j].distance_meters.max(1.0);
             if (0.33..=3.0).contains(&length_ratio) {
                 candidate_pairs.push((i, j));
             }
@@ -675,8 +674,7 @@ pub fn merge_nearby_sections(
             if forward > 0.4 {
                 return (i, j, forward, 0.0);
             }
-            let reversed_j: Vec<GpsPoint> =
-                sections[j].polyline.iter().rev().cloned().collect();
+            let reversed_j: Vec<GpsPoint> = sections[j].polyline.iter().rev().cloned().collect();
             let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
             (i, j, forward, reverse)
         })
@@ -690,8 +688,7 @@ pub fn merge_nearby_sections(
             if forward > 0.4 {
                 return (i, j, forward, 0.0);
             }
-            let reversed_j: Vec<GpsPoint> =
-                sections[j].polyline.iter().rev().cloned().collect();
+            let reversed_j: Vec<GpsPoint> = sections[j].polyline.iter().rev().cloned().collect();
             let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
             (i, j, forward, reverse)
         })
@@ -1146,10 +1143,16 @@ pub fn remove_overlapping_sections(
     let containment_results: Vec<(usize, usize, f64, f64)> = all_pairs
         .par_iter()
         .map(|&(i, j)| {
-            let j_in_i =
-                compute_containment(&sections[j].polyline, &rtrees[i], config.proximity_threshold);
-            let i_in_j =
-                compute_containment(&sections[i].polyline, &rtrees[j], config.proximity_threshold);
+            let j_in_i = compute_containment(
+                &sections[j].polyline,
+                &rtrees[i],
+                config.proximity_threshold,
+            );
+            let i_in_j = compute_containment(
+                &sections[i].polyline,
+                &rtrees[j],
+                config.proximity_threshold,
+            );
             (i, j, j_in_i, i_in_j)
         })
         .collect();
@@ -1158,10 +1161,16 @@ pub fn remove_overlapping_sections(
     let containment_results: Vec<(usize, usize, f64, f64)> = all_pairs
         .iter()
         .map(|&(i, j)| {
-            let j_in_i =
-                compute_containment(&sections[j].polyline, &rtrees[i], config.proximity_threshold);
-            let i_in_j =
-                compute_containment(&sections[i].polyline, &rtrees[j], config.proximity_threshold);
+            let j_in_i = compute_containment(
+                &sections[j].polyline,
+                &rtrees[i],
+                config.proximity_threshold,
+            );
+            let i_in_j = compute_containment(
+                &sections[i].polyline,
+                &rtrees[j],
+                config.proximity_threshold,
+            );
             (i, j, j_in_i, i_in_j)
         })
         .collect();

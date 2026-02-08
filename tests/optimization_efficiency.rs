@@ -10,13 +10,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
-use tracematch::{
-    GpsPoint, SectionConfig, detect_sections_incremental,
-    detect_sections_multiscale,
-};
 use tracematch::sections::NoopProgress;
 use tracematch::sections::optimized::{compute_grid_cells, grid_filtered_pairs};
+use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
+use tracematch::{
+    GpsPoint, SectionConfig, detect_sections_incremental, detect_sections_multiscale,
+};
 
 /// Create a simple linear track from point A to point B with `n` points.
 fn make_track(
