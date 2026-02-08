@@ -76,8 +76,8 @@ pub fn compute_consensus_polyline(
         let mut weighted_elev = 0.0;
         let mut total_weight = 0.0;
         let mut elev_weight = 0.0;
-        let mut nearby_distances: Vec<f64> = Vec::new();
-        let mut this_point_observations = 0u32;
+        let mut distance_sum = 0.0;
+        let mut observation_count = 0u32;
 
         for (trace_idx, tree) in trace_trees.iter().enumerate() {
             if let Some(nearest) = tree.nearest_neighbor(&ref_coords) {
@@ -94,8 +94,8 @@ pub fn compute_consensus_polyline(
                     weighted_lat += trace_point.latitude * weight;
                     weighted_lng += trace_point.longitude * weight;
                     total_weight += weight;
-                    nearby_distances.push(dist_meters);
-                    this_point_observations += 1;
+                    distance_sum += dist_meters;
+                    observation_count += 1;
 
                     if let Some(elev) = trace_point.elevation {
                         weighted_elev += elev * weight;
@@ -114,8 +114,8 @@ pub fn compute_consensus_polyline(
                 ref_point.elevation
             };
 
-            let spread_sum = if !nearby_distances.is_empty() {
-                nearby_distances.iter().sum::<f64>() / nearby_distances.len() as f64
+            let spread_sum = if observation_count > 0 {
+                distance_sum / observation_count as f64
             } else {
                 0.0
             };
@@ -126,9 +126,9 @@ pub fn compute_consensus_polyline(
                     longitude: consensus_lng,
                     elevation: consensus_elev,
                 },
-                density: this_point_observations,
+                density: observation_count,
                 spread_sum,
-                observations: nearby_distances.len() as u32,
+                observations: observation_count,
             }
         } else {
             PointResult {

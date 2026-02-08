@@ -666,11 +666,15 @@ pub fn merge_nearby_sections(
 
     // Pre-compute containment values for all candidate pairs in parallel
     // Each pair produces (i, j, forward_containment, reverse_containment)
+    // Optimization: only compute reverse containment if forward is below threshold
     #[cfg(feature = "parallel")]
     let containment_results: Vec<(usize, usize, f64, f64)> = candidate_pairs
         .par_iter()
         .map(|&(i, j)| {
             let forward = compute_containment(&sections[j].polyline, &rtrees[i], merge_threshold);
+            if forward > 0.4 {
+                return (i, j, forward, 0.0);
+            }
             let reversed_j: Vec<GpsPoint> =
                 sections[j].polyline.iter().rev().cloned().collect();
             let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
@@ -683,6 +687,9 @@ pub fn merge_nearby_sections(
         .iter()
         .map(|&(i, j)| {
             let forward = compute_containment(&sections[j].polyline, &rtrees[i], merge_threshold);
+            if forward > 0.4 {
+                return (i, j, forward, 0.0);
+            }
             let reversed_j: Vec<GpsPoint> =
                 sections[j].polyline.iter().rev().cloned().collect();
             let reverse = compute_containment(&reversed_j, &rtrees[i], merge_threshold);
@@ -1471,12 +1478,11 @@ fn split_section_by_density(
                 average_spread: section.average_spread,
                 point_density: split_density,
                 scale: section.scale.clone(),
-                // Inherit evolution fields from parent section
-                version: section.version,
                 is_user_defined: section.is_user_defined,
+                stability: 0.0, // Needs recalculation
+                version: 1,
+                updated_at: None,
                 created_at: section.created_at.clone(),
-                updated_at: section.updated_at.clone(),
-                stability: section.stability,
             };
 
             info!(

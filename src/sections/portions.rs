@@ -3,7 +3,7 @@
 use super::overlap::OverlapCluster;
 use super::rtree::{IndexedPoint, build_rtree};
 use super::{SectionConfig, SectionPortion};
-use crate::GpsPoint;
+use crate::{Direction, GpsPoint};
 use crate::matching::calculate_route_distance;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -71,7 +71,7 @@ fn find_all_track_portions(
     track: &[GpsPoint],
     reference: &[GpsPoint],
     threshold: f64,
-) -> Vec<(usize, usize, String)> {
+) -> Vec<(usize, usize, Direction)> {
     if track.is_empty() || reference.is_empty() {
         return Vec::new();
     }
@@ -141,7 +141,7 @@ fn find_all_track_portions(
     let min_distance = ref_length * 0.5;
 
     // Collect all qualifying segments with their directions
-    let mut results: Vec<(usize, usize, String)> = Vec::new();
+    let mut results: Vec<(usize, usize, Direction)> = Vec::new();
 
     for segment in &segments {
         if segment.distance >= min_distance {
@@ -166,9 +166,9 @@ fn detect_direction_robust(
     track_portion: &[GpsPoint],
     reference: &[GpsPoint],
     ref_tree: &RTree<IndexedPoint>,
-) -> String {
+) -> Direction {
     if track_portion.len() < 3 || reference.len() < 3 {
-        return "same".to_string();
+        return Direction::Same;
     }
 
     // Sample 5 points along the track portion
@@ -188,7 +188,7 @@ fn detect_direction_robust(
     }
 
     if ref_indices.len() < 2 {
-        return "same".to_string();
+        return Direction::Same;
     }
 
     // Count how many times consecutive samples go forward vs backward on the reference
@@ -208,8 +208,8 @@ fn detect_direction_robust(
     }
 
     if backward_count > forward_count {
-        "reverse".to_string()
+        Direction::Reverse
     } else {
-        "same".to_string()
+        Direction::Same
     }
 }
