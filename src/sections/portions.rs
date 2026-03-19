@@ -1,8 +1,9 @@
 //! Activity portion computation for pace comparison.
 
 use super::overlap::OverlapCluster;
-use super::rtree::{IndexedPoint, build_rtree};
+use super::rtree::{build_rtree, IndexedPoint};
 use super::{SectionConfig, SectionPortion};
+use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint};
 #[cfg(feature = "parallel")]
@@ -134,14 +135,16 @@ fn find_all_track_portions(
         return Vec::new();
     }
 
-    // Filter segments: must be at least 50% of section length
     let min_distance = ref_length * 0.5;
-
-    // Collect all qualifying segments with their directions
     let mut results: Vec<(usize, usize, Direction)> = Vec::new();
 
     for segment in &segments {
-        if segment.distance >= min_distance {
+        // Try to split into individual laps (handles out-and-back, loops)
+        let laps = split_segment_into_laps(track, segment, reference, &ref_tree, ref_length);
+        if !laps.is_empty() {
+            results.extend(laps);
+        } else if segment.distance >= min_distance {
+            // Fallback: single traversal (original behavior)
             let direction = detect_direction_robust(
                 &track[segment.start_idx..segment.end_idx],
                 reference,
@@ -208,5 +211,420 @@ fn detect_direction_robust(
         Direction::Reverse
     } else {
         Direction::Same
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lap splitting: detect individual passes within a contiguous overlap segment
+// ---------------------------------------------------------------------------
+
+/// Apply a 5-point moving median to smooth a sequence of reference indices.
+fn moving_median(values: &[usize], window: usize) -> Vec<usize> {
+    let half = window / 2;
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let start = i.saturating_sub(half);
+            let end = (i + half + 1).min(values.len());
+            let mut buf: Vec<usize> = values[start..end].to_vec();
+            buf.sort_unstable();
+            buf[buf.len() / 2]
+        })
+        .collect()
+}
+
+/// Split a contiguous overlap segment into individual laps.
+/// Handles both linear sections (out-and-back) and loop sections (ovals/tracks).
+/// Returns empty if no multi-lap pattern is detected (caller should fall back).
+fn split_segment_into_laps(
+    track: &[GpsPoint],
+    segment: &OverlapSegment,
+    reference: &[GpsPoint],
+    ref_tree: &RTree<IndexedPoint>,
+    ref_length: f64,
+) -> Vec<(usize, usize, Direction)> {
+    let seg_len = segment.end_idx - segment.start_idx;
+    if seg_len < 10 || reference.len() < 5 {
+        return Vec::new();
+    }
+
+    // 1. Map each track point in segment to nearest reference index
+    let ref_indices: Vec<usize> = (segment.start_idx..segment.end_idx)
+        .map(|i| {
+            let point = &track[i];
+            let query = [point.latitude, point.longitude];
+            ref_tree
+                .nearest_neighbor(&query)
+                .map(|n| n.idx)
+                .unwrap_or(0)
+        })
+        .collect();
+
+    // 2. Smooth with 5-point moving median
+    let smoothed = moving_median(&ref_indices, 5);
+
+    // 3. Determine if reference is a loop (start ≈ end within 100m)
+    let is_loop = reference.len() >= 10
+        && haversine_distance(&reference[0], &reference[reference.len() - 1]) < 100.0;
+
+    // 4. Find lap boundary positions within the smoothed array
+    let boundary_positions = if is_loop {
+        find_loop_boundaries(&smoothed, reference, ref_length)
+    } else {
+        find_linear_turning_points(&smoothed, reference.len())
+    };
+
+    // No boundaries = single pass (or couldn't detect laps)
+    if boundary_positions.is_empty() {
+        return Vec::new();
+    }
+
+    // 5. Build sub-segments from boundary positions
+    let min_distance = ref_length * 0.5;
+    let mut results = Vec::new();
+
+    let mut split_points = Vec::with_capacity(boundary_positions.len() + 2);
+    split_points.push(0usize);
+    split_points.extend_from_slice(&boundary_positions);
+    split_points.push(seg_len);
+
+    for window in split_points.windows(2) {
+        let local_start = window[0];
+        let local_end = window[1];
+
+        if local_end <= local_start + 3 {
+            continue;
+        }
+
+        let track_start = segment.start_idx + local_start;
+        let track_end = segment.start_idx + local_end;
+
+        let distance = calculate_route_distance(&track[track_start..track_end]);
+        if distance >= min_distance {
+            let direction =
+                detect_direction_robust(&track[track_start..track_end], reference, ref_tree);
+            results.push((track_start, track_end, direction));
+        }
+    }
+
+    results
+}
+
+/// Find turning points in a reference index sequence for a linear (non-loop) section.
+/// Detects peaks and valleys where the runner reverses direction.
+/// Returns positions within the smoothed array where laps change direction.
+fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> {
+    if smoothed.len() < 10 || ref_len < 5 {
+        return Vec::new();
+    }
+
+    // Minimum index change to consider a direction reversal significant
+    let min_change = ((ref_len as f64) * 0.3) as usize;
+    let min_change = min_change.max(3);
+
+    // Determine initial trend from first significant movement
+    let mut searching_for_peak = true;
+    for val in smoothed.iter().skip(1) {
+        let diff = *val as i64 - smoothed[0] as i64;
+        if diff > min_change as i64 / 3 {
+            searching_for_peak = true;
+            break;
+        } else if diff < -(min_change as i64 / 3) {
+            searching_for_peak = false;
+            break;
+        }
+    }
+
+    let mut turns = Vec::new();
+    let mut best_val = smoothed[0];
+    let mut best_pos = 0usize;
+
+    for i in 1..smoothed.len() {
+        if searching_for_peak {
+            // Rising — track the running maximum
+            if smoothed[i] > best_val {
+                best_val = smoothed[i];
+                best_pos = i;
+            }
+            // Fallen significantly from peak → direction reversed
+            if best_val > smoothed[i] && best_val - smoothed[i] >= min_change {
+                turns.push(best_pos);
+                searching_for_peak = false;
+                best_val = smoothed[i];
+                best_pos = i;
+            }
+        } else {
+            // Falling — track the running minimum
+            if smoothed[i] < best_val {
+                best_val = smoothed[i];
+                best_pos = i;
+            }
+            // Risen significantly from valley → direction reversed
+            if smoothed[i] > best_val && smoothed[i] - best_val >= min_change {
+                turns.push(best_pos);
+                searching_for_peak = true;
+                best_val = smoothed[i];
+                best_pos = i;
+            }
+        }
+    }
+
+    turns
+}
+
+/// Find lap boundaries for a loop section based on cumulative arc distance.
+/// Returns positions within the smoothed array where new laps start.
+fn find_loop_boundaries(
+    smoothed: &[usize],
+    reference: &[GpsPoint],
+    ref_length: f64,
+) -> Vec<usize> {
+    if smoothed.len() < 5 || reference.len() < 3 {
+        return Vec::new();
+    }
+
+    // Precompute cumulative distances along reference
+    let mut cum_dist = Vec::with_capacity(reference.len());
+    cum_dist.push(0.0);
+    for i in 1..reference.len() {
+        cum_dist.push(cum_dist[i - 1] + haversine_distance(&reference[i - 1], &reference[i]));
+    }
+
+    let total_dist = *cum_dist.last().unwrap_or(&0.0);
+    if total_dist < 1.0 {
+        return Vec::new();
+    }
+
+    let lap_threshold = ref_length * 0.8;
+    let mut accumulated = 0.0;
+    let mut boundaries = Vec::new();
+    let max_ref_idx = reference.len() - 1;
+
+    for i in 1..smoothed.len() {
+        let idx_prev = smoothed[i - 1].min(max_ref_idx);
+        let idx_curr = smoothed[i].min(max_ref_idx);
+
+        let diff = (cum_dist[idx_curr] - cum_dist[idx_prev]).abs();
+        // For a loop: shortest arc handles wrap-around
+        let arc = diff.min(total_dist - diff);
+
+        accumulated += arc;
+
+        if accumulated >= lap_threshold {
+            boundaries.push(i);
+            accumulated -= lap_threshold; // carry over excess
+        }
+    }
+
+    boundaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a linear section reference (~500m north-south at 45°N)
+    fn make_linear_reference(num_points: usize) -> Vec<GpsPoint> {
+        // 0.0045 degrees latitude ≈ 500m
+        let length_degrees = 0.0045;
+        (0..num_points)
+            .map(|i| {
+                GpsPoint::new(
+                    45.0 + (i as f64 / (num_points - 1) as f64) * length_degrees,
+                    7.0,
+                )
+            })
+            .collect()
+    }
+
+    /// Create a track that goes forward/reverse over the reference for `passes` passes
+    fn make_out_and_back_track(
+        reference: &[GpsPoint],
+        passes: usize,
+        points_per_pass: usize,
+    ) -> Vec<GpsPoint> {
+        let mut track = Vec::new();
+        for pass in 0..passes {
+            let forward = pass % 2 == 0;
+            for i in 0..points_per_pass {
+                let frac = i as f64 / (points_per_pass - 1) as f64;
+                let ref_frac = if forward { frac } else { 1.0 - frac };
+                let ref_idx =
+                    (ref_frac * (reference.len() - 1) as f64).round() as usize;
+                let ref_point = &reference[ref_idx.min(reference.len() - 1)];
+                track.push(GpsPoint::new(
+                    ref_point.latitude + 0.000005 * (pass as f64), // tiny offset
+                    ref_point.longitude,
+                ));
+            }
+        }
+        track
+    }
+
+    /// Create a circular loop reference (~400m circumference at 45°N)
+    fn make_loop_reference(num_points: usize) -> Vec<GpsPoint> {
+        // radius in degrees: circumference = 2πr, want 400m → r ≈ 63.7m ≈ 0.000573°
+        let radius_deg = 0.000573;
+        let center_lat = 45.0;
+        let center_lng = 7.0;
+        let mut points: Vec<GpsPoint> = (0..num_points)
+            .map(|i| {
+                let angle =
+                    2.0 * std::f64::consts::PI * (i as f64) / (num_points as f64);
+                GpsPoint::new(
+                    center_lat + radius_deg * angle.cos(),
+                    center_lng + radius_deg * angle.sin(),
+                )
+            })
+            .collect();
+        // Close the loop: last point ≈ first point
+        if let Some(first) = points.first() {
+            points.push(GpsPoint::new(first.latitude, first.longitude));
+        }
+        points
+    }
+
+    /// Create a track that goes around a loop multiple times
+    fn make_loop_track(
+        reference: &[GpsPoint],
+        laps: usize,
+        points_per_lap: usize,
+    ) -> Vec<GpsPoint> {
+        let ref_len = reference.len() - 1; // exclude the closing duplicate
+        let mut track = Vec::new();
+        for lap in 0..laps {
+            for i in 0..points_per_lap {
+                let frac = i as f64 / points_per_lap as f64;
+                let ref_idx = (frac * ref_len as f64).round() as usize;
+                let ref_point = &reference[ref_idx.min(ref_len)];
+                track.push(GpsPoint::new(
+                    ref_point.latitude + 0.000002 * (lap as f64),
+                    ref_point.longitude,
+                ));
+            }
+        }
+        track
+    }
+
+    #[test]
+    fn test_linear_out_and_back() {
+        let reference = make_linear_reference(50);
+        let track = make_out_and_back_track(&reference, 2, 80);
+
+        let results = find_all_track_portions(&track, &reference, 50.0);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "Expected 2 traversals (1 forward, 1 reverse), got {}",
+            results.len()
+        );
+        assert_eq!(results[0].2, Direction::Same);
+        assert_eq!(results[1].2, Direction::Reverse);
+    }
+
+    #[test]
+    fn test_linear_multi_pass() {
+        let reference = make_linear_reference(50);
+        let track = make_out_and_back_track(&reference, 5, 80);
+
+        let results = find_all_track_portions(&track, &reference, 50.0);
+
+        assert_eq!(
+            results.len(),
+            5,
+            "Expected 5 traversals, got {}",
+            results.len()
+        );
+        let forward_count = results.iter().filter(|r| r.2 == Direction::Same).count();
+        let reverse_count =
+            results.iter().filter(|r| r.2 == Direction::Reverse).count();
+        assert_eq!(forward_count, 3, "Expected 3 forward passes");
+        assert_eq!(reverse_count, 2, "Expected 2 reverse passes");
+    }
+
+    #[test]
+    fn test_loop_three_laps() {
+        let reference = make_loop_reference(50);
+        let track = make_loop_track(&reference, 3, 80);
+
+        let results = find_all_track_portions(&track, &reference, 50.0);
+
+        assert!(
+            results.len() >= 2,
+            "Expected at least 2 laps for 3 circuits, got {}",
+            results.len()
+        );
+        assert!(
+            results.len() <= 4,
+            "Expected at most 4 laps for 3 circuits, got {}",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_single_pass_unchanged() {
+        let reference = make_linear_reference(50);
+        let track = make_out_and_back_track(&reference, 1, 80);
+
+        let results = find_all_track_portions(&track, &reference, 50.0);
+
+        assert_eq!(results.len(), 1, "Single pass should produce 1 result");
+        assert_eq!(results[0].2, Direction::Same);
+    }
+
+    #[test]
+    fn test_gps_noise_no_false_splits() {
+        let reference = make_linear_reference(50);
+        // Single forward pass with GPS jitter
+        let mut track = make_out_and_back_track(&reference, 1, 80);
+        // Add jitter: every 5th point gets a small lat offset
+        for (i, point) in track.iter_mut().enumerate() {
+            if i % 5 == 0 {
+                point.latitude += 0.00002; // ~2m jitter
+            }
+        }
+
+        let results = find_all_track_portions(&track, &reference, 50.0);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "GPS noise should not cause false splits, got {} results",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_moving_median() {
+        // Basic smoothing test
+        let values = vec![0, 1, 5, 2, 3, 4, 8, 5, 6];
+        let result = moving_median(&values, 5);
+        // Middle values should be smoothed; the spike at index 2 (5) should be reduced
+        assert_eq!(result[0], 1); // median of [0, 1, 5] = 1
+        assert!(result[2] <= 3); // spike at 5 smoothed down
+    }
+
+    #[test]
+    fn test_linear_turning_points() {
+        // Simulate forward then reverse: indices go 0→49 then 49→0
+        let mut smoothed = Vec::new();
+        for i in 0..50 {
+            smoothed.push(i);
+        }
+        for i in (0..50).rev() {
+            smoothed.push(i);
+        }
+
+        let turns = find_linear_turning_points(&smoothed, 50);
+
+        assert_eq!(turns.len(), 1, "Expected 1 turning point, got {}", turns.len());
+        // Turning point should be near index 49 (the peak)
+        assert!(
+            turns[0] >= 45 && turns[0] <= 55,
+            "Turning point at {} should be near the peak",
+            turns[0]
+        );
     }
 }
