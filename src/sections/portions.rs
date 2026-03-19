@@ -65,7 +65,7 @@ struct OverlapSegment {
 /// Find ALL portions of a track that overlap with a reference polyline.
 /// Returns all qualifying traversals (for out-and-back, track laps, etc.).
 /// Each traversal is returned with (start_index, end_index, direction).
-fn find_all_track_portions(
+pub fn find_all_track_portions(
     track: &[GpsPoint],
     reference: &[GpsPoint],
     threshold: f64,
