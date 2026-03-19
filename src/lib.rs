@@ -76,7 +76,8 @@ pub use sections::{
     DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
     MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
     SectionPortion, SplitResult, detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, detect_sections_optimized, find_sections_in_route,
+    detect_sections_multiscale_with_progress, detect_sections_optimized,
+    find_all_track_portions, find_sections_in_route,
     incremental::IncrementalResult, incremental::detect_sections_incremental,
     recalculate_section_polyline, split_section_at_index, split_section_at_point,
 };
