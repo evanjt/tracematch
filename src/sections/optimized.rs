@@ -714,7 +714,7 @@ pub fn find_sections_in_route(
         return Vec::new();
     }
 
-    let threshold = config.proximity_threshold * 1.5;
+    let threshold = config.proximity_threshold * 2.0;
 
     let find_matches_for_section = |section: &FrequentSection| -> Vec<SectionMatch> {
         if section.polyline.is_empty() {
@@ -903,8 +903,8 @@ fn find_all_section_spans_directed(
             0.0
         };
 
-        // Require at least 60% match
-        if quality >= 0.6 {
+        // Require at least 50% match (lowered from 60% to reduce missed matches from GPS drift)
+        if quality >= 0.5 {
             results.push((start_idx, end_idx + 1, quality));
             used_ranges.push((start_idx, end_idx + 1));
         }
