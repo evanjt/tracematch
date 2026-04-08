@@ -59,7 +59,7 @@ pub(crate) use overlap::{
     find_full_track_overlap,
 };
 pub(crate) use portions::compute_activity_portions;
-pub use portions::find_all_track_portions;
+pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub(crate) use postprocess::{
     consolidate_fragments, filter_low_quality_sections, make_sections_exclusive,
     merge_nearby_sections, remove_overlapping_sections, split_at_gradient_changes,
