@@ -65,10 +65,23 @@ struct OverlapSegment {
 /// Find ALL portions of a track that overlap with a reference polyline.
 /// Returns all qualifying traversals (for out-and-back, track laps, etc.).
 /// Each traversal is returned with (start_index, end_index, direction).
+/// Uses a default gap tolerance of 3 points for GPS noise.
 pub fn find_all_track_portions(
     track: &[GpsPoint],
     reference: &[GpsPoint],
     threshold: f64,
+) -> Vec<(usize, usize, Direction)> {
+    find_all_track_portions_with_gap(track, reference, threshold, 3)
+}
+
+/// Like `find_all_track_portions`, but with a configurable gap tolerance.
+/// A lower `max_gap` (e.g. 1) produces stricter matching — useful when changing
+/// a section's reference activity to avoid including parallel roads.
+pub fn find_all_track_portions_with_gap(
+    track: &[GpsPoint],
+    reference: &[GpsPoint],
+    threshold: f64,
+    max_gap: usize,
 ) -> Vec<(usize, usize, Direction)> {
     if track.is_empty() || reference.is_empty() {
         return Vec::new();
@@ -83,7 +96,6 @@ pub fn find_all_track_portions(
     let mut segments: Vec<OverlapSegment> = Vec::new();
     let mut current_start: Option<usize> = None;
     let mut gap_count = 0;
-    const MAX_GAP: usize = 3; // Allow small gaps for GPS noise
 
     for (i, point) in track.iter().enumerate() {
         let query = [point.latitude, point.longitude];
@@ -100,7 +112,7 @@ pub fn find_all_track_portions(
             gap_count = 0;
         } else if current_start.is_some() {
             gap_count += 1;
-            if gap_count > MAX_GAP {
+            if gap_count > max_gap {
                 // End this segment
                 let start = current_start.unwrap();
                 let end = i - gap_count;
