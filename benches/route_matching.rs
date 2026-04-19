@@ -1,49 +1,43 @@
-//! Benchmarks for route matching and grouping with real GPS data.
+//! Benchmarks for route matching and grouping on synthetic GPS data.
 //!
-//! GPS trace data (c) 2026 Evan Thomas. All rights reserved.
-//! See tests/fixtures/demo/LICENSE for terms.
+//! Run with: `cargo bench --bench route_matching --features synthetic`
 //!
-//! Run with: `cargo bench --bench route_matching`
+//! Synthetic tracks are generated via [`SyntheticScenario`] so these benches
+//! are self-contained and do not depend on external fixture files.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use serde::Deserialize;
-use std::fs;
+use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
 use tracematch::{GpsPoint, MatchConfig, RouteSignature, compare_routes, group_signatures};
 
-#[derive(Deserialize)]
-struct DemoRoute {
-    id: String,
-    coordinates: Vec<[f64; 2]>,
-}
-
-fn load_demo_routes() -> Vec<(String, Vec<GpsPoint>)> {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/demo/realRoutes.json"
-    );
-    let content = fs::read_to_string(path).expect("Failed to load demo routes");
-    let routes: Vec<DemoRoute> = serde_json::from_str(&content).expect("Failed to parse JSON");
-
-    routes
-        .into_iter()
-        .map(|r| {
-            let points = r
-                .coordinates
-                .into_iter()
-                .map(|[lat, lng]| GpsPoint::new(lat, lng))
-                .collect();
-            (r.id, points)
-        })
-        .collect()
+/// Generate a deterministic batch of synthetic tracks for the matching benches.
+///
+/// Produces `count` activities that share a 10km corridor with 80% overlap so
+/// that most routes are genuinely similar (exercises the matching path rather
+/// than trivially rejecting on bounds).
+fn synthetic_routes(count: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let scenario = SyntheticScenario {
+        origin: GpsPoint::new(47.37, 8.55),
+        activity_count: count,
+        corridors: vec![CorridorConfig {
+            length_meters: 10_000.0,
+            overlap_fraction: 0.8,
+            pattern: CorridorPattern::Winding,
+            approach_length: 500.0,
+        }],
+        gps_noise_sigma_meters: 3.0,
+        seed: 42,
+    };
+    scenario.generate().tracks
 }
 
 fn bench_signature_creation(c: &mut Criterion) {
-    let routes = load_demo_routes();
+    let routes = synthetic_routes(5);
     let config = MatchConfig::default();
 
     let mut group = c.benchmark_group("signature_creation");
 
-    // Benchmark different route sizes
+    // Benchmark across different track sizes. Synthetic tracks already vary in
+    // length because the random approach/departure portions differ per activity.
     for (id, points) in routes.iter().take(5) {
         group.bench_with_input(
             BenchmarkId::new("from_points", format!("{}_{}pts", id, points.len())),
@@ -58,10 +52,10 @@ fn bench_signature_creation(c: &mut Criterion) {
 }
 
 fn bench_route_comparison(c: &mut Criterion) {
-    let routes = load_demo_routes();
+    let routes = synthetic_routes(6);
     let config = MatchConfig::default();
 
-    // Pre-compute signatures
+    // Pre-compute signatures once; comparison is what we want to measure.
     let signatures: Vec<_> = routes
         .iter()
         .filter_map(|(id, pts)| {
@@ -71,7 +65,6 @@ fn bench_route_comparison(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("route_comparison");
 
-    // Compare first signature against others
     if let Some((_, sig1)) = signatures.first() {
         for (id, sig2) in signatures.iter().skip(1).take(5) {
             group.bench_with_input(BenchmarkId::new("compare_routes", id), sig2, |b, s2| {
@@ -84,10 +77,11 @@ fn bench_route_comparison(c: &mut Criterion) {
 }
 
 fn bench_route_grouping(c: &mut Criterion) {
-    let routes = load_demo_routes();
+    // Need enough routes to support the largest grouping size (20).
+    let routes = synthetic_routes(20);
     let config = MatchConfig::default();
 
-    // Pre-compute all signatures
+    // Pre-compute all signatures so grouping is isolated from signature building.
     let signatures: Vec<_> = routes
         .iter()
         .filter_map(|(id, pts)| RouteSignature::from_points(id, pts, &config))
@@ -95,7 +89,6 @@ fn bench_route_grouping(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("route_grouping");
 
-    // Group subsets of increasing size
     for count in [5, 10, 15, 20] {
         let subset: Vec<_> = signatures.iter().take(count).cloned().collect();
         group.bench_with_input(
