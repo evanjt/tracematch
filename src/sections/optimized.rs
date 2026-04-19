@@ -148,6 +148,24 @@ struct TrackInfo {
     bounds: Bounds,
 }
 
+/// Tier 5.1: pick a downsample target based on the input track length.
+/// Short tracks (typical 5-15 km commutes) keep the historical 100-point
+/// budget so existing benches remain representative. Longer tracks scale
+/// to ~1 sample per 50 m of travel, capped at 200, so that big sections
+/// (40 km+ rides) keep enough resolution for consensus to align corners.
+///
+/// `point_count` is the *raw* GPS sample count, not metres — the formula
+/// assumes the typical raw GPS spacing of ~5 m used by intervals.icu data.
+pub(crate) fn adaptive_downsample_target(point_count: usize) -> usize {
+    // Roughly: target = clamp(point_count / 10, 100, 200).
+    // - 1000-point track (typical 5 km) → 100 (unchanged from old behaviour)
+    // - 3000-point track (15 km)        → 200 (capped)
+    // - 8000-point track (40 km)        → 200 (capped)
+    // The cap prevents linear growth that would defeat the downsampling.
+    let scaled = (point_count / 10).max(100);
+    scaled.min(200)
+}
+
 impl TrackInfo {
     fn new(activity_id: String, track: Vec<GpsPoint>, downsample_to: usize) -> Self {
         let downsampled = downsample_track(&track, downsample_to);
@@ -193,8 +211,15 @@ pub fn detect_sections_optimized(
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
 
-        // Downsample to 100 points for initial detection
-        let track_info = TrackInfo::new(activity_id.clone(), points.clone(), 100);
+        // Tier 5.1: adaptive downsample target. A single 100-point cap
+        // worked OK for typical 5-15 km tracks but threw away too much
+        // resolution on long-distance routes (40 km+ rides → ~400× decimation
+        // → consensus could mis-align corners). Scale the target with track
+        // length while keeping the cap at the original 100 for short tracks
+        // (so existing benches stay representative) and at 200 for very
+        // long ones. Roughly 1 sample per ~50 m of travel.
+        let target = adaptive_downsample_target(points.len());
+        let track_info = TrackInfo::new(activity_id.clone(), points.clone(), target);
         tracks_by_sport.entry(sport).or_default().push(track_info);
     }
 

@@ -15,7 +15,8 @@ use super::optimized::find_sections_in_route;
 use super::progress::{DetectionPhase, DetectionProgressCallback};
 use super::{
     ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion,
-    extract_all_activity_traces, merge_traces_into_consensus,
+    build_trace_rtree_cache, extract_all_activity_traces,
+    merge_traces_into_consensus_with_cache,
 };
 use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint, RouteGroup};
@@ -136,6 +137,12 @@ pub fn detect_sections_incremental(
         .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
 
+    // Tier 2.2: pre-build R-trees for every NEW track once. The same new
+    // activity often touches multiple sections; reusing one Arc<RTree>
+    // across all merge calls in this batch amortises the build cost.
+    let new_tracks_owned: Vec<(String, Vec<GpsPoint>)> = new_tracks.to_vec();
+    let trace_rtree_cache = build_trace_rtree_cache(&new_tracks_owned);
+
     let mut updated_sections: Vec<FrequentSection> = Vec::with_capacity(existing_sections.len());
 
     for section in existing_sections {
@@ -195,10 +202,13 @@ pub fn detect_sections_incremental(
                 .collect();
 
             let result = if let Some(ref mut accumulator) = updated.consensus_state {
-                // Accumulator exists: incremental path.
-                let res = merge_traces_into_consensus(
+                // Accumulator exists: incremental path. Pass the shared
+                // R-tree cache so trees built once at the top of this
+                // function are reused across every section merge.
+                let res = merge_traces_into_consensus_with_cache(
                     accumulator,
                     &new_traces_for_section,
+                    &trace_rtree_cache,
                     config.proximity_threshold,
                 );
                 Some(res)
@@ -224,9 +234,10 @@ pub fn detect_sections_incremental(
                 all_traces_pairs.extend(new_traces_for_section);
 
                 let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
-                let res = merge_traces_into_consensus(
+                let res = merge_traces_into_consensus_with_cache(
                     &mut acc,
                     &all_traces_pairs,
+                    &trace_rtree_cache,
                     config.proximity_threshold,
                 );
                 updated.consensus_state = Some(acc);
