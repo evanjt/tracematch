@@ -72,6 +72,10 @@ pub mod sections;
 // Synthetic data generation for stress testing and benchmarking
 #[cfg(feature = "synthetic")]
 pub mod synthetic;
+
+// Lifecycle scenarios for end-to-end pipeline testing (depends on synthetic)
+#[cfg(feature = "synthetic")]
+pub mod scenarios;
 pub use sections::{
     DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
     MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
