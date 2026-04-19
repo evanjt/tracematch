@@ -219,14 +219,19 @@ pub fn detect_sections_incremental(
             .cloned()
             .collect();
 
-        // Run full detection on just the unmatched pool
-        let result = super::detect_sections_multiscale_with_progress(
+        // Run full detection on just the unmatched pool. Its renumbering
+        // pass starts per-sport counters at 0, so the IDs it returns will
+        // collide with the existing sections we kept above (which also
+        // follow `sec_<sport>_<n>`). Renumber the new ones to sit above
+        // the highest existing per-sport counter.
+        let mut result = super::detect_sections_multiscale_with_progress(
             &unmatched_tracks,
             sport_types,
             groups,
             config,
             progress.clone(),
         );
+        renumber_to_avoid_collisions(&mut result.sections, &updated_sections);
 
         result.sections
     } else {
@@ -244,5 +249,169 @@ pub fn detect_sections_incremental(
         new_sections,
         matched_activity_ids,
         unmatched_activity_ids,
+    }
+}
+
+/// Renumber `new_sections` so their `sec_<sport>_<n>` IDs don't collide with
+/// the IDs already present in `existing_sections`. Per-sport counters start
+/// at one past the highest existing counter for that sport.
+///
+/// Sections whose ids don't match the canonical `sec_<sport>_<n>` pattern
+/// (e.g. user-defined sections, post-processing-suffixed ids that survived
+/// renumbering, ids from a future scheme) are left untouched and their ids
+/// added to a "taken" set so the new numbering avoids them too.
+fn renumber_to_avoid_collisions(
+    new_sections: &mut [FrequentSection],
+    existing_sections: &[FrequentSection],
+) {
+    use std::collections::HashMap;
+
+    fn parse_canonical_id(id: &str) -> Option<(String, u32)> {
+        let rest = id.strip_prefix("sec_")?;
+        let underscore = rest.rfind('_')?;
+        let (sport, num_part) = rest.split_at(underscore);
+        let n: u32 = num_part[1..].parse().ok()?;
+        Some((sport.to_string(), n))
+    }
+
+    // Per-sport "next free counter" derived from existing IDs.
+    let mut next_counter: HashMap<String, u32> = HashMap::new();
+    let mut taken_ids: HashSet<String> = HashSet::new();
+    for s in existing_sections {
+        taken_ids.insert(s.id.clone());
+        if let Some((sport, n)) = parse_canonical_id(&s.id) {
+            let slot = next_counter.entry(sport).or_insert(0);
+            if n + 1 > *slot {
+                *slot = n + 1;
+            }
+        }
+    }
+
+    for section in new_sections.iter_mut() {
+        // Only renumber if the id collides; leave clean ids alone so the
+        // shape remains predictable.
+        if !taken_ids.contains(&section.id) {
+            taken_ids.insert(section.id.clone());
+            // Still bump the per-sport counter past this id so future
+            // unmatched-pool runs don't re-collide.
+            if let Some((sport, n)) = parse_canonical_id(&section.id) {
+                let slot = next_counter.entry(sport).or_insert(0);
+                if n + 1 > *slot {
+                    *slot = n + 1;
+                }
+            }
+            continue;
+        }
+
+        let sport_key = section.sport_type.to_lowercase();
+        let counter = next_counter.entry(sport_key.clone()).or_insert(0);
+        loop {
+            let candidate = format!("sec_{}_{}", sport_key, *counter);
+            *counter += 1;
+            if !taken_ids.contains(&candidate) {
+                section.id = candidate.clone();
+                taken_ids.insert(candidate);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Direction, GpsPoint};
+
+    fn stub_section(id: &str, sport: &str) -> FrequentSection {
+        FrequentSection {
+            id: id.to_string(),
+            name: None,
+            sport_type: sport.to_string(),
+            polyline: vec![GpsPoint::new(0.0, 0.0); 2],
+            representative_activity_id: String::new(),
+            activity_ids: vec![],
+            activity_portions: vec![],
+            route_ids: vec![],
+            visit_count: 0,
+            distance_meters: 0.0,
+            activity_traces: Default::default(),
+            confidence: 0.0,
+            observation_count: 0,
+            average_spread: 0.0,
+            point_density: vec![],
+            scale: None,
+            is_user_defined: false,
+            stability: 0.0,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn _exercise_imports() {
+        // Compile-only touch of types we re-import to keep the deny(unused)
+        // stable across future changes.
+        let _ = GpsPoint::new(0.0, 0.0);
+    }
+
+    #[test]
+    fn renumber_avoids_collision_with_existing_ids() {
+        let existing = vec![
+            stub_section("sec_ride_0", "Ride"),
+            stub_section("sec_ride_1", "Ride"),
+            stub_section("sec_run_0", "Run"),
+        ];
+        let mut new_sections = vec![
+            stub_section("sec_ride_0", "Ride"), // collides
+            stub_section("sec_ride_1", "Ride"), // collides
+            stub_section("sec_run_0", "Run"),   // collides
+        ];
+
+        renumber_to_avoid_collisions(&mut new_sections, &existing);
+
+        let new_ids: Vec<_> = new_sections.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(new_ids, vec!["sec_ride_2", "sec_ride_3", "sec_run_1"]);
+    }
+
+    #[test]
+    fn renumber_leaves_non_colliding_ids_alone_and_advances_counter() {
+        let existing = vec![stub_section("sec_ride_0", "Ride")];
+        let mut new_sections = vec![
+            stub_section("sec_ride_5", "Ride"), // no collision; keep
+            stub_section("sec_ride_0", "Ride"), // collides; first free is 6
+        ];
+        renumber_to_avoid_collisions(&mut new_sections, &existing);
+        assert_eq!(new_sections[0].id, "sec_ride_5");
+        assert_eq!(new_sections[1].id, "sec_ride_6");
+    }
+
+    #[test]
+    fn renumber_handles_empty_existing() {
+        let existing: Vec<FrequentSection> = vec![];
+        let mut new_sections = vec![
+            stub_section("sec_ride_0", "Ride"),
+            stub_section("sec_run_0", "Run"),
+        ];
+        renumber_to_avoid_collisions(&mut new_sections, &existing);
+        assert_eq!(new_sections[0].id, "sec_ride_0");
+        assert_eq!(new_sections[1].id, "sec_run_0");
+    }
+
+    #[test]
+    fn renumber_handles_postprocess_suffixed_existing_ids() {
+        // Existing ids may carry post-processing suffixes (_split0, _ret).
+        // parse_canonical_id returns None for them, so they don't seed the
+        // per-sport counter. The first colliding new id therefore lands at
+        // sec_ride_0; subsequent ids that would have used that slot must
+        // jump past it.
+        let existing = vec![stub_section("sec_ride_0_split0", "Ride")];
+        let mut new_sections = vec![
+            stub_section("sec_ride_0_split0", "Ride"), // exact collision
+            stub_section("sec_ride_0", "Ride"),         // becomes taken after first renumber
+        ];
+        renumber_to_avoid_collisions(&mut new_sections, &existing);
+        assert_eq!(new_sections[0].id, "sec_ride_0");
+        assert_eq!(new_sections[1].id, "sec_ride_1");
     }
 }
