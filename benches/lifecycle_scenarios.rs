@@ -81,12 +81,14 @@ fn bench_lifecycle_full_detection(c: &mut Criterion) {
 
     let corpus = corpus_for_default();
 
+    // Criterion enforces sample_size >= 10. Larger corpora use longer
+    // measurement windows so the per-iteration count stays sensible.
     for (label, sample_size, measurement_secs) in [
         ("A_cold_60", 10, 30u64),
-        ("B_expand_150", 8, 45),
-        ("C_add1_151", 8, 45),
-        ("D_add3_154", 8, 45),
-        ("E_year_550", 3, 90),
+        ("B_expand_150", 10, 60),
+        ("C_add1_151", 10, 60),
+        ("D_add3_154", 10, 60),
+        ("E_year_550", 10, 180),
     ] {
         group.sample_size(sample_size);
         group.measurement_time(Duration::from_secs(measurement_secs));
