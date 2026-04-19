@@ -12,8 +12,31 @@ use crate::matching::calculate_route_distance;
 use log::info;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rstar::{PointDistance, RTree};
+use rstar::{AABB, PointDistance, RTree, RTreeObject};
 use std::collections::HashMap;
+
+/// Section centroid for the post-processing R-tree pre-filter (Tier 2.3).
+#[derive(Debug, Clone, Copy)]
+struct CentroidEntry {
+    idx: usize,
+    lat: f64,
+    lng: f64,
+}
+
+impl RTreeObject for CentroidEntry {
+    type Envelope = AABB<[f64; 2]>;
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_point([self.lat, self.lng])
+    }
+}
+
+impl PointDistance for CentroidEntry {
+    fn distance_2(&self, point: &[f64; 2]) -> f64 {
+        let d0 = self.lat - point[0];
+        let d1 = self.lng - point[1];
+        d0 * d0 + d1 * d1
+    }
+}
 
 // =============================================================================
 // Self-Folding Section Detection
@@ -652,11 +675,48 @@ pub fn merge_nearby_sections(
     // Wide roads can be 30m+, GPS error can add 20m, so use 2x the base threshold
     let merge_threshold = config.proximity_threshold * 2.0;
 
-    // Generate candidate pairs (i, j) where lengths are comparable
+    // Tier 2.3: prune the O(S²) candidate space with a centroid R-tree.
+    // For each section, only consider partners whose centroid is within
+    // (own_length + partner_length + merge_threshold) — anything farther
+    // can't overlap geometrically. Builds in O(S log S), queries in
+    // O(M log S) where M = real geographic neighbours.
+    let centroids: Vec<[f64; 2]> = sections
+        .iter()
+        .map(|s| {
+            let n = s.polyline.len().max(1) as f64;
+            let (lat_sum, lng_sum) = s
+                .polyline
+                .iter()
+                .fold((0.0, 0.0), |(la, ln), p| (la + p.latitude, ln + p.longitude));
+            [lat_sum / n, lng_sum / n]
+        })
+        .collect();
+    let centroid_tree: rstar::RTree<CentroidEntry> = rstar::RTree::bulk_load(
+        centroids
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| CentroidEntry { idx, lat: c[0], lng: c[1] })
+            .collect(),
+    );
+
+    // Generate candidate pairs (i, j) where lengths are comparable AND
+    // centroids are within plausible overlap range.
     let mut candidate_pairs: Vec<(usize, usize)> = Vec::new();
     for i in 0..sections.len() {
-        for j in (i + 1)..sections.len() {
-            let length_ratio = sections[i].distance_meters / sections[j].distance_meters.max(1.0);
+        let li = sections[i].distance_meters;
+        // Use the section's own length plus the longest partner length we
+        // could plausibly merge with (3x by the length-ratio gate below).
+        let max_partner_len = li * 3.0;
+        let radius_m = li + max_partner_len + merge_threshold;
+        let radius_deg = radius_m / 111_000.0;
+        let center = [centroids[i][0], centroids[i][1]];
+
+        for entry in centroid_tree.locate_within_distance(center, radius_deg * radius_deg) {
+            let j = entry.idx;
+            if j <= i {
+                continue;
+            }
+            let length_ratio = li / sections[j].distance_meters.max(1.0);
             if (0.33..=3.0).contains(&length_ratio) {
                 candidate_pairs.push((i, j));
             }
