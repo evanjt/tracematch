@@ -60,6 +60,11 @@ name = "lifecycle_scenarios"
 harness = false
 required-features = ["synthetic"]
 
+[[bench]]
+name = "grouping_incremental"
+harness = false
+required-features = ["synthetic"]
+
 [[test]]
 name = "optimization_efficiency"
 required-features = ["synthetic"]
