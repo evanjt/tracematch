@@ -69,7 +69,16 @@ fn bench_incremental_grouping(c: &mut Criterion) {
 
     // Pre-build "existing" state at three sizes by running full grouping
     // once. The bench then measures only the incremental call.
-    for (existing_n, new_n) in [(60usize, 1usize), (150, 1), (150, 3), (547, 3)] {
+    // Includes large-M cases (60+90, 154+396) to test whether the 50%
+    // FULL-fallback threshold could safely be raised.
+    for (existing_n, new_n) in [
+        (60usize, 1usize),
+        (150, 1),
+        (150, 3),
+        (547, 3),
+        (60, 90),     // analogous to scenario B step 2 (60% new)
+        (154, 396),   // analogous to scenario E step 5 (72% new)
+    ] {
         let existing: Vec<RouteSignature> =
             signatures.iter().take(existing_n).cloned().collect();
         let new: Vec<RouteSignature> = signatures
