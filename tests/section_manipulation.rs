@@ -107,6 +107,7 @@ fn test_find_sections_in_route() {
         version: 1,
         is_user_defined: false,
         created_at: None,
+        consensus_state: None,
         updated_at: None,
         stability: 0.5,
     };
@@ -176,6 +177,7 @@ fn test_split_section_at_index() {
         version: 1,
         is_user_defined: false,
         created_at: None,
+        consensus_state: None,
         updated_at: None,
         stability: 0.5,
     };
@@ -250,6 +252,7 @@ fn test_split_section_at_point() {
         version: 1,
         is_user_defined: false,
         created_at: None,
+        consensus_state: None,
         updated_at: None,
         stability: 0.5,
     };
@@ -331,6 +334,7 @@ fn test_recalculate_section_polyline() {
         version: 1,
         is_user_defined: false,
         created_at: None,
+        consensus_state: None,
         updated_at: None,
         stability: 0.5,
     };

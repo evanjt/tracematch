@@ -674,6 +674,7 @@ fn convert_cluster_to_section(
         version: 1,
         updated_at: None,
         created_at: None,
+        consensus_state: None,
     })
 }
 
@@ -974,6 +975,7 @@ pub fn split_section_at_index(
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),
+            consensus_state: None,
         },
         second: FrequentSection {
             id: format!("{}_b", base_id),
@@ -997,6 +999,7 @@ pub fn split_section_at_index(
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),
+            consensus_state: None,
         },
     })
 }
