@@ -357,32 +357,17 @@ pub fn merge_traces_into_consensus(
     new_traces: &[(String, Vec<GpsPoint>)],
     proximity_threshold: f64,
 ) -> ConsensusResult {
-    if accumulator.reference.is_empty() {
-        return ConsensusResult {
-            polyline: vec![],
-            confidence: 0.0,
-            observation_count: 0,
-            average_spread: 0.0,
-            point_density: vec![],
-        };
-    }
-
-    let already: std::collections::HashSet<&str> = accumulator
-        .absorbed_activity_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    let to_fold: Vec<(String, &[GpsPoint])> = new_traces
-        .iter()
-        .filter(|(id, _)| !already.contains(id.as_str()))
-        .map(|(id, t)| (id.clone(), t.as_slice()))
-        .collect();
-
-    if !to_fold.is_empty() {
-        fold_traces_into_accumulator(accumulator, &to_fold, proximity_threshold);
-    }
-
-    accumulator_to_result(accumulator, proximity_threshold)
+    // Thin wrapper over the cached path with an empty cache. R-trees get
+    // built fresh inside fold_traces_with_optional_cache, exactly as the
+    // old standalone implementation did. Keeping the no-cache entry point
+    // is convenient for callers (and tests) that don't have a shared
+    // cache to pass in.
+    merge_traces_into_consensus_with_cache(
+        accumulator,
+        new_traces,
+        &TraceRTreeCache::new(),
+        proximity_threshold,
+    )
 }
 
 /// Inner: variant of [`fold_traces_into_accumulator`] that accepts an

@@ -380,7 +380,7 @@ fn renumber_to_avoid_collisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Direction, GpsPoint};
+    use crate::GpsPoint;
 
     fn stub_section(id: &str, sport: &str) -> FrequentSection {
         FrequentSection {
