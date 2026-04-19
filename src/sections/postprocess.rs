@@ -1492,6 +1492,7 @@ fn split_section_by_density(
                 version: 1,
                 updated_at: None,
                 created_at: section.created_at.clone(),
+                consensus_state: None,
             };
 
             info!(

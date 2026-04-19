@@ -53,6 +53,10 @@ pub use progress::{
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
+pub use consensus::{
+    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult,
+    build_accumulator_from_traces, merge_traces_into_consensus,
+};
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub(crate) use overlap::{
     FullTrackOverlap, OverlapCluster, cluster_overlaps, cluster_overlaps_with_map,
@@ -413,6 +417,14 @@ pub struct FrequentSection {
     /// ISO timestamp when section was created
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
+
+    /// Incremental-consensus running sums. None means "not yet built" —
+    /// the next merge will build it from current traces. Populated after
+    /// the first merge through `merge_traces_into_consensus`. Skipped
+    /// during JSON serialisation when None to keep blob size flat for
+    /// sections that haven't been touched by the incremental path yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_state: Option<ConsensusAccumulator>,
 }
 
 fn default_version() -> u32 {
@@ -611,6 +623,7 @@ fn process_cluster(
         version: 1,
         updated_at: None,
         created_at: None,
+        consensus_state: None,
     })
 }
 
