@@ -39,10 +39,12 @@ rand = "0.8"
 [[bench]]
 name = "route_matching"
 harness = false
+required-features = ["synthetic"]
 
 [[bench]]
 name = "section_detection"
 harness = false
+required-features = ["synthetic"]
 
 [[bench]]
 name = "iai_benchmarks"
