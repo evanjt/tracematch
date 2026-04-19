@@ -267,6 +267,83 @@ pub fn build_accumulator_from_traces(
     accumulator
 }
 
+/// Pre-built R-tree cache for new traces, shared across multiple
+/// `merge_traces_into_consensus_with_cache` calls within one detection
+/// pass. Use [`build_trace_rtree_cache`] to populate. Reusing this cache
+/// across multiple sections in the same incremental run amortises the
+/// R-tree construction cost — important when many sections are touched
+/// by the same handful of new activities.
+pub type TraceRTreeCache = std::collections::HashMap<String, std::sync::Arc<RTree<IndexedPoint>>>;
+
+/// Build R-trees for every (id, points) pair in `traces`. Skips empty
+/// tracks. Suitable for sharing via [`merge_traces_into_consensus_with_cache`].
+pub fn build_trace_rtree_cache(traces: &[(String, Vec<GpsPoint>)]) -> TraceRTreeCache {
+    #[cfg(feature = "parallel")]
+    let pairs: Vec<(String, std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        .par_iter()
+        .filter_map(|(id, pts)| {
+            if pts.is_empty() {
+                None
+            } else {
+                Some((id.clone(), std::sync::Arc::new(build_rtree(pts))))
+            }
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let pairs: Vec<(String, std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        .iter()
+        .filter_map(|(id, pts)| {
+            if pts.is_empty() {
+                None
+            } else {
+                Some((id.clone(), std::sync::Arc::new(build_rtree(pts))))
+            }
+        })
+        .collect();
+
+    pairs.into_iter().collect()
+}
+
+/// Incremental consensus update with a shared R-tree cache. The cache
+/// contains R-trees for activity tracks, keyed by activity_id. When the
+/// same activity contributes to multiple sections in one detection pass,
+/// each section's merge reuses the same R-tree instead of rebuilding.
+pub fn merge_traces_into_consensus_with_cache(
+    accumulator: &mut ConsensusAccumulator,
+    new_traces: &[(String, Vec<GpsPoint>)],
+    cache: &TraceRTreeCache,
+    proximity_threshold: f64,
+) -> ConsensusResult {
+    if accumulator.reference.is_empty() {
+        return ConsensusResult {
+            polyline: vec![],
+            confidence: 0.0,
+            observation_count: 0,
+            average_spread: 0.0,
+            point_density: vec![],
+        };
+    }
+
+    let already: std::collections::HashSet<&str> = accumulator
+        .absorbed_activity_ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let to_fold: Vec<(String, &[GpsPoint], Option<std::sync::Arc<RTree<IndexedPoint>>>)> =
+        new_traces
+            .iter()
+            .filter(|(id, _)| !already.contains(id.as_str()))
+            .map(|(id, t)| (id.clone(), t.as_slice(), cache.get(id).cloned()))
+            .collect();
+
+    if !to_fold.is_empty() {
+        fold_traces_with_optional_cache(accumulator, &to_fold, proximity_threshold);
+    }
+
+    accumulator_to_result(accumulator, proximity_threshold)
+}
+
 /// Incremental consensus update: fold `new_traces` into an existing
 /// accumulator. Returns the refreshed [`ConsensusResult`] (polyline +
 /// confidence/spread metrics derived from the running sums) and mutates
@@ -308,6 +385,56 @@ pub fn merge_traces_into_consensus(
     accumulator_to_result(accumulator, proximity_threshold)
 }
 
+/// Inner: variant of [`fold_traces_into_accumulator`] that accepts an
+/// optional pre-built R-tree per trace. Tracks with `Some(tree)` skip the
+/// build step. Used by [`merge_traces_into_consensus_with_cache`].
+fn fold_traces_with_optional_cache(
+    accumulator: &mut ConsensusAccumulator,
+    traces: &[(String, &[GpsPoint], Option<std::sync::Arc<RTree<IndexedPoint>>>)],
+    proximity_threshold: f64,
+) {
+    let owned: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
+        #[cfg(feature = "parallel")]
+        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+            .par_iter()
+            .filter_map(|(id, pts, cached)| {
+                if pts.is_empty() {
+                    return None;
+                }
+                let tree = match cached {
+                    Some(t) => t.clone(),
+                    None => std::sync::Arc::new(build_rtree(pts)),
+                };
+                Some((id.clone(), *pts, tree))
+            })
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+            .iter()
+            .filter_map(|(id, pts, cached)| {
+                if pts.is_empty() {
+                    return None;
+                }
+                let tree = match cached {
+                    Some(t) => t.clone(),
+                    None => std::sync::Arc::new(build_rtree(pts)),
+                };
+                Some((id.clone(), *pts, tree))
+            })
+            .collect();
+        built
+    };
+
+    fold_resolved_into_accumulator(accumulator, &owned, proximity_threshold);
+
+    // Mark all input traces as absorbed (including empty ones we skipped).
+    for (id, _, _) in traces {
+        if !accumulator.absorbed_activity_ids.contains(id) {
+            accumulator.absorbed_activity_ids.push(id.clone());
+        }
+    }
+}
+
 /// Inner: walk each trace's R-tree against `accumulator.reference`,
 /// accumulating weighted sums into `accumulator.per_point`. Updates
 /// `trace_count` and `absorbed_activity_ids`.
@@ -316,46 +443,60 @@ fn fold_traces_into_accumulator(
     traces: &[(String, &[GpsPoint])],
     proximity_threshold: f64,
 ) {
+    // Build trees and delegate to the resolved-trees folder.
+    let resolved: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
+        #[cfg(feature = "parallel")]
+        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+            .par_iter()
+            .filter_map(|(id, pts)| {
+                if pts.is_empty() {
+                    None
+                } else {
+                    Some((id.clone(), *pts, std::sync::Arc::new(build_rtree(pts))))
+                }
+            })
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+            .iter()
+            .filter_map(|(id, pts)| {
+                if pts.is_empty() {
+                    None
+                } else {
+                    Some((id.clone(), *pts, std::sync::Arc::new(build_rtree(pts))))
+                }
+            })
+            .collect();
+        built
+    };
+
+    fold_resolved_into_accumulator(accumulator, &resolved, proximity_threshold);
+
+    // Mark all input traces as absorbed even if the build was skipped
+    // (empty tracks still count).
+    for (id, _) in traces {
+        if !accumulator.absorbed_activity_ids.contains(id) {
+            accumulator.absorbed_activity_ids.push(id.clone());
+        }
+    }
+}
+
+/// Shared inner loop: given pre-resolved (id, points, R-tree) tuples,
+/// fold contributions into the accumulator. Used by both the build-now
+/// path ([`fold_traces_into_accumulator`]) and the cached path
+/// ([`fold_traces_with_optional_cache`]).
+fn fold_resolved_into_accumulator(
+    accumulator: &mut ConsensusAccumulator,
+    resolved: &[(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)],
+    proximity_threshold: f64,
+) {
+    if resolved.is_empty() {
+        return;
+    }
+
     let threshold_deg = proximity_threshold / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
     let epsilon = 0.000001;
-
-    // Build R-trees for each new trace (skip empty traces).
-    #[cfg(feature = "parallel")]
-    let trees: Vec<(usize, RTree<IndexedPoint>)> = traces
-        .par_iter()
-        .enumerate()
-        .filter_map(|(i, (_, pts))| {
-            if pts.is_empty() {
-                None
-            } else {
-                Some((i, build_rtree(pts)))
-            }
-        })
-        .collect();
-
-    #[cfg(not(feature = "parallel"))]
-    let trees: Vec<(usize, RTree<IndexedPoint>)> = traces
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, pts))| {
-            if pts.is_empty() {
-                None
-            } else {
-                Some((i, build_rtree(pts)))
-            }
-        })
-        .collect();
-
-    if trees.is_empty() {
-        // Still record that we tried (so absorbed_activity_ids stays sound).
-        for (id, _) in traces {
-            if !accumulator.absorbed_activity_ids.contains(id) {
-                accumulator.absorbed_activity_ids.push(id.clone());
-            }
-        }
-        return;
-    }
 
     // Compute per-reference-point contributions from each new trace.
     // Done as map-then-merge so we don't take a mut borrow across the
@@ -404,15 +545,15 @@ fn fold_traces_into_accumulator(
     };
 
     #[cfg(feature = "parallel")]
-    let contributions: Vec<TraceContribution> = trees
+    let contributions: Vec<TraceContribution> = resolved
         .par_iter()
-        .map(|(trace_idx, tree)| compute_for_trace(tree, traces[*trace_idx].1))
+        .map(|(_, trace, tree)| compute_for_trace(tree.as_ref(), trace))
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let contributions: Vec<TraceContribution> = trees
+    let contributions: Vec<TraceContribution> = resolved
         .iter()
-        .map(|(trace_idx, tree)| compute_for_trace(tree, traces[*trace_idx].1))
+        .map(|(_, trace, tree)| compute_for_trace(tree.as_ref(), trace))
         .collect();
 
     // Merge contributions into the accumulator (serial — mutating shared
@@ -434,13 +575,7 @@ fn fold_traces_into_accumulator(
         }
     }
 
-    // Bookkeeping
-    accumulator.trace_count += trees.len() as u32;
-    for (id, _) in traces {
-        if !accumulator.absorbed_activity_ids.contains(id) {
-            accumulator.absorbed_activity_ids.push(id.clone());
-        }
-    }
+    accumulator.trace_count += resolved.len() as u32;
 }
 
 /// Materialize the current accumulator state into a [`ConsensusResult`].

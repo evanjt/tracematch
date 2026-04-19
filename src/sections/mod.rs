@@ -54,8 +54,9 @@ pub use progress::{
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
 pub use consensus::{
-    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult,
-    build_accumulator_from_traces, merge_traces_into_consensus,
+    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult, TraceRTreeCache,
+    build_accumulator_from_traces, build_trace_rtree_cache, merge_traces_into_consensus,
+    merge_traces_into_consensus_with_cache,
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub(crate) use overlap::{
