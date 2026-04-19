@@ -14,8 +14,8 @@
 use super::optimized::find_sections_in_route;
 use super::progress::{DetectionPhase, DetectionProgressCallback};
 use super::{
-    FrequentSection, SectionConfig, SectionPortion, compute_consensus_polyline,
-    extract_all_activity_traces,
+    ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion,
+    extract_all_activity_traces, merge_traces_into_consensus,
 };
 use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint, RouteGroup};
@@ -174,19 +174,68 @@ pub fn detect_sections_incremental(
                 }
             }
 
-            // Re-compute consensus polyline with all activities (including new ones)
-            let all_activity_ids: Vec<String> = updated.activity_ids.clone();
-            let traces =
-                extract_all_activity_traces(&all_activity_ids, &updated.polyline, &track_map);
-            let all_traces: Vec<Vec<GpsPoint>> = traces.values().cloned().collect();
+            // Update consensus polyline. The fast path uses the
+            // accumulator (Tier 2.1): only the new activities' traces are
+            // walked; old contributions are already baked into the
+            // running sums. Fallback path (no accumulator yet) builds one
+            // from all current traces — happens once per section then
+            // becomes incremental forever after.
+            let new_ids_to_fold: Vec<String> = new_matches
+                .iter()
+                .map(|(aid, _)| aid.clone())
+                .collect();
 
-            if !all_traces.is_empty() {
-                // Use existing polyline as reference for consensus
-                let consensus = compute_consensus_polyline(
-                    &updated.polyline,
-                    &all_traces,
+            let new_traces_for_section: Vec<(String, Vec<GpsPoint>)> = new_ids_to_fold
+                .iter()
+                .filter_map(|aid| {
+                    track_map
+                        .get(aid.as_str())
+                        .map(|pts| (aid.clone(), pts.to_vec()))
+                })
+                .collect();
+
+            let result = if let Some(ref mut accumulator) = updated.consensus_state {
+                // Accumulator exists: incremental path.
+                let res = merge_traces_into_consensus(
+                    accumulator,
+                    &new_traces_for_section,
                     config.proximity_threshold,
                 );
+                Some(res)
+            } else if !new_traces_for_section.is_empty() || !updated.activity_ids.is_empty() {
+                // No accumulator yet — backfill from CURRENT corpus
+                // (existing activity_ids — pre-update — plus new traces),
+                // then store. Subsequent merges go through the fast path.
+                let pre_update_ids: Vec<String> = updated
+                    .activity_ids
+                    .iter()
+                    .filter(|id| !new_ids_to_fold.contains(id))
+                    .cloned()
+                    .collect();
+                let pre_traces_map = extract_all_activity_traces(
+                    &pre_update_ids,
+                    &updated.polyline,
+                    &track_map,
+                );
+                let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> = pre_traces_map
+                    .into_iter()
+                    .map(|(id, pts)| (id, pts))
+                    .collect();
+                all_traces_pairs.extend(new_traces_for_section);
+
+                let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
+                let res = merge_traces_into_consensus(
+                    &mut acc,
+                    &all_traces_pairs,
+                    config.proximity_threshold,
+                );
+                updated.consensus_state = Some(acc);
+                Some(res)
+            } else {
+                None
+            };
+
+            if let Some(consensus) = result {
                 if consensus.polyline.len() >= 2 {
                     updated.polyline = consensus.polyline;
                     updated.distance_meters = calculate_route_distance(&updated.polyline);
@@ -345,6 +394,7 @@ mod tests {
             version: 1,
             updated_at: None,
             created_at: None,
+            consensus_state: None,
         }
     }
 
