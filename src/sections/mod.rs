@@ -1087,11 +1087,60 @@ pub fn detect_sections_multiscale_with_progress(
         drop(track_cells);
 
         let exhaustive_pairs = sport_tracks.len() * sport_tracks.len().saturating_sub(1) / 2;
+        let grid_survivors = pairs.len();
+
+        // Tier 4: refine grid-filtered pairs with an exact bbox-overlap test
+        // using the already-computed downsampled bounds. 5 km grid cells
+        // leave plenty of false positives (two tracks in the same
+        // neighborhood but whose bboxes don't actually touch within the
+        // proximity threshold). Filtering them out *before* R-tree
+        // construction means we build trees only for j-indices that still
+        // appear in surviving pairs, and the overlap loop below avoids a
+        // redundant per-pair bbox re-check. Pure prune — any pair rejected
+        // here would have been rejected by `bounds_overlap` inside the
+        // overlap loop anyway, so the section set is byte-identical.
+        let pairs: Vec<(usize, usize)> = {
+            #[cfg(feature = "parallel")]
+            {
+                pairs
+                    .into_par_iter()
+                    .filter(|&(i, j)| {
+                        let ref_lat = (ds_bounds[i].min_lat + ds_bounds[i].max_lat) / 2.0;
+                        bounds_overlap(
+                            &ds_bounds[i],
+                            &ds_bounds[j],
+                            overlap_config.proximity_threshold,
+                            ref_lat,
+                        )
+                    })
+                    .collect()
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                pairs
+                    .into_iter()
+                    .filter(|&(i, j)| {
+                        let ref_lat = (ds_bounds[i].min_lat + ds_bounds[i].max_lat) / 2.0;
+                        bounds_overlap(
+                            &ds_bounds[i],
+                            &ds_bounds[j],
+                            overlap_config.proximity_threshold,
+                            ref_lat,
+                        )
+                    })
+                    .collect()
+            }
+        };
+
         info!(
-            "[MultiScale] Grid filtering: {} candidate pairs (of {} possible) for {}",
+            "[MultiScale] Broad-phase: grid {}/{} → bbox {}/{} for {} (pruned {} by grid, {} by bbox)",
+            grid_survivors,
+            exhaustive_pairs,
             pairs.len(),
             exhaustive_pairs,
             sport_type,
+            exhaustive_pairs.saturating_sub(grid_survivors),
+            grid_survivors.saturating_sub(pairs.len()),
         );
 
         // Early exit: no candidate pairs means no overlaps possible
