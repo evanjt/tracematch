@@ -9,3 +9,6 @@
 
 # Worktrees
 .worktrees/
+
+# Private test fixtures (user data, never commit)
+tests/fixtures/private/
