@@ -453,13 +453,10 @@ impl Default for MatchConfig {
         Self {
             perfect_threshold: 15.0,
             zero_threshold: 100.0,
-            // Lowered from 65% to be more inclusive - let match % show similarity
-            min_match_percentage: 50.0,
+            min_match_percentage: 60.0,
             min_route_distance: 500.0,
-            // Increased from 20% to 30% - routes can vary in distance
-            max_distance_diff_ratio: 0.30,
-            // Increased from 200m to 300m - more tolerant of start/end variations
-            endpoint_threshold: 300.0,
+            max_distance_diff_ratio: 0.25,
+            endpoint_threshold: 200.0,
             resample_count: 50,
             resample_spacing_meters: 50.0,
             min_resample_points: 20,

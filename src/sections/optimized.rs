@@ -493,7 +493,7 @@ pub fn detect_sections_optimized(
     // Short sections need more visits to prove they're meaningful patterns.
     // Low-density regions are treated as noise.
     let quality_start = std::time::Instant::now();
-    let mut final_sections = filter_low_quality_sections(merged);
+    let mut final_sections = filter_low_quality_sections(merged, tracks.len());
     info!(
         "[OptimizedSections] After quality filter: {} sections in {}ms",
         final_sections.len(),

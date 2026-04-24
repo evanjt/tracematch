@@ -762,7 +762,7 @@ pub fn merge_nearby_sections(
 
         let max_containment = forward_containment.max(reverse_containment);
 
-        if max_containment > 0.4 {
+        if max_containment > 0.3 {
             keep[j] = false;
 
             let direction = if reverse_containment > forward_containment {
@@ -1244,7 +1244,7 @@ pub fn remove_overlapping_sections(
         // If j is largely contained in i (j is the longer one since we sorted by length)
         // j should be removed because i is the more specific section
         // BUT: Don't remove j if it's a loop!
-        if j_in_i > 0.6 && !is_loop[j] {
+        if j_in_i > 0.45 && !is_loop[j] {
             info!(
                 "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
                 sections[j].id,
@@ -1254,9 +1254,7 @@ pub fn remove_overlapping_sections(
                 sections[i].distance_meters as u32
             );
             keep[j] = false;
-        } else if i_in_j > 0.8 && !is_loop[i] {
-            // If i is almost entirely contained in j, remove i (the smaller one)
-            // BUT: Don't remove i if it's a loop!
+        } else if i_in_j > 0.7 && !is_loop[i] {
             info!(
                 "[Sections] Removing {} ({}m) - {}% contained in {} ({}m)",
                 sections[i].id,
@@ -1266,10 +1264,7 @@ pub fn remove_overlapping_sections(
                 sections[j].distance_meters as u32
             );
             keep[i] = false;
-        } else if j_in_i > 0.4 && i_in_j > 0.4 && !is_loop[i] && !is_loop[j] {
-            // Significant mutual overlap - they're essentially the same
-            // Keep the shorter one (i, since sorted by length)
-            // BUT: Don't remove either if they're loops!
+        } else if j_in_i > 0.3 && i_in_j > 0.3 && !is_loop[i] && !is_loop[j] {
             info!(
                 "[Sections] Removing {} due to mutual overlap with {} ({}% vs {}%)",
                 sections[j].id,
@@ -1773,33 +1768,38 @@ fn trim_to_unclaimed(
 // should be conservative. Short sections that are only visited twice are
 // probably noise—but short sections visited many times are meaningful patterns.
 
-/// Minimum visits required based on section length.
-/// Shorter sections need more visits to prove they're not noise.
-///
-/// Rationale:
-/// - Very short (< 200m): Could be GPS drift or random detour → needs 6+ visits
-/// - Short (< 400m): Possible shortcut or intersection → needs 4+ visits
-/// - Medium (< 800m): Likely a distinct route portion → needs 3+ visits
-/// - Long (800m+): Significant route segment → 2+ visits is enough
-fn required_visits_for_length(distance_meters: f64) -> u32 {
-    match distance_meters {
+/// Minimum visits required based on section length and dataset size.
+/// Shorter sections need more visits. Larger datasets use higher thresholds
+/// to avoid drowning in noise.
+fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+    let bonus: u32 = match total_activities {
+        0..=50 => 0,
+        51..=200 => 1,
+        _ => 2,
+    };
+
+    let base = match distance_meters {
         d if d < 200.0 => 6,
         d if d < 400.0 => 4,
         d if d < 800.0 => 3,
         _ => 2,
-    }
+    };
+
+    base + bonus
 }
 
-/// Quality filter: Remove low-confidence sections based on length and visits.
-///
-/// This is the final filter in the pipeline, applied after all merging/splitting.
-/// It ensures we only keep sections that are genuinely frequent patterns.
-pub fn filter_low_quality_sections(sections: Vec<FrequentSection>) -> Vec<FrequentSection> {
+/// Quality filter: Remove low-confidence sections based on length, visits,
+/// and dataset size. Larger datasets require more visits for a section to
+/// survive, since the signal-to-noise ratio is lower.
+pub fn filter_low_quality_sections(
+    sections: Vec<FrequentSection>,
+    total_activities: usize,
+) -> Vec<FrequentSection> {
     let before = sections.len();
     let mut filtered: Vec<FrequentSection> = Vec::new();
 
     for section in sections {
-        let min_visits = required_visits_for_length(section.distance_meters);
+        let min_visits = required_visits_for_length(section.distance_meters, total_activities);
         let min_points = 8;
 
         if section.visit_count >= min_visits && section.polyline.len() >= min_points {
