@@ -181,79 +181,83 @@ pub fn detect_sections_incremental(
                 }
             }
 
-            // Update consensus polyline. The fast path uses the
-            // accumulator (Tier 2.1): only the new activities' traces are
-            // walked; old contributions are already baked into the
-            // running sums. Fallback path (no accumulator yet) builds one
-            // from all current traces — happens once per section then
-            // becomes incremental forever after.
-            let new_ids_to_fold: Vec<String> = new_matches
-                .iter()
-                .map(|(aid, _)| aid.clone())
-                .collect();
-
-            let new_traces_for_section: Vec<(String, Vec<GpsPoint>)> = new_ids_to_fold
-                .iter()
-                .filter_map(|aid| {
-                    track_map
-                        .get(aid.as_str())
-                        .map(|pts| (aid.clone(), pts.to_vec()))
-                })
-                .collect();
-
-            let result = if let Some(ref mut accumulator) = updated.consensus_state {
-                // Accumulator exists: incremental path. Pass the shared
-                // R-tree cache so trees built once at the top of this
-                // function are reused across every section merge.
-                let res = merge_traces_into_consensus_with_cache(
-                    accumulator,
-                    &new_traces_for_section,
-                    &trace_rtree_cache,
-                    config.proximity_threshold,
-                );
-                Some(res)
-            } else if !new_traces_for_section.is_empty() || !updated.activity_ids.is_empty() {
-                // No accumulator yet — backfill from CURRENT corpus
-                // (existing activity_ids — pre-update — plus new traces),
-                // then store. Subsequent merges go through the fast path.
-                let pre_update_ids: Vec<String> = updated
-                    .activity_ids
+            // Accepted (user-defined) sections keep their polyline frozen —
+            // only activity tracking above is updated.
+            if !section.is_user_defined {
+                // Update consensus polyline. The fast path uses the
+                // accumulator (Tier 2.1): only the new activities' traces are
+                // walked; old contributions are already baked into the
+                // running sums. Fallback path (no accumulator yet) builds one
+                // from all current traces — happens once per section then
+                // becomes incremental forever after.
+                let new_ids_to_fold: Vec<String> = new_matches
                     .iter()
-                    .filter(|id| !new_ids_to_fold.contains(id))
-                    .cloned()
+                    .map(|(aid, _)| aid.clone())
                     .collect();
-                let pre_traces_map = extract_all_activity_traces(
-                    &pre_update_ids,
-                    &updated.polyline,
-                    &track_map,
-                );
-                let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> = pre_traces_map
-                    .into_iter()
-                    .map(|(id, pts)| (id, pts))
+
+                let new_traces_for_section: Vec<(String, Vec<GpsPoint>)> = new_ids_to_fold
+                    .iter()
+                    .filter_map(|aid| {
+                        track_map
+                            .get(aid.as_str())
+                            .map(|pts| (aid.clone(), pts.to_vec()))
+                    })
                     .collect();
-                all_traces_pairs.extend(new_traces_for_section);
 
-                let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
-                let res = merge_traces_into_consensus_with_cache(
-                    &mut acc,
-                    &all_traces_pairs,
-                    &trace_rtree_cache,
-                    config.proximity_threshold,
-                );
-                updated.consensus_state = Some(acc);
-                Some(res)
-            } else {
-                None
-            };
+                let result = if let Some(ref mut accumulator) = updated.consensus_state {
+                    // Accumulator exists: incremental path. Pass the shared
+                    // R-tree cache so trees built once at the top of this
+                    // function are reused across every section merge.
+                    let res = merge_traces_into_consensus_with_cache(
+                        accumulator,
+                        &new_traces_for_section,
+                        &trace_rtree_cache,
+                        config.proximity_threshold,
+                    );
+                    Some(res)
+                } else if !new_traces_for_section.is_empty() || !updated.activity_ids.is_empty() {
+                    // No accumulator yet — backfill from CURRENT corpus
+                    // (existing activity_ids — pre-update — plus new traces),
+                    // then store. Subsequent merges go through the fast path.
+                    let pre_update_ids: Vec<String> = updated
+                        .activity_ids
+                        .iter()
+                        .filter(|id| !new_ids_to_fold.contains(id))
+                        .cloned()
+                        .collect();
+                    let pre_traces_map = extract_all_activity_traces(
+                        &pre_update_ids,
+                        &updated.polyline,
+                        &track_map,
+                    );
+                    let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> = pre_traces_map
+                        .into_iter()
+                        .map(|(id, pts)| (id, pts))
+                        .collect();
+                    all_traces_pairs.extend(new_traces_for_section);
 
-            if let Some(consensus) = result {
-                if consensus.polyline.len() >= 2 {
-                    updated.polyline = consensus.polyline;
-                    updated.distance_meters = calculate_route_distance(&updated.polyline);
-                    updated.confidence = consensus.confidence;
-                    updated.observation_count = consensus.observation_count;
-                    updated.average_spread = consensus.average_spread;
-                    updated.point_density = consensus.point_density;
+                    let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
+                    let res = merge_traces_into_consensus_with_cache(
+                        &mut acc,
+                        &all_traces_pairs,
+                        &trace_rtree_cache,
+                        config.proximity_threshold,
+                    );
+                    updated.consensus_state = Some(acc);
+                    Some(res)
+                } else {
+                    None
+                };
+
+                if let Some(consensus) = result {
+                    if consensus.polyline.len() >= 2 {
+                        updated.polyline = consensus.polyline;
+                        updated.distance_meters = calculate_route_distance(&updated.polyline);
+                        updated.confidence = consensus.confidence;
+                        updated.observation_count = consensus.observation_count;
+                        updated.average_spread = consensus.average_spread;
+                        updated.point_density = consensus.point_density;
+                    }
                 }
             }
 
