@@ -67,9 +67,10 @@ pub(crate) use portions::compute_activity_portions;
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub(crate) use postprocess::{
     consolidate_fragments, filter_low_quality_sections, make_sections_exclusive,
-    merge_nearby_sections, remove_overlapping_sections, split_at_gradient_changes,
-    split_at_heading_changes, split_folding_sections, split_high_variance_sections,
+    split_at_gradient_changes, split_at_heading_changes, split_folding_sections,
+    split_high_variance_sections,
 };
+pub use postprocess::{merge_nearby_sections, remove_overlapping_sections};
 pub(crate) use rtree::IndexedPoint;
 pub use rtree::build_rtree;
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
