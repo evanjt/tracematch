@@ -239,7 +239,6 @@ impl ScalePreset {
             Self::medium(),
             Self::long(),
             Self::extra_long(),
-            Self::ultra_long(),
         ]
     }
 }
@@ -273,16 +272,16 @@ pub struct SectionConfig {
 impl Default for SectionConfig {
     fn default() -> Self {
         Self {
-            proximity_threshold: 50.0, // 50m - handles GPS error + wide roads + opposite sides
-            min_section_length: 200.0, // 200m minimum section (used when scale_presets is empty)
-            max_section_length: 200_000.0, // 200km max (used when scale_presets is empty)
-            min_activities: 3,         // Need 3+ activities (used when scale_presets is empty)
-            cluster_tolerance: 80.0,   // 80m for clustering similar overlaps
-            sample_points: 50,         // For AMD comparison only
+            proximity_threshold: 50.0,
+            min_section_length: 200.0,
+            max_section_length: 200_000.0,
+            min_activities: 3,
+            cluster_tolerance: 80.0,
+            sample_points: 50,
             detection_mode: DetectionMode::Discovery,
             include_potentials: true,
             scale_presets: ScalePreset::default_presets(),
-            preserve_hierarchy: true,
+            preserve_hierarchy: false,
         }
     }
 }

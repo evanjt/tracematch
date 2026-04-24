@@ -110,7 +110,7 @@ pub fn should_group_routes(
     check_middle_points_match(
         &sig1.points,
         &points2_for_middle,
-        config.endpoint_threshold * 2.0,
+        config.endpoint_threshold,
     )
 }
 
