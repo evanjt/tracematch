@@ -496,6 +496,10 @@ fn compute_matches_and_split(
                     activity_id: activity_id.clone(),
                     match_percentage: result.match_percentage,
                     direction: result.direction,
+                    start_index: None,
+                    end_index: None,
+                    route_distance: None,
+                    lap_time: None,
                 })
             })
             .collect();
@@ -529,6 +533,10 @@ fn compute_matches_and_split(
                             activity_id: activity_id.clone(),
                             match_percentage: result.match_percentage,
                             direction: result.direction,
+                            start_index: None,
+                            end_index: None,
+                            route_distance: None,
+                            lap_time: None,
                         })
                     })
                     .collect();
