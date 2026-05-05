@@ -507,6 +507,14 @@ pub struct ActivityMatchInfo {
     pub match_percentage: f64,
     /// Match direction relative to the representative route
     pub direction: Direction,
+    /// GPS point index where the route portion starts (into the activity's track)
+    pub start_index: Option<u32>,
+    /// GPS point index where the route portion ends
+    pub end_index: Option<u32>,
+    /// Distance in meters of the matched route portion
+    pub route_distance: Option<f64>,
+    /// Time in seconds for the matched route portion (from time_streams)
+    pub lap_time: Option<f64>,
 }
 
 /// Result from grouping signatures, including per-activity match info.
