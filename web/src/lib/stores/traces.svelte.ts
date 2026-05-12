@@ -55,6 +55,13 @@ class TraceStore {
     await idbDel(ANALYSIS_KEY);
   }
 
+  async addTraces(newTraces: StoredTrace[]) {
+    await Promise.all(newTraces.map((t) => idbSet(TRACES_PREFIX + t.id, t)));
+    this.traces = [...newTraces, ...this.traces];
+    this.analysis = null;
+    await idbDel(ANALYSIS_KEY);
+  }
+
   async removeTrace(id: string) {
     await idbDel(TRACES_PREFIX + id);
     this.traces = this.traces.filter((t) => t.id !== id);

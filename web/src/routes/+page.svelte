@@ -12,6 +12,7 @@
 
   let wasmReady = $state(false);
   let analysing = $state(false);
+  let analysisProgress = $state<{ phase: string; current: number; total: number } | null>(null);
 
   // Section detection parameters
   let proximityThreshold = $state(50);
@@ -34,9 +35,19 @@
   let highlightedTrace = $state<string | null>(null);
   let highlightedGroup = $state<{ ids: string[]; portions?: SectionPortion[] } | null>(null);
   let portionOverlays: L.Polyline[] = [];
-  let lastFitKey = '';
+  let hasFitOnce = false;
+  let lastAnalyzedAt: number | null = null;
   let tracePolylines = new Map<string, { polyline: L.Polyline; baseStyle: { color: string; weight: number; opacity: number; dashArray?: string } }>();
   let sectionLayers: { activityIds: string[]; layers: L.Layer[] }[] = [];
+  let L: typeof import('leaflet') | null = null;
+
+  const GROUP_COLORS = [
+    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+    '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000'
+  ];
+
+  const TRACE_GRAY = '#64748b';
 
   function toggleSectionExpand(id: string) {
     const next = new Set(expandedSections);
@@ -47,24 +58,20 @@
 
   function zoomToTrace(traceId: string) {
     const trace = traceStore.traces.find((t) => t.id === traceId);
-    if (!trace || !map) return;
-    import('leaflet').then((L) => {
-      const latlngs = trace.points.map((p) => L.latLng(p.latitude, p.longitude));
-      if (latlngs.length > 0) {
-        map!.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60] });
-      }
-    });
+    if (!trace || !map || !L) return;
+    const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+    if (latlngs.length > 0) {
+      map.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60] });
+    }
     if (hiddenTraces.has(traceId)) toggleTrace(traceId);
   }
 
   function zoomToSection(section: FrequentSection) {
-    if (!map) return;
-    import('leaflet').then((L) => {
-      const latlngs = section.polyline.map((p) => L.latLng(p.latitude, p.longitude));
-      if (latlngs.length > 0) {
-        map!.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60] });
-      }
-    });
+    if (!map || !L) return;
+    const latlngs = section.polyline.map((p) => L!.latLng(p.latitude, p.longitude));
+    if (latlngs.length > 0) {
+      map.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60] });
+    }
   }
 
   function traceDistanceById(id: string): number {
@@ -111,19 +118,25 @@
     hiddenTraces = next;
   }
 
-  const GROUP_COLORS = [
-    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
-    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
-    '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000'
-  ];
-
-  const UNGROUPED_COLORS = [
-    '#64748b', '#6b7280', '#71717a', '#737373', '#78716c',
-    '#94a3b8', '#9ca3af', '#a1a1aa', '#a3a3a3', '#a8a29e'
-  ];
-
   function traceNameById(id: string): string {
     return traceStore.traces.find((t) => t.id === id)?.name ?? id.slice(0, 8);
+  }
+
+  function getTraceStyle(traceId: string): { color: string; weight: number; opacity: number; dashArray?: string } {
+    const analysis = traceStore.analysis;
+    if (!analysis?.groups) {
+      return { color: TRACE_GRAY, weight: 2, opacity: 0.6 };
+    }
+    for (let i = 0; i < analysis.groups.length; i++) {
+      if (analysis.groups[i].activityIds.includes(traceId)) {
+        return {
+          color: GROUP_COLORS[i % GROUP_COLORS.length],
+          weight: 3,
+          opacity: 0.75
+        };
+      }
+    }
+    return { color: TRACE_GRAY, weight: 2, opacity: 0.4, dashArray: '6 4' };
   }
 
   onMount(async () => {
@@ -136,135 +149,165 @@
     }
   });
 
-  function updateMap() {
-    if (!mapContainer || typeof window === 'undefined') return;
+  // Sync traces to map — incremental add/remove, no full rebuild
+  function syncTracesToMap() {
+    if (!map || !L || !traceLayerGroup) return;
+    const traces = traceStore.traces;
+    const currentIds = new Set(traces.map((t) => t.id));
 
-    import('leaflet').then((L) => {
-      import('leaflet/dist/leaflet.css');
-
-      if (!map) {
-        map = L.map(mapContainer).setView([46.5, 7.5], 10);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap contributors',
-          maxZoom: 19
-        }).addTo(map);
-        traceLayerGroup = L.layerGroup().addTo(map);
-        sectionLayerGroup = L.layerGroup().addTo(map);
+    // Remove polylines for traces that no longer exist
+    for (const [id, entry] of tracePolylines) {
+      if (!currentIds.has(id)) {
+        entry.polyline.remove();
+        tracePolylines.delete(id);
       }
+    }
 
-      traceLayerGroup!.clearLayers();
-      sectionLayerGroup!.clearLayers();
-      tracePolylines.clear();
-      sectionLayers = [];
-
-      const analysis = traceStore.analysis;
-      const traces = traceStore.traces;
-      if (traces.length === 0) return;
-
-      // Build group color lookup
-      const groupForTrace = new Map<string, number>();
-      if (analysis?.groups) {
-        analysis.groups.forEach((g, i) => {
-          g.activityIds.forEach((id) => groupForTrace.set(id, i));
-        });
-      }
-
-      const allLatLngs: L.LatLng[] = [];
-
-      for (let ti = 0; ti < traces.length; ti++) {
-        const trace = traces[ti];
-        if (hiddenTraces.has(trace.id)) continue;
-        const latlngs = trace.points.map((p) => L.latLng(p.latitude, p.longitude));
-        if (latlngs.length === 0) continue;
-
-        let color: string;
-        let weight: number;
-        let opacity: number;
-        let dashArray: string | undefined;
-
-        if (analysis?.groups) {
-          const gIdx = groupForTrace.get(trace.id);
-          if (gIdx !== undefined) {
-            color = GROUP_COLORS[gIdx % GROUP_COLORS.length];
-            weight = 3;
-            opacity = 0.75;
-          } else {
-            color = UNGROUPED_COLORS[ti % UNGROUPED_COLORS.length];
-            weight = 2;
-            opacity = 0.4;
-            dashArray = '6 4';
-          }
-        } else {
-          color = GROUP_COLORS[ti % GROUP_COLORS.length];
-          weight = 2.5;
-          opacity = 0.65;
+    // Add polylines for new traces
+    let addedAny = false;
+    const allLatLngs: L.LatLng[] = [];
+    for (const trace of traces) {
+      if (tracePolylines.has(trace.id)) {
+        if (!hiddenTraces.has(trace.id)) {
+          const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+          allLatLngs.push(...latlngs);
         }
+        continue;
+      }
+      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+      if (latlngs.length === 0) continue;
 
-        const traceId = trace.id;
-        const baseStyle = { color, weight, opacity, dashArray };
-        const pl = L.polyline(latlngs, baseStyle)
-          .bindPopup(
-            `<b>${trace.name}</b><br>` +
-              `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts`
-          )
-          .on('mouseover', () => { highlightedTrace = traceId; })
-          .on('mouseout', () => { if (highlightedTrace === traceId) highlightedTrace = null; })
-          .addTo(traceLayerGroup!);
-        tracePolylines.set(traceId, { polyline: pl, baseStyle });
+      const traceId = trace.id;
+      const baseStyle = getTraceStyle(traceId);
+      const pl = L.polyline(latlngs, baseStyle)
+        .bindPopup(
+          `<b>${trace.name}</b><br>` +
+            `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts`
+        )
+        .on('mouseover', () => { highlightedTrace = traceId; })
+        .on('mouseout', () => { if (highlightedTrace === traceId) highlightedTrace = null; })
+        .addTo(traceLayerGroup!);
+      tracePolylines.set(traceId, { polyline: pl, baseStyle });
+      addedAny = true;
+      if (!hiddenTraces.has(trace.id)) {
         allLatLngs.push(...latlngs);
       }
+    }
 
-      // Sections rendered on top with thick orange + white border
-      if (analysis?.sections) {
-        for (const section of analysis.sections) {
-          const latlngs = section.polyline.map((p: GpsPoint) =>
-            L.latLng(p.latitude, p.longitude)
-          );
-          if (latlngs.length < 2) continue;
-
-          const sLayers: L.Layer[] = [];
-
-          const border = L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.8 }).addTo(sectionLayerGroup!);
-          sLayers.push(border);
-
-          const line = L.polyline(latlngs, { color: '#FC4C02', weight: 5, opacity: 0.9 })
-            .bindPopup(
-              `<b>${section.name || 'Detected section'}</b><br>` +
-                `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
-                `${section.activityIds.length} activities`
-            )
-            .addTo(sectionLayerGroup!);
-          sLayers.push(line);
-
-          const markerIcon = L.divIcon({
-            className: 'section-marker',
-            html: '<div style="width:10px;height:10px;border-radius:50%;background:#FC4C02;border:2px solid white;"></div>',
-            iconSize: [14, 14],
-            iconAnchor: [7, 7]
-          });
-          const m1 = L.marker(latlngs[0], { icon: markerIcon }).addTo(sectionLayerGroup!);
-          const m2 = L.marker(latlngs[latlngs.length - 1], { icon: markerIcon }).addTo(sectionLayerGroup!);
-          sLayers.push(m1, m2);
-
-          sectionLayers.push({ activityIds: section.activityIds, layers: sLayers });
-        }
-      }
-
-      const fitKey = traces.map((t) => t.id).join(',') + '|' + (analysis?.analyzedAt ?? '');
-      if (allLatLngs.length > 0 && fitKey !== lastFitKey) {
-        lastFitKey = fitKey;
-        map!.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-      }
-    });
+    // Fit bounds only on first batch load
+    if (addedAny && !hasFitOnce && allLatLngs.length > 0) {
+      hasFitOnce = true;
+      map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
+    }
   }
 
+  // Apply styles to existing polylines (used when analysis changes or traces hidden/shown)
+  function applyStyles() {
+    if (!traceLayerGroup) return;
+    for (const [id, entry] of tracePolylines) {
+      const newStyle = getTraceStyle(id);
+      entry.baseStyle = newStyle;
+      entry.polyline.setStyle(newStyle);
+      if (hiddenTraces.has(id)) {
+        entry.polyline.setStyle({ opacity: 0, weight: 0 });
+      }
+    }
+  }
+
+  // Rebuild section layers (only when analysis changes)
+  function syncSections() {
+    if (!map || !L || !sectionLayerGroup) return;
+    sectionLayerGroup.clearLayers();
+    sectionLayers = [];
+
+    const analysis = traceStore.analysis;
+    if (!analysis?.sections) return;
+
+    for (const section of analysis.sections) {
+      const latlngs = section.polyline.map((p: GpsPoint) =>
+        L!.latLng(p.latitude, p.longitude)
+      );
+      if (latlngs.length < 2) continue;
+
+      const sLayers: L.Layer[] = [];
+
+      const border = L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.8 }).addTo(sectionLayerGroup!);
+      sLayers.push(border);
+
+      const line = L.polyline(latlngs, { color: '#FC4C02', weight: 5, opacity: 0.9 })
+        .bindPopup(
+          `<b>${section.name || 'Detected section'}</b><br>` +
+            `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
+            `${section.activityIds.length} activities`
+        )
+        .addTo(sectionLayerGroup!);
+      sLayers.push(line);
+
+      // Only start and end markers
+      const markerIcon = L.divIcon({
+        className: 'section-marker',
+        html: '<div style="width:10px;height:10px;border-radius:50%;background:#FC4C02;border:2px solid white;"></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+      const m1 = L.marker(latlngs[0], { icon: markerIcon }).addTo(sectionLayerGroup!);
+      const m2 = L.marker(latlngs[latlngs.length - 1], { icon: markerIcon }).addTo(sectionLayerGroup!);
+      sLayers.push(m1, m2);
+
+      sectionLayers.push({ activityIds: section.activityIds, layers: sLayers });
+    }
+  }
+
+  // Initialize map
   $effect(() => {
-    traceStore.traces;
-    traceStore.analysis;
-    hiddenTraces;
-    updateMap();
+    if (!mapContainer || typeof window === 'undefined') return;
+    if (map) return; // Already initialized
+
+    import('leaflet').then((leaflet) => {
+      import('leaflet/dist/leaflet.css');
+      L = leaflet;
+      map = L.map(mapContainer).setView([30, 0], 2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19
+      }).addTo(map);
+      traceLayerGroup = L.layerGroup().addTo(map);
+      sectionLayerGroup = L.layerGroup().addTo(map);
+
+      // Initial sync if traces were already loaded
+      syncTracesToMap();
+      applyStyles();
+      syncSections();
+    });
   });
 
+  // React to trace list changes — incremental sync
+  $effect(() => {
+    traceStore.traces;
+    if (!map || !L) return;
+    syncTracesToMap();
+  });
+
+  // React to analysis changes — restyle traces and rebuild sections
+  $effect(() => {
+    const analysis = traceStore.analysis;
+    if (!map || !L) return;
+    const analyzedAt = analysis?.analyzedAt ?? null;
+    if (analyzedAt !== lastAnalyzedAt) {
+      lastAnalyzedAt = analyzedAt;
+      applyStyles();
+      syncSections();
+    }
+  });
+
+  // React to hidden traces — just restyle
+  $effect(() => {
+    hiddenTraces;
+    if (!map || !L) return;
+    applyStyles();
+  });
+
+  // Highlight effect — update styles on existing polylines
   $effect(() => {
     const ht = highlightedTrace;
     const hg = highlightedGroup;
@@ -276,32 +319,32 @@
     portionOverlays = [];
 
     for (const [id, entry] of tracePolylines) {
+      if (hiddenTraces.has(id)) {
+        entry.polyline.setStyle({ opacity: 0, weight: 0 });
+        continue;
+      }
       if (activeIds === null) {
         entry.polyline.setStyle(entry.baseStyle);
       } else if (activeIds.includes(id)) {
         if (portions) {
-          // Section hover: show full trace dimmed, overlay the matching portion bright
           entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.65, weight: 2.5 });
           const trace = traceStore.traces.find((t) => t.id === id);
-          if (trace) {
+          if (trace && L) {
             const matching = portions.filter((p) => p.activityId === id);
             for (const p of matching) {
-              import('leaflet').then((L) => {
-                const pts = trace.points.slice(p.startIndex, p.endIndex + 1);
-                if (pts.length < 2) return;
-                const latlngs = pts.map((pt) => L.latLng(pt.latitude, pt.longitude));
-                const ol = L.polyline(latlngs, {
-                  color: entry.baseStyle.color,
-                  weight: 5,
-                  opacity: 1
-                }).addTo(traceLayerGroup!);
-                ol.bringToFront();
-                portionOverlays.push(ol);
-              });
+              const pts = trace.points.slice(p.startIndex, p.endIndex + 1);
+              if (pts.length < 2) continue;
+              const latlngs = pts.map((pt) => L!.latLng(pt.latitude, pt.longitude));
+              const ol = L.polyline(latlngs, {
+                color: entry.baseStyle.color,
+                weight: 5,
+                opacity: 1
+              }).addTo(traceLayerGroup!);
+              ol.bringToFront();
+              portionOverlays.push(ol);
             }
           }
         } else {
-          // Group or single trace hover: full highlight
           entry.polyline.setStyle({ ...entry.baseStyle, weight: 5, opacity: 1 });
           entry.polyline.bringToFront();
         }
@@ -313,7 +356,7 @@
     for (const sl of sectionLayers) {
       const relevant = activeIds === null || activeIds.some((id) => sl.activityIds.includes(id));
       for (const layer of sl.layers) {
-        const el = (layer as L.Polyline | L.Marker).getElement?.();
+        const el = (layer as L.Polyline | L.Marker).getElement?.() as HTMLElement | undefined;
         if (el) {
           el.style.opacity = relevant ? '' : '0.1';
         }
@@ -323,6 +366,7 @@
 
   async function handleFiles(files: FileList | File[]) {
     error = null;
+    const batch: StoredTrace[] = [];
     for (const file of files) {
       if (!file.name.endsWith('.gpx')) {
         error = `Skipped ${file.name} — only GPX files are supported currently`;
@@ -332,7 +376,7 @@
         const text = await file.text();
         const parsed = parseGpx(text);
         for (const trace of parsed) {
-          const stored: StoredTrace = {
+          batch.push({
             id: crypto.randomUUID(),
             name: trace.name,
             fileName: file.name,
@@ -340,12 +384,14 @@
             distance: trace.distance,
             sportType: trace.sportType,
             addedAt: Date.now()
-          };
-          await traceStore.addTrace(stored);
+          });
         }
       } catch (e) {
         error = `Failed to parse ${file.name}: ${e}`;
       }
+    }
+    if (batch.length > 0) {
+      await traceStore.addTraces(batch);
     }
   }
 
@@ -370,29 +416,43 @@
     analysing = true;
     error = null;
     sectionError = null;
+    analysisProgress = { phase: 'Creating signatures', current: 0, total: traceStore.traces.length };
 
     try {
       const signatures: RouteSignature[] = [];
       const tracks: [string, GpsPoint[]][] = [];
       const sportTypes: Record<string, string> = {};
+      const traces = traceStore.traces;
+      const batchSize = 50;
 
-      for (const trace of traceStore.traces) {
-        const sig = createSignature(trace.id, trace.points);
-        if (sig) {
-          signatures.push(sig);
-          tracks.push([trace.id, trace.points]);
-          sportTypes[trace.id] = trace.sportType ?? 'Ride';
+      for (let i = 0; i < traces.length; i += batchSize) {
+        const end = Math.min(i + batchSize, traces.length);
+        for (let j = i; j < end; j++) {
+          const trace = traces[j];
+          const sig = createSignature(trace.id, trace.points);
+          if (sig) {
+            signatures.push(sig);
+            tracks.push([trace.id, trace.points]);
+            sportTypes[trace.id] = trace.sportType ?? 'Ride';
+          }
         }
+        analysisProgress = { phase: 'Creating signatures', current: end, total: traces.length };
+        await new Promise((r) => setTimeout(r, 0));
       }
+
       console.log(
-        `[tracematch] Created ${signatures.length} signatures from ${traceStore.traces.length} traces`
+        `[tracematch] Created ${signatures.length} signatures from ${traces.length} traces`
       );
 
+      analysisProgress = { phase: 'Grouping routes', current: 0, total: 1 };
+      await new Promise((r) => setTimeout(r, 0));
       const groups = groupRoutes(signatures);
       console.log(`[tracematch] Grouped into ${groups.length} route groups`);
 
       let sections: FrequentSection[] = [];
       if (tracks.length >= 3) {
+        analysisProgress = { phase: 'Detecting sections', current: 0, total: 1 };
+        await new Promise((r) => setTimeout(r, 0));
         console.log(`[tracematch] Detecting sections across ${tracks.length} tracks...`);
         try {
           const sectionConfig = JSON.stringify({
@@ -419,6 +479,7 @@
         }
       }
 
+      analysisProgress = { phase: 'Saving results', current: 0, total: 1 };
       await traceStore.saveAnalysis({
         signatures,
         groups,
@@ -430,6 +491,7 @@
       console.error('[tracematch] Analysis error:', e);
     } finally {
       analysing = false;
+      analysisProgress = null;
     }
   }
 </script>
@@ -482,10 +544,10 @@
             <span class="panel-action" onclick={(e) => { e.stopPropagation(); traceStore.clearAll(); }}>Clear</span>
           </button>
           {#if !tracesCollapsed}
-            {#each traceStore.traces as trace, i (trace.id)}
+            {#each traceStore.traces as trace (trace.id)}
               {@const traceGroup = groupForTraceId(trace.id)}
               {@const traceSections = sectionsForTraceId(trace.id)}
-              {@const dotColor = traceGroup ? GROUP_COLORS[traceGroup.index % GROUP_COLORS.length] : GROUP_COLORS[i % GROUP_COLORS.length]}
+              {@const dotColor = traceGroup ? GROUP_COLORS[traceGroup.index % GROUP_COLORS.length] : TRACE_GRAY}
               <div
                 class="group-activity"
                 class:highlighted={highlightedTrace === trace.id}
@@ -614,10 +676,6 @@
                     <div class="section-details" onclick={(e) => e.stopPropagation()}>
                       <div class="section-stats">
                         <div class="stat-row">
-                          <span class="stat-label">Sport</span>
-                          <span class="stat-value">{section.sportType}</span>
-                        </div>
-                        <div class="stat-row">
                           <span class="stat-label">Avg spread</span>
                           <span class="stat-value">{section.averageSpread.toFixed(1)} m</span>
                         </div>
@@ -645,7 +703,7 @@
                             <span class="activity-dist"
                               >{(traceDistanceById(actId) / 1000).toFixed(1)} km</span
                             >
-                            <span class="zoom-icon">↗</span>
+                            <span class="zoom-icon">&#8599;</span>
                           </button>
                         {/each}
                       </div>
@@ -699,7 +757,17 @@
           {/if}
         </div>
         <button class="btn-analyse" onclick={runAnalysis} disabled={analysing || !wasmReady}>
-          {#if analysing}
+          {#if analysing && analysisProgress}
+            <div class="progress-content">
+              <span>{analysisProgress.phase}</span>
+              {#if analysisProgress.total > 1}
+                <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
+              {/if}
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+            </div>
+          {:else if analysing}
             Analysing...
           {:else if traceStore.analysis}
             Re-analyse
@@ -746,14 +814,6 @@
 </div>
 
 <style>
-  :global(body) {
-    margin: 0;
-    font-family:
-      -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #f8f9fa;
-    color: #1a1a1a;
-  }
-
   .app {
     height: 100vh;
     display: flex;
@@ -762,8 +822,8 @@
 
   header {
     padding: 8px 16px;
-    background: #fff;
-    border-bottom: 1px solid #e0e0e0;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     gap: 12px;
@@ -773,13 +833,13 @@
     margin: 0;
     font-size: 18px;
     font-weight: 700;
-    color: #1a1a1a;
+    color: var(--text);
     flex-shrink: 0;
   }
 
   .header-drop {
-    border: 1.5px dashed #ccc;
-    border-radius: 6px;
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius);
     padding: 5px 14px;
     transition: all 0.15s;
     flex-shrink: 0;
@@ -787,8 +847,8 @@
 
   .header-drop:hover,
   .header-drop.drag-over {
-    border-color: #fc4c02;
-    background: #fff5f0;
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
   }
 
   .header-drop-label {
@@ -797,12 +857,12 @@
     gap: 6px;
     cursor: pointer;
     font-size: 13px;
-    color: #666;
+    color: var(--text-muted);
     font-weight: 500;
   }
 
   .header-drop-label:hover {
-    color: #fc4c02;
+    color: var(--primary);
   }
 
   .header-drop-label input {
@@ -815,7 +875,7 @@
 
   .header-count {
     font-size: 12px;
-    color: #999;
+    color: var(--text-muted);
     flex-shrink: 0;
   }
 
@@ -827,15 +887,14 @@
 
   .sidebar {
     width: 360px;
-    background: #fff;
-    border-right: 1px solid #e0e0e0;
+    background: var(--card);
+    border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
     padding: 16px;
     gap: 0;
   }
-
 
   .error {
     background: #fef2f2;
@@ -846,17 +905,33 @@
     word-break: break-word;
   }
 
+  @media (prefers-color-scheme: dark) {
+    .error {
+      background: #2d1b1b;
+      color: #fca5a5;
+    }
+  }
+
   .panel-toggle h2 {
     margin: 0;
     font-size: 13px;
     font-weight: 600;
-    color: #888;
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
   .result-section {
     margin-bottom: 12px;
+  }
+
+  .result-section > h2 {
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
 
   .panel-toggle {
@@ -871,20 +946,21 @@
     width: 100%;
     text-align: left;
     font: inherit;
+    color: var(--text);
   }
 
   .panel-toggle:hover h2 {
-    color: #555;
+    color: var(--text);
   }
 
   .panel-chevron {
     font-size: 11px;
-    color: #aaa;
+    color: var(--text-muted);
     width: 12px;
   }
 
   .group-card {
-    background: #f8f9fa;
+    background: var(--bg);
     border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 8px;
@@ -904,7 +980,7 @@
 
   .group-count {
     font-size: 12px;
-    color: #888;
+    color: var(--text-muted);
     margin-left: auto;
   }
 
@@ -920,7 +996,7 @@
     align-items: center;
     gap: 6px;
     font-size: 12px;
-    color: #555;
+    color: var(--text-muted);
   }
 
   .group-activity.dimmed {
@@ -928,7 +1004,7 @@
   }
 
   .group-activity.highlighted {
-    background: #e8e8e8;
+    background: var(--border);
     border-radius: 4px;
     margin: 0 -4px;
     padding: 1px 4px;
@@ -939,7 +1015,7 @@
     border: none;
     cursor: pointer;
     padding: 3px 5px;
-    color: #666;
+    color: var(--text-muted);
     line-height: 1;
     border-radius: 4px;
     margin-left: auto;
@@ -948,17 +1024,17 @@
   }
 
   .btn-vis:hover {
-    background: #e8e8e8;
-    color: #333;
+    background: var(--border);
+    color: var(--text);
   }
 
   .btn-vis.is-hidden {
-    color: #ccc;
+    color: var(--border);
   }
 
   .btn-vis.is-hidden:hover {
-    color: #888;
-    background: #f0f0f0;
+    color: var(--text-muted);
+    background: var(--bg);
   }
 
   .btn-vis.sm {
@@ -985,7 +1061,7 @@
   }
 
   .section-card {
-    background: #f8f9fa;
+    background: var(--bg);
     border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 8px;
@@ -994,11 +1070,11 @@
   }
 
   .section-card:hover {
-    background: #f0f1f3;
+    background: var(--border);
   }
 
   .section-card.expanded {
-    background: #eef0f2;
+    background: var(--border);
   }
 
   .section-header {
@@ -1008,14 +1084,14 @@
   }
 
   .section-card:hover .section-name {
-    color: #FC4C02;
+    color: var(--section-orange);
   }
 
   .section-dot {
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background: #FC4C02;
+    background: var(--section-orange);
     flex-shrink: 0;
   }
 
@@ -1028,12 +1104,12 @@
   .section-chevron {
     margin-left: auto;
     font-size: 12px;
-    color: #aaa;
+    color: var(--text-muted);
   }
 
   .section-summary {
     font-size: 12px;
-    color: #888;
+    color: var(--text-muted);
     padding-left: 18px;
     margin-top: 2px;
   }
@@ -1041,7 +1117,7 @@
   .section-details {
     margin-top: 8px;
     padding-top: 8px;
-    border-top: 1px solid #e8e8e8;
+    border-top: 1px solid var(--border);
   }
 
   .section-stats {
@@ -1058,18 +1134,18 @@
   }
 
   .stat-label {
-    color: #888;
+    color: var(--text-muted);
   }
 
   .stat-value {
     font-weight: 500;
-    color: #555;
+    color: var(--text);
   }
 
   .section-activities-header {
     font-size: 11px;
     font-weight: 600;
-    color: #aaa;
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     margin-bottom: 4px;
@@ -1091,7 +1167,7 @@
     border: none;
     cursor: pointer;
     font: inherit;
-    color: #555;
+    color: var(--text-muted);
     font-size: 12px;
     text-align: left;
     width: 100%;
@@ -1099,30 +1175,32 @@
 
   .section-activity-row:hover,
   .section-activity-row.highlighted {
-    background: #e8e8e8;
-    color: #1a1a1a;
+    background: var(--border);
+    color: var(--text);
   }
 
   .section-activity-row .activity-dist {
-    color: #999;
+    color: var(--text-muted);
     margin-left: auto;
     font-size: 11px;
     flex-shrink: 0;
   }
 
   .zoom-icon {
-    color: #bbb;
+    color: var(--text-muted);
     font-size: 11px;
     flex-shrink: 0;
+    opacity: 0.5;
   }
 
   .section-activity-row:hover .zoom-icon {
-    color: #FC4C02;
+    color: var(--section-orange);
+    opacity: 1;
   }
 
   .no-results {
     font-size: 13px;
-    color: #999;
+    color: var(--text-muted);
     margin: 0;
     font-style: italic;
   }
@@ -1139,25 +1217,34 @@
     background: #fef2f2;
   }
 
+  @media (prefers-color-scheme: dark) {
+    .panel-action {
+      color: #fca5a5;
+    }
+    .panel-action:hover {
+      background: #2d1b1b;
+    }
+  }
+
   .assignment-tag {
     font-size: 10px;
     padding: 1px 5px;
     border-radius: 3px;
-    border: 1px solid #ccc;
-    color: #666;
-    background: #fff;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    background: var(--card);
     flex-shrink: 0;
   }
 
   .assignment-tag.section-tag {
-    border-color: #FC4C02;
-    color: #FC4C02;
+    border-color: var(--section-orange);
+    color: var(--section-orange);
   }
 
   .btn-remove-sm {
     background: none;
     border: none;
-    color: #ccc;
+    color: var(--border);
     font-size: 14px;
     cursor: pointer;
     padding: 0 4px;
@@ -1169,51 +1256,6 @@
     color: #e11d48;
   }
 
-  .trace-list-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .trace-list-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: #888;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .trace-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid #f0f0f0;
-  }
-
-  .trace-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .trace-name-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .trace-name {
-    font-size: 14px;
-    font-weight: 500;
-  }
-
   .activity-name {
     white-space: nowrap;
     overflow: hidden;
@@ -1221,49 +1263,11 @@
     max-width: 250px;
   }
 
-  .trace-meta {
-    font-size: 12px;
-    color: #888;
-    padding-left: 18px;
-  }
-
-  .btn-remove {
-    background: none;
-    border: none;
-    color: #999;
-    font-size: 18px;
-    cursor: pointer;
-    padding: 4px 8px;
-  }
-
-  .btn-remove:hover {
-    color: #e11d48;
-  }
-
-  .btn-sm {
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 12px;
-    border: none;
-    cursor: pointer;
-  }
-
-  .btn-danger {
-    background: #fef2f2;
-    color: #b91c1c;
-  }
-
-  .btn-danger:hover {
-    background: #fee2e2;
-  }
-
-  .btn-secondary {
-    background: #f0f0f0;
-    color: #555;
-  }
-
-  .btn-secondary:hover {
-    background: #e5e5e5;
+  .activity-dist {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-left: auto;
   }
 
   .settings-panel {
@@ -1282,12 +1286,12 @@
   }
 
   .slider-label {
-    color: #555;
+    color: var(--text);
     font-weight: 500;
   }
 
   .slider-value {
-    color: #888;
+    color: var(--text-muted);
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
@@ -1296,30 +1300,33 @@
     grid-column: 1 / -1;
     width: 100%;
     height: 4px;
-    accent-color: #FC4C02;
+    accent-color: var(--primary);
     cursor: pointer;
   }
 
   .slider-hint {
     grid-column: 1 / -1;
     font-size: 11px;
-    color: #aaa;
+    color: var(--text-muted);
+    opacity: 0.7;
   }
 
   .btn-analyse {
     padding: 12px;
-    background: #fc4c02;
+    background: var(--primary);
     color: white;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius);
     font-size: 15px;
     font-weight: 600;
     cursor: pointer;
     transition: background 0.15s;
+    overflow: hidden;
+    position: relative;
   }
 
   .btn-analyse:hover:not(:disabled) {
-    background: #e04400;
+    background: var(--primary-dark);
   }
 
   .btn-analyse:disabled {
@@ -1327,17 +1334,45 @@
     cursor: not-allowed;
   }
 
+  .progress-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+
+  .progress-count {
+    opacity: 0.8;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .progress-bar {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: white;
+    border-radius: 2px;
+    transition: width 0.2s ease-out;
+  }
+
   .sidebar-footer {
     margin-top: auto;
     padding-top: 16px;
-    border-top: 1px solid #f0f0f0;
+    border-top: 1px solid var(--border);
     font-size: 12px;
-    color: #999;
+    color: var(--text-muted);
     line-height: 1.5;
   }
 
   .sidebar-footer a {
-    color: #fc4c02;
+    color: var(--primary);
   }
 
   .map-panel {
@@ -1355,26 +1390,27 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    background: rgba(255, 255, 255, 0.9);
+    background: var(--card);
     padding: 16px 24px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     font-size: 14px;
-    color: #666;
+    color: var(--text-muted);
     pointer-events: none;
     z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   }
 
   .map-drop-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(252, 76, 2, 0.08);
-    border: 3px dashed #fc4c02;
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
+    border: 3px dashed var(--primary);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 18px;
     font-weight: 600;
-    color: #fc4c02;
+    color: var(--primary);
     z-index: 1000;
     pointer-events: none;
   }
