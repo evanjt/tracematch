@@ -16,7 +16,9 @@ use tracematch::{
     MatchConfig, RouteSignature, group_incremental, group_signatures_parallel_with_matches,
 };
 
-fn build_signatures(corpus_through_e: &[(String, Vec<tracematch::GpsPoint>)]) -> Vec<RouteSignature> {
+fn build_signatures(
+    corpus_through_e: &[(String, Vec<tracematch::GpsPoint>)],
+) -> Vec<RouteSignature> {
     let cfg = MatchConfig::default();
     corpus_through_e
         .iter()
@@ -76,11 +78,10 @@ fn bench_incremental_grouping(c: &mut Criterion) {
         (150, 1),
         (150, 3),
         (547, 3),
-        (60, 90),     // analogous to scenario B step 2 (60% new)
-        (154, 396),   // analogous to scenario E step 5 (72% new)
+        (60, 90),   // analogous to scenario B step 2 (60% new)
+        (154, 396), // analogous to scenario E step 5 (72% new)
     ] {
-        let existing: Vec<RouteSignature> =
-            signatures.iter().take(existing_n).cloned().collect();
+        let existing: Vec<RouteSignature> = signatures.iter().take(existing_n).cloned().collect();
         let new: Vec<RouteSignature> = signatures
             .iter()
             .skip(existing_n)
@@ -89,10 +90,9 @@ fn bench_incremental_grouping(c: &mut Criterion) {
             .collect();
         let existing_groups = group_signatures_parallel_with_matches(&existing, &cfg).groups;
 
-        group.bench_function(
-            format!("incremental_{existing_n}+{new_n}"),
-            |b| b.iter(|| group_incremental(&new, &existing_groups, &existing, &cfg)),
-        );
+        group.bench_function(format!("incremental_{existing_n}+{new_n}"), |b| {
+            b.iter(|| group_incremental(&new, &existing_groups, &existing, &cfg))
+        });
     }
 
     group.finish();

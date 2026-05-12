@@ -1,0 +1,37 @@
+services:
+  web:
+    build:
+      context: .
+      target: wasm-builder
+    entrypoint: []
+    command: >
+      sh -c "
+        cd tracematch-wasm && wasm-pack build --target web --dev &&
+        cp -r pkg /shared/wasm
+      "
+    volumes:
+      - wasm-pkg:/shared
+
+  dev:
+    image: node:22-slim
+    working_dir: /app
+    command: >
+      sh -c "
+        npm install &&
+        mkdir -p static/wasm &&
+        echo 'Waiting for WASM build...' &&
+        until [ -f /shared/wasm/tracematch_wasm_bg.wasm ]; do sleep 1; done &&
+        cp -r /shared/wasm/* static/wasm/ &&
+        npm run dev -- --host 0.0.0.0 --port 5173
+      "
+    ports:
+      - "5174:5173"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - wasm-pkg:/shared
+    depends_on:
+      - web
+
+volumes:
+  wasm-pkg:

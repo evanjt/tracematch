@@ -14,9 +14,8 @@
 use super::optimized::find_sections_in_route;
 use super::progress::{DetectionPhase, DetectionProgressCallback};
 use super::{
-    ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion,
-    build_trace_rtree_cache, extract_all_activity_traces,
-    merge_traces_into_consensus_with_cache,
+    ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion, build_trace_rtree_cache,
+    extract_all_activity_traces, merge_traces_into_consensus_with_cache,
 };
 use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint, RouteGroup};
@@ -190,10 +189,8 @@ pub fn detect_sections_incremental(
                 // running sums. Fallback path (no accumulator yet) builds one
                 // from all current traces — happens once per section then
                 // becomes incremental forever after.
-                let new_ids_to_fold: Vec<String> = new_matches
-                    .iter()
-                    .map(|(aid, _)| aid.clone())
-                    .collect();
+                let new_ids_to_fold: Vec<String> =
+                    new_matches.iter().map(|(aid, _)| aid.clone()).collect();
 
                 let new_traces_for_section: Vec<(String, Vec<GpsPoint>)> = new_ids_to_fold
                     .iter()
@@ -225,15 +222,10 @@ pub fn detect_sections_incremental(
                         .filter(|id| !new_ids_to_fold.contains(id))
                         .cloned()
                         .collect();
-                    let pre_traces_map = extract_all_activity_traces(
-                        &pre_update_ids,
-                        &updated.polyline,
-                        &track_map,
-                    );
-                    let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> = pre_traces_map
-                        .into_iter()
-                        .map(|(id, pts)| (id, pts))
-                        .collect();
+                    let pre_traces_map =
+                        extract_all_activity_traces(&pre_update_ids, &updated.polyline, &track_map);
+                    let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> =
+                        pre_traces_map.into_iter().collect();
                     all_traces_pairs.extend(new_traces_for_section);
 
                     let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
@@ -249,15 +241,15 @@ pub fn detect_sections_incremental(
                     None
                 };
 
-                if let Some(consensus) = result {
-                    if consensus.polyline.len() >= 2 {
-                        updated.polyline = consensus.polyline;
-                        updated.distance_meters = calculate_route_distance(&updated.polyline);
-                        updated.confidence = consensus.confidence;
-                        updated.observation_count = consensus.observation_count;
-                        updated.average_spread = consensus.average_spread;
-                        updated.point_density = consensus.point_density;
-                    }
+                if let Some(consensus) = result
+                    && consensus.polyline.len() >= 2
+                {
+                    updated.polyline = consensus.polyline;
+                    updated.distance_meters = calculate_route_distance(&updated.polyline);
+                    updated.confidence = consensus.confidence;
+                    updated.observation_count = consensus.observation_count;
+                    updated.average_spread = consensus.average_spread;
+                    updated.point_density = consensus.point_density;
                 }
             }
 
@@ -473,7 +465,7 @@ mod tests {
         let existing = vec![stub_section("sec_ride_0_split0", "Ride")];
         let mut new_sections = vec![
             stub_section("sec_ride_0_split0", "Ride"), // exact collision
-            stub_section("sec_ride_0", "Ride"),         // becomes taken after first renumber
+            stub_section("sec_ride_0", "Ride"),        // becomes taken after first renumber
         ];
         renumber_to_avoid_collisions(&mut new_sections, &existing);
         assert_eq!(new_sections[0].id, "sec_ride_0");
