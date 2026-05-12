@@ -1,0 +1,13 @@
+[package]
+name = "tracematch-python"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "tracematch_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+tracematch = { path = ".." }
+pyo3 = { version = "0.25", features = ["extension-module"] }

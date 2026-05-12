@@ -13,7 +13,5 @@
 pub mod lifecycle;
 pub mod noise;
 
-pub use lifecycle::{
-    CorridorTruth, LifecycleActivity, LifecycleConfig, LifecycleCorpus,
-};
+pub use lifecycle::{CorridorTruth, LifecycleActivity, LifecycleConfig, LifecycleCorpus};
 pub use noise::{GaussMarkovConfig, GaussMarkovNoise};

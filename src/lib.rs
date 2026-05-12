@@ -80,10 +80,10 @@ pub use sections::{
     DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
     MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
     SectionPortion, SplitResult, detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, detect_sections_optimized,
-    find_all_track_portions, find_sections_in_route,
-    incremental::IncrementalResult, incremental::detect_sections_incremental,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    detect_sections_multiscale_with_progress, detect_sections_optimized, find_all_track_portions,
+    find_sections_in_route, incremental::IncrementalResult,
+    incremental::detect_sections_incremental, recalculate_section_polyline, split_section_at_index,
+    split_section_at_point,
 };
 
 // ============================================================================
@@ -253,7 +253,7 @@ impl Bounds {
 ///
 /// The signature contains a simplified version of the original GPS track,
 /// optimized for comparison using the Fréchet distance algorithm.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteSignature {
     /// Unique identifier for the activity/route
     pub activity_id: String,
@@ -378,7 +378,7 @@ impl RouteSignature {
 }
 
 /// Result of comparing two routes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
     /// ID of the first route
     pub activity_id_1: String,
@@ -393,7 +393,7 @@ pub struct MatchResult {
 }
 
 /// Configuration for route matching algorithms.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchConfig {
     /// AMD threshold for perfect match (100%). Routes with AMD below this are considered identical.
     /// Default: 15.0 meters (tighter threshold to show deviations)

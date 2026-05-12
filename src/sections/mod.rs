@@ -706,7 +706,7 @@ pub fn detect_sections_from_tracks(
             .map(|(_, pts)| compute_bounds(pts))
             .collect();
 
-        let rtree_start = std::time::Instant::now();
+        let rtree_start = web_time::Instant::now();
         #[cfg(feature = "parallel")]
         let rtrees: Vec<rstar::RTree<IndexedPoint>> = sport_tracks
             .par_iter()
@@ -726,7 +726,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Find pairwise overlaps - PARALLELIZED with rayon
-        let overlap_start = std::time::Instant::now();
+        let overlap_start = web_time::Instant::now();
 
         // Generate all pairs
         let pairs: Vec<(usize, usize)> = (0..sport_tracks.len())
@@ -791,7 +791,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Cluster overlaps (pass sport_tracks for point resolution)
-        let cluster_start = std::time::Instant::now();
+        let cluster_start = web_time::Instant::now();
         let clusters = cluster_overlaps(overlaps, config, sport_tracks);
 
         // Filter to clusters with enough activities
@@ -809,7 +809,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Convert clusters to sections - PARALLELIZED with rayon
-        let section_convert_start = std::time::Instant::now();
+        let section_convert_start = web_time::Instant::now();
 
         // Prepare data for parallel processing
         let cluster_data: Vec<_> = significant_clusters.into_iter().enumerate().collect();
@@ -855,7 +855,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Post-process step 1: Split sections that fold back on themselves (out-and-back)
-        let fold_start = std::time::Instant::now();
+        let fold_start = web_time::Instant::now();
         let fold_sections = split_folding_sections(sport_sections, config);
         info!(
             "[Sections] After fold splitting: {} sections in {}ms",
@@ -864,7 +864,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Post-process step 1b: Split sections at heading inflection points
-        let heading_start = std::time::Instant::now();
+        let heading_start = web_time::Instant::now();
         let heading_sections = split_at_heading_changes(fold_sections, config);
         info!(
             "[Sections] After heading splitting: {} sections in {}ms",
@@ -873,7 +873,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Post-process step 1c: Split sections at gradient changes (if elevation available)
-        let gradient_start = std::time::Instant::now();
+        let gradient_start = web_time::Instant::now();
         let gradient_sections = split_at_gradient_changes(heading_sections, config);
         info!(
             "[Sections] After gradient splitting: {} sections in {}ms",
@@ -882,7 +882,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Post-process step 2: Merge sections that are nearby (reversed, parallel, GPS drift)
-        let merge_start = std::time::Instant::now();
+        let merge_start = web_time::Instant::now();
         let merged_sections = merge_nearby_sections(gradient_sections, config);
         info!(
             "[Sections] After nearby merge: {} sections in {}ms",
@@ -891,7 +891,7 @@ pub fn detect_sections_from_tracks(
         );
 
         // Post-process step 3: Remove sections that contain or are contained by others
-        let dedup_start = std::time::Instant::now();
+        let dedup_start = web_time::Instant::now();
         let deduped_sections = remove_overlapping_sections(merged_sections, config);
         info!(
             "[Sections] After dedup: {} unique sections in {}ms",
@@ -901,7 +901,7 @@ pub fn detect_sections_from_tracks(
 
         // Post-process step 4: Split sections with high-traffic portions
         // This creates new sections from portions that are used by many activities
-        let split_start = std::time::Instant::now();
+        let split_start = web_time::Instant::now();
         let final_sections = split_high_variance_sections(deduped_sections, &track_map, config);
         info!(
             "[Sections] After density splitting: {} sections in {}ms",
@@ -918,7 +918,7 @@ pub fn detect_sections_from_tracks(
     }
 
     // Sort by visit count (most visited first)
-    all_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    all_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     info!("[Sections] Detected {} total sections", all_sections.len());
 
@@ -1157,7 +1157,7 @@ pub fn detect_sections_multiscale_with_progress(
         }
 
         // Build R-trees only for tracks that appear as j-index in pairs (lazy construction)
-        let rtree_start = std::time::Instant::now();
+        let rtree_start = web_time::Instant::now();
         let mut needed_rtrees: HashSet<usize> = HashSet::new();
         for &(_, j) in &pairs {
             needed_rtrees.insert(j);
@@ -1216,7 +1216,7 @@ pub fn detect_sections_multiscale_with_progress(
         let grid_pair_count: u32 = pairs.len() as u32;
         progress.on_phase(DetectionPhase::FindingOverlaps, grid_pair_count);
 
-        let overlap_start = std::time::Instant::now();
+        let overlap_start = web_time::Instant::now();
 
         // Use downsampled tracks for overlap detection, then map indices back
         let full_lengths: Vec<usize> = sport_tracks.iter().map(|(_, pts)| pts.len()).collect();
@@ -1472,7 +1472,7 @@ pub fn detect_sections_multiscale_with_progress(
     progress.on_phase(DetectionPhase::Postprocessing, 6);
 
     // Apply post-processing
-    let fold_start = std::time::Instant::now();
+    let fold_start = web_time::Instant::now();
     let fold_sections = split_folding_sections(all_sections, config);
     progress.on_progress();
     info!(
@@ -1482,7 +1482,7 @@ pub fn detect_sections_multiscale_with_progress(
     );
 
     // Split at heading inflection points
-    let heading_start = std::time::Instant::now();
+    let heading_start = web_time::Instant::now();
     let heading_sections = split_at_heading_changes(fold_sections, config);
     progress.on_progress();
     info!(
@@ -1492,7 +1492,7 @@ pub fn detect_sections_multiscale_with_progress(
     );
 
     // Split at gradient changes (if elevation available)
-    let gradient_start = std::time::Instant::now();
+    let gradient_start = web_time::Instant::now();
     let gradient_sections = split_at_gradient_changes(heading_sections, config);
     progress.on_progress();
     info!(
@@ -1501,7 +1501,7 @@ pub fn detect_sections_multiscale_with_progress(
         gradient_start.elapsed().as_millis()
     );
 
-    let merge_start = std::time::Instant::now();
+    let merge_start = web_time::Instant::now();
     let merged_sections = merge_nearby_sections(gradient_sections, config);
     progress.on_progress();
     info!(
@@ -1511,7 +1511,7 @@ pub fn detect_sections_multiscale_with_progress(
     );
 
     // Use hierarchical deduplication if preserve_hierarchy is true
-    let dedup_start = std::time::Instant::now();
+    let dedup_start = web_time::Instant::now();
     let deduped_sections = if config.preserve_hierarchy {
         remove_overlapping_sections_hierarchical(merged_sections, config)
     } else {
@@ -1524,7 +1524,7 @@ pub fn detect_sections_multiscale_with_progress(
         dedup_start.elapsed().as_millis()
     );
 
-    let split_start = std::time::Instant::now();
+    let split_start = web_time::Instant::now();
     let final_sections = split_high_variance_sections(deduped_sections, &track_map, config);
     // Explicitly drop track_map — it's no longer needed and all borrows into `tracks` are released
     drop(track_map);
@@ -1537,7 +1537,7 @@ pub fn detect_sections_multiscale_with_progress(
 
     // Sort sections by visit count
     let mut sorted_sections = final_sections;
-    sorted_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    sorted_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     // Re-assign unique IDs after all post-processing
     // Each scale generates IDs independently (sec_run_0, sec_run_1, ...),

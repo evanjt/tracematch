@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! Consensus polyline computation.
 //!
 //! Computes a refined polyline from multiple overlapping tracks using weighted averaging
@@ -261,8 +262,10 @@ pub fn build_accumulator_from_traces(
         return accumulator;
     }
 
-    let trace_views: Vec<(String, &[GpsPoint])> =
-        traces.iter().map(|(id, t)| (id.clone(), t.as_slice())).collect();
+    let trace_views: Vec<(String, &[GpsPoint])> = traces
+        .iter()
+        .map(|(id, t)| (id.clone(), t.as_slice()))
+        .collect();
     fold_traces_into_accumulator(&mut accumulator, &trace_views, proximity_threshold);
     accumulator
 }
@@ -330,12 +333,15 @@ pub fn merge_traces_into_consensus_with_cache(
         .iter()
         .map(|s| s.as_str())
         .collect();
-    let to_fold: Vec<(String, &[GpsPoint], Option<std::sync::Arc<RTree<IndexedPoint>>>)> =
-        new_traces
-            .iter()
-            .filter(|(id, _)| !already.contains(id.as_str()))
-            .map(|(id, t)| (id.clone(), t.as_slice(), cache.get(id).cloned()))
-            .collect();
+    let to_fold: Vec<(
+        String,
+        &[GpsPoint],
+        Option<std::sync::Arc<RTree<IndexedPoint>>>,
+    )> = new_traces
+        .iter()
+        .filter(|(id, _)| !already.contains(id.as_str()))
+        .map(|(id, t)| (id.clone(), t.as_slice(), cache.get(id).cloned()))
+        .collect();
 
     if !to_fold.is_empty() {
         fold_traces_with_optional_cache(accumulator, &to_fold, proximity_threshold);
@@ -375,7 +381,11 @@ pub fn merge_traces_into_consensus(
 /// build step. Used by [`merge_traces_into_consensus_with_cache`].
 fn fold_traces_with_optional_cache(
     accumulator: &mut ConsensusAccumulator,
-    traces: &[(String, &[GpsPoint], Option<std::sync::Arc<RTree<IndexedPoint>>>)],
+    traces: &[(
+        String,
+        &[GpsPoint],
+        Option<std::sync::Arc<RTree<IndexedPoint>>>,
+    )],
     proximity_threshold: f64,
 ) {
     let owned: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
@@ -499,8 +509,7 @@ fn fold_resolved_into_accumulator(
     }
 
     let compute_for_trace = |tree: &RTree<IndexedPoint>, trace: &[GpsPoint]| -> TraceContribution {
-        let mut per_ref =
-            Vec::with_capacity(reference_coords.len());
+        let mut per_ref = Vec::with_capacity(reference_coords.len());
         for ref_coords in &reference_coords {
             if let Some(nearest) = tree.nearest_neighbor(ref_coords) {
                 let dist_sq = nearest.distance_2(ref_coords);
@@ -635,11 +644,13 @@ mod tests {
         track
             .iter()
             .enumerate()
-            .map(|(i, p)| GpsPoint::with_elevation(
-                p.latitude + dx_deg * (((i as u64).wrapping_mul(seed) % 7) as f64 - 3.0) * 0.1,
-                p.longitude,
-                p.elevation.unwrap_or(300.0),
-            ))
+            .map(|(i, p)| {
+                GpsPoint::with_elevation(
+                    p.latitude + dx_deg * (((i as u64).wrapping_mul(seed) % 7) as f64 - 3.0) * 0.1,
+                    p.longitude,
+                    p.elevation.unwrap_or(300.0),
+                )
+            })
             .collect()
     }
 
@@ -651,8 +662,7 @@ mod tests {
             .map(|i| (format!("a_{i}"), jitter(&reference, 1e-5, (i + 1) as u64)))
             .collect();
 
-        let traces_only: Vec<Vec<GpsPoint>> =
-            traces.iter().map(|(_, t)| t.clone()).collect();
+        let traces_only: Vec<Vec<GpsPoint>> = traces.iter().map(|(_, t)| t.clone()).collect();
 
         let full = compute_consensus_polyline(&reference, &traces_only, 50.0);
 
@@ -702,17 +712,17 @@ mod tests {
                 q.latitude
             );
         }
-        assert_eq!(acc_all.absorbed_activity_ids, acc_split.absorbed_activity_ids);
+        assert_eq!(
+            acc_all.absorbed_activity_ids,
+            acc_split.absorbed_activity_ids
+        );
         assert_eq!(acc_all.trace_count, acc_split.trace_count);
     }
 
     #[test]
     fn duplicate_activity_id_not_double_counted() {
         let reference = make_corridor(47.37, 8.55, 30);
-        let trace = (
-            "a_dup".to_string(),
-            jitter(&reference, 1e-5, 1),
-        );
+        let trace = ("a_dup".to_string(), jitter(&reference, 1e-5, 1));
         let mut acc = ConsensusAccumulator::new(reference.clone());
         merge_traces_into_consensus(&mut acc, &[trace.clone()], 50.0);
         let mid_total_weight = acc.per_point[0].total_weight;

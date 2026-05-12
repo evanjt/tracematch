@@ -656,7 +656,7 @@ pub fn merge_nearby_sections(
     }
 
     // Sort by visit count descending - keep the most visited version
-    sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     // PRE-COMPUTE all R-trees once upfront (O(k) builds instead of O(k²))
     #[cfg(feature = "parallel")]
@@ -684,10 +684,9 @@ pub fn merge_nearby_sections(
         .iter()
         .map(|s| {
             let n = s.polyline.len().max(1) as f64;
-            let (lat_sum, lng_sum) = s
-                .polyline
-                .iter()
-                .fold((0.0, 0.0), |(la, ln), p| (la + p.latitude, ln + p.longitude));
+            let (lat_sum, lng_sum) = s.polyline.iter().fold((0.0, 0.0), |(la, ln), p| {
+                (la + p.latitude, ln + p.longitude)
+            });
             [lat_sum / n, lng_sum / n]
         })
         .collect();
@@ -695,7 +694,11 @@ pub fn merge_nearby_sections(
         centroids
             .iter()
             .enumerate()
-            .map(|(idx, c)| CentroidEntry { idx, lat: c[0], lng: c[1] })
+            .map(|(idx, c)| CentroidEntry {
+                idx,
+                lat: c[0],
+                lng: c[1],
+            })
             .collect(),
     );
 

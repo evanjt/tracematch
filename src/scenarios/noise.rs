@@ -255,7 +255,10 @@ mod tests {
         }
 
         let mean = north_offsets.iter().sum::<f64>() / north_offsets.len() as f64;
-        let var = north_offsets.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+        let var = north_offsets
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
             / north_offsets.len() as f64;
         let stdev = var.sqrt();
 

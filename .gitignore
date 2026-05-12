@@ -1,14 +1,41 @@
 /target
-*.md
-*.gpx
-*.json
-*.py
-*.log
-*.geojson
 .cargo
-
-# Worktrees
 .worktrees/
+.venv/
 
-# Private test fixtures (user data, never commit)
+# Root-level analysis scripts and data (not part of the library)
+/*.py
+/*.gpx
+/*.json
+/*.log
+/*.geojson
+/*.md
+/sections/
+/sections_out/
+/sionrunning/
+/sionrunning_sections/
+/skeleton_comparison_sections/
+/docs/
+
+# Test fixtures (local data)
+tests/fixtures/raw_traces/
 tests/fixtures/private/
+tests/fixtures/gpx/
+tests/fixtures/streams/
+
+# WASM build output
+tracematch-wasm/pkg/
+
+# Web build output and deps
+web/build/
+web/node_modules/
+web/.svelte-kit/
+web/static/wasm/
+
+# Python build artifacts
+tracematch-python/target/
+__pycache__/
+*.egg-info/
+
+# Local dev files
+CLAUDE.md
