@@ -107,11 +107,7 @@ pub fn should_group_routes(
         sig2.points.clone()
     };
 
-    check_middle_points_match(
-        &sig1.points,
-        &points2_for_middle,
-        config.endpoint_threshold,
-    )
+    check_middle_points_match(&sig1.points, &points2_for_middle, config.endpoint_threshold)
 }
 
 /// Check that the middle portions of two routes also match.

@@ -11,6 +11,8 @@
 //! - Full resolution: ~60-120 seconds
 //! - Optimized: ~1-3 seconds
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -197,7 +199,7 @@ pub fn detect_sections_optimized(
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
 
     if tracks.len() < config.min_activities as usize {
         return vec![];
@@ -245,7 +247,7 @@ pub fn detect_sections_optimized(
         }
 
         // Find candidate pairs using grid (only tracks in same/adjacent cells)
-        let grid_start = std::time::Instant::now();
+        let grid_start = web_time::Instant::now();
         let mut candidate_pairs: HashSet<(usize, usize)> = HashSet::new();
 
         for (idx, track) in sport_tracks.iter().enumerate() {
@@ -291,7 +293,7 @@ pub fn detect_sections_optimized(
         }
 
         // Build R-trees only for tracks that appear as j-index in pairs (lazy construction)
-        let rtree_start = std::time::Instant::now();
+        let rtree_start = web_time::Instant::now();
         let mut needed_rtrees: HashSet<usize> = HashSet::new();
         for &(_, j) in &candidate_vec {
             needed_rtrees.insert(j);
@@ -330,7 +332,7 @@ pub fn detect_sections_optimized(
             rtree_start.elapsed().as_millis()
         );
 
-        let overlap_start = std::time::Instant::now();
+        let overlap_start = web_time::Instant::now();
 
         #[cfg(feature = "parallel")]
         let overlaps: Vec<FullTrackOverlap> = candidate_vec
@@ -445,7 +447,7 @@ pub fn detect_sections_optimized(
     // Post-process step 2: Split at heading inflection points
     // Run BEFORE exclusivity - split complete sections, not arbitrary cuts
     // Guards prevent over-fragmentation (skip sections < 500m, check ratio)
-    let heading_start = std::time::Instant::now();
+    let heading_start = web_time::Instant::now();
     let heading_sections = split_at_heading_changes(deduped, config);
     info!(
         "[OptimizedSections] After heading splitting: {} sections in {}ms",
@@ -454,7 +456,7 @@ pub fn detect_sections_optimized(
     );
 
     // Post-process step 3: Split at gradient changes (if elevation available)
-    let gradient_start = std::time::Instant::now();
+    let gradient_start = web_time::Instant::now();
     let gradient_sections = split_at_gradient_changes(heading_sections, config);
     info!(
         "[OptimizedSections] After gradient splitting: {} sections in {}ms",
@@ -464,7 +466,7 @@ pub fn detect_sections_optimized(
 
     // Post-process step 4: Consolidate short fragments back together
     // Inspired by TS-MF "mergence" phase - reverses over-aggressive splitting
-    let consolidate_start = std::time::Instant::now();
+    let consolidate_start = web_time::Instant::now();
     let consolidated = consolidate_fragments(gradient_sections, config);
     info!(
         "[OptimizedSections] After consolidation: {} sections in {}ms",
@@ -481,7 +483,7 @@ pub fn detect_sections_optimized(
 
     // Post-process step 6: Merge nearby/reversed sections
     // This handles: reversed sections (out-and-back), parallel tracks, GPS drift
-    let merge_start = std::time::Instant::now();
+    let merge_start = web_time::Instant::now();
     let merged = merge_nearby_sections(exclusive, config);
     info!(
         "[OptimizedSections] After merging nearby: {} sections in {}ms",
@@ -492,7 +494,7 @@ pub fn detect_sections_optimized(
     // Post-process step 7: Quality filter (length-weighted visit threshold)
     // Short sections need more visits to prove they're meaningful patterns.
     // Low-density regions are treated as noise.
-    let quality_start = std::time::Instant::now();
+    let quality_start = web_time::Instant::now();
     let mut final_sections = filter_low_quality_sections(merged, tracks.len());
     info!(
         "[OptimizedSections] After quality filter: {} sections in {}ms",
@@ -704,7 +706,7 @@ fn convert_cluster_to_section(
 }
 
 /// A section match found within a route
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SectionMatch {
     /// The section ID that was matched
     pub section_id: String,

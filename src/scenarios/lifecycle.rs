@@ -39,7 +39,11 @@ fn meters_to_deg_lat(meters: f64) -> f64 {
 
 fn meters_to_deg_lng(meters: f64, latitude: f64) -> f64 {
     let cos = latitude.to_radians().cos();
-    if cos.abs() < 1e-10 { 0.0 } else { meters / (METERS_PER_DEG_LAT * cos) }
+    if cos.abs() < 1e-10 {
+        0.0
+    } else {
+        meters / (METERS_PER_DEG_LAT * cos)
+    }
 }
 
 /// One synthetic activity with the metadata the DB layer expects.
@@ -75,10 +79,10 @@ pub struct LifecycleConfig {
     pub gps_noise: GaussMarkovConfig,
 
     /// Activity counts per bucket. Defaults are CI-fast (~35 s total).
-    pub bucket_a_count: usize,        // cold start, e.g. 60
-    pub bucket_b_delta_count: usize,  // expand to 1y, e.g. 90
-    pub bucket_d_delta_count: usize,  // small batch, e.g. 3
-    pub bucket_e_delta_count: usize,  // year expansion, e.g. 396 (→ 550 total at E)
+    pub bucket_a_count: usize, // cold start, e.g. 60
+    pub bucket_b_delta_count: usize, // expand to 1y, e.g. 90
+    pub bucket_d_delta_count: usize, // small batch, e.g. 3
+    pub bucket_e_delta_count: usize, // year expansion, e.g. 396 (→ 550 total at E)
 
     /// Fraction of activities that include the primary cycling corridor.
     pub ride_corridor_overlap: f64,
@@ -143,7 +147,10 @@ impl LifecycleCorpus {
 
     /// All activities up to and including bucket B (1-year state).
     pub fn through_b(&self) -> Vec<&LifecycleActivity> {
-        self.bucket_a.iter().chain(self.bucket_b_delta.iter()).collect()
+        self.bucket_a
+            .iter()
+            .chain(self.bucket_b_delta.iter())
+            .collect()
     }
 
     /// All activities up to and including bucket C (1y + 1 activity).
@@ -272,12 +279,7 @@ impl<'a> CorpusGenerator<'a> {
         // We place "now" at day 730 (2 years).
         let now_day: i64 = 730;
 
-        let bucket_a = self.emit_bucket(
-            "a",
-            self.config.bucket_a_count,
-            now_day - 90,
-            now_day,
-        );
+        let bucket_a = self.emit_bucket("a", self.config.bucket_a_count, now_day - 90, now_day);
         let bucket_b_delta = self.emit_bucket(
             "b",
             self.config.bucket_b_delta_count,
@@ -357,12 +359,15 @@ impl<'a> CorpusGenerator<'a> {
             let sport = if sport_roll < 0.55 { "Ride" } else { "Run" };
 
             let parallel_remaining = parallel_street_quota.saturating_sub(
-                activities.iter().filter(|a: &&LifecycleActivity| {
-                    a.id.contains("parallel_street")
-                }).count(),
+                activities
+                    .iter()
+                    .filter(|a: &&LifecycleActivity| a.id.contains("parallel_street"))
+                    .count(),
             );
             let force_parallel = parallel_remaining > 0
-                && self.rng.gen_bool((parallel_remaining as f64) / (count - i) as f64);
+                && self
+                    .rng
+                    .gen_bool((parallel_remaining as f64) / (count - i) as f64);
 
             let one_off_roll: f64 = self.rng.r#gen();
             let force_one_off = one_off_roll < self.config.one_off_fraction;
@@ -391,7 +396,14 @@ impl<'a> CorpusGenerator<'a> {
         let cross_sport_roll: f64 = self.rng.r#gen();
         if cross_sport_roll < 0.18 {
             // Both sports use the same cross-sport corridor.
-            return (CorridorChoice::CrossSport, if preferred_sport == "Ride" { "Ride" } else { "Run" });
+            return (
+                CorridorChoice::CrossSport,
+                if preferred_sport == "Ride" {
+                    "Ride"
+                } else {
+                    "Run"
+                },
+            );
         }
         if preferred_sport == "Ride" {
             if self.rng.gen_bool(self.config.ride_corridor_overlap) {
@@ -449,7 +461,12 @@ impl<'a> CorpusGenerator<'a> {
             // Departure
             let end = *canonical.last().unwrap();
             let depart_heading: f64 = self.rng.gen_range(0.0..(2.0 * PI));
-            full.extend(generate_random_segment(&end, 350.0, depart_heading, &mut self.rng));
+            full.extend(generate_random_segment(
+                &end,
+                350.0,
+                depart_heading,
+                &mut self.rng,
+            ));
 
             self.record_truth(corridor, &id);
         } else {
@@ -519,10 +536,8 @@ impl<'a> CorpusGenerator<'a> {
         let origin_offset_m = 25_000.0;
         let origin = GpsPoint::with_elevation(
             self.config.origin.latitude + meters_to_deg_lat(origin_offset_m * heading.sin()),
-            self.config.origin.longitude + meters_to_deg_lng(
-                origin_offset_m * heading.cos(),
-                self.config.origin.latitude,
-            ),
+            self.config.origin.longitude
+                + meters_to_deg_lng(origin_offset_m * heading.cos(), self.config.origin.latitude),
             self.config.origin.elevation.unwrap_or(300.0),
         );
         let raw = generate_random_segment(&origin, length, heading, &mut self.rng);
@@ -755,7 +770,10 @@ mod tests {
             .filter(|a| a.id.contains("parallel_street"))
             .collect();
         // Half the parallel quota goes into bucket A (the rest goes into E).
-        assert!(!parallel.is_empty(), "expected some parallel-street activities in A");
+        assert!(
+            !parallel.is_empty(),
+            "expected some parallel-street activities in A"
+        );
     }
 
     #[test]
