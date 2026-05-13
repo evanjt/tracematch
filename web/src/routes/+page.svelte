@@ -275,7 +275,6 @@
     const toAdd = traces.filter((t) => !tracePolylines.has(t.id));
     if (toAdd.length === 0) return;
 
-    console.time('[tracematch] render:traces');
     const total = toAdd.length;
     if (total > 30) renderProgress = { current: 0, total };
 
@@ -316,7 +315,6 @@
       }
     }
 
-    console.timeEnd('[tracematch] render:traces');
     renderProgress = null;
   }
 
@@ -414,14 +412,9 @@
 
   // --- Lifecycle ---
   onMount(async () => {
-    console.time('[tracematch] startup:total');
-    console.time('[tracematch] startup:idb-load');
     await traceStore.load();
-    console.timeEnd('[tracematch] startup:idb-load');
     // WASM is loaded lazily inside the analysis worker on first run.
     wasmReady = true;
-    console.timeEnd('[tracematch] startup:total');
-    console.log(`[tracematch] ${traceStore.traces.length} traces loaded, analysis: ${traceStore.analysis ? 'yes' : 'no'}`);
 
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     mq.addEventListener('change', () => { if (themeMode === 'system') resolvedDark = mq.matches; });
@@ -514,10 +507,17 @@
   async function handleFiles(files: FileList | File[]) {
     error = null;
     const fileArray = Array.from(files);
-    const batchSize = 20;
     const total = fileArray.length;
-    if (total > 20) importProgress = { current: 0, total };
-    console.time('[tracematch] import:files');
+    if (total === 0) return;
+
+    // Show progress IMMEDIATELY so the user gets feedback the moment
+    // they confirm the file picker — before any parsing/IDB work runs.
+    importProgress = { current: 0, total };
+    // Yield once so Svelte renders the overlay before we start the
+    // synchronous-ish parse loop.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const batchSize = 20;
 
     for (let i = 0; i < fileArray.length; i += batchSize) {
       const batch: StoredTrace[] = [];
@@ -545,15 +545,16 @@
         } catch (e) {
           error = `Failed to parse ${file.name}: ${e}`;
         }
+        // Update progress per-file inside the batch so the user sees
+        // motion even on the very first batch.
+        importProgress = { current: j + 1, total };
       }
       if (batch.length > 0) {
         await traceStore.addTraces(batch);
       }
-      if (total > 20) importProgress = { current: end, total };
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    console.timeEnd('[tracematch] import:files');
     importProgress = null;
   }
 
@@ -582,7 +583,6 @@
     analysisProgress = { phase: 'Preparing', current: 0, total: traceStore.traces.length };
 
     try {
-      console.time('[tracematch] analysis:total');
       const sectionConfig = JSON.stringify({
         proximityThreshold,
         minSectionLength,
@@ -609,11 +609,6 @@
       const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
         analysisProgress = { phase, current, total };
       });
-
-      console.timeEnd('[tracematch] analysis:total');
-      console.log(
-        `[tracematch] Analysis: ${result.signatures.length} sigs, ${result.groups.length} groups, ${result.sections.length} sections`
-      );
 
       if (result.sections.length === 0 && traceStore.traces.length >= 3) {
         sectionError = 'No sections detected with current settings.';
@@ -676,6 +671,18 @@
     <div class="header-spacer"></div>
     {#if traceStore.traces.length > 0}
       <span class="header-count">{traceStore.traces.length} traces</span>
+      <button
+        class="header-clear"
+        onclick={() => {
+          if (confirm(`Clear all ${traceStore.traces.length} traces and analysis?`)) {
+            void traceStore.clearAll();
+          }
+        }}
+        title="Clear all traces and analysis"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        <span>Clear all</span>
+      </button>
     {/if}
   </header>
 
@@ -1111,6 +1118,26 @@
     font-size: 12px;
     color: var(--text-muted);
     flex-shrink: 0;
+  }
+
+  .header-clear {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .header-clear:hover {
+    color: #ef4444;
+    border-color: #ef4444;
+    background: color-mix(in srgb, #ef4444 8%, transparent);
   }
 
   .content {

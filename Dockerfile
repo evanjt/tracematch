@@ -1,19 +1,11 @@
 # Stage 1: Build WASM
 FROM rust:1.95-bookworm AS wasm-builder
 
-# wasm-bindgen-rayon requires nightly Rust for `-Z build-std` to enable
-# WASM threading (atomics + bulk-memory). The host page must also ship
-# COOP/COEP headers for SharedArrayBuffer support — see vite.config.ts
-# (dev) and the production deploy notes.
-RUN rustup toolchain install nightly-2025-09-15 --component rust-src \
-    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
 WORKDIR /build
 COPY . .
-RUN cd tracematch-wasm && \
-    RUSTUP_TOOLCHAIN=nightly-2025-09-15 \
-    RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" \
-    wasm-pack build --target web --release --features parallel -- -Z build-std=std,panic_abort
+RUN cd tracematch-wasm && wasm-pack build --target web --release
 
 # Stage 2: Build web frontend
 FROM node:22-slim AS web-builder
@@ -23,7 +15,7 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 COPY web/ .
-COPY --from=wasm-builder /build/tracematch-wasm/pkg/ static/wasm/
+COPY --from=wasm-builder /build/tracematch-wasm/pkg/ src/lib/wasm/pkg/
 RUN npm run build
 
 # Stage 3: Serve

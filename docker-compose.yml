@@ -4,16 +4,10 @@ services:
       context: .
       target: wasm-builder
     entrypoint: []
-    # wasm-bindgen-rayon needs nightly + atomics. The container image's
-    # default toolchain is set in the Dockerfile but we override on the
-    # build command here too so the entrypoint rebuild uses the same
-    # flags.
     command: >
       sh -c "
         cd tracematch-wasm &&
-        RUSTUP_TOOLCHAIN=nightly-2025-09-15
-        RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals'
-        wasm-pack build --target web --release --features parallel -- -Z build-std=std,panic_abort &&
+        wasm-pack build --target web --release &&
         cp -r pkg /shared/wasm
       "
     volumes:

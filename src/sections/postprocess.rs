@@ -1011,9 +1011,18 @@ struct SplitCandidate {
 /// Returns split candidates if the section should be divided.
 fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
     let density = &section.point_density;
+    let polyline_len = section.polyline.len();
 
     if density.len() < MIN_SPLIT_POINTS * 2 {
         return vec![]; // Too short to split meaningfully
+    }
+
+    // Defence in depth: post-processing splits/merges can leave
+    // `point_density` and `polyline` out of sync. Cap the loop bound to
+    // whichever is shorter so we never index past `polyline`.
+    let usable_len = density.len().min(polyline_len);
+    if usable_len < MIN_SPLIT_POINTS * 2 {
+        return vec![];
     }
 
     // Compute endpoint density (average of first/last 10% of points)
@@ -1035,11 +1044,11 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
     }
 
     // Sliding window to find high-density regions
-    let window_size = (density.len() / 5).max(MIN_SPLIT_POINTS);
+    let window_size = (usable_len / 5).max(MIN_SPLIT_POINTS);
     let mut candidates = Vec::new();
 
     let mut i = window_size;
-    while i < density.len() - window_size {
+    while i < usable_len - window_size {
         // Compute density in current window
         let window_density: f64 = density[i - window_size / 2..i + window_size / 2]
             .iter()
@@ -1063,8 +1072,9 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
                 start_idx -= 1;
             }
 
-            // Expand end forward while density remains high
-            while end_idx < density.len() - 1 {
+            // Expand end forward while density remains high.
+            // Bound by usable_len so we never expand past polyline.len().
+            while end_idx < usable_len - 1 {
                 let local_density = density[end_idx + 1] as f64;
                 if local_density < endpoint_density * 1.5 {
                     break;

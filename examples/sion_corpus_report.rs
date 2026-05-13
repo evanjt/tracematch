@@ -12,99 +12,14 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
-use tracematch::sections::DetectionPhase;
-use tracematch::{
-    DetectionProgressCallback, GpsPoint, MatchConfig, RouteSignature, SectionConfig,
-};
+use tracematch::{DetectionProgressCallback, GpsPoint, MatchConfig, RouteSignature, SectionConfig};
 
-/// Records the wall-clock duration of each detection phase.
-///
-/// Section detection fires `on_phase` whenever it transitions between
-/// stages (BuildingRtrees → FindingOverlaps → Postprocessing). For
-/// multiscale detection these fire multiple times (once per scale per
-/// sport) and we aggregate the total time spent in each phase.
-struct PhaseTimer {
-    start: Mutex<Option<(DetectionPhase, Instant)>>,
-    totals: Mutex<HashMap<&'static str, Duration>>,
-    items_seen: Mutex<HashMap<&'static str, u32>>,
-    items_total: Mutex<HashMap<&'static str, u32>>,
-}
-
-impl PhaseTimer {
-    fn new() -> Self {
-        Self {
-            start: Mutex::new(None),
-            totals: Mutex::new(HashMap::new()),
-            items_seen: Mutex::new(HashMap::new()),
-            items_total: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn finalise(&self) {
-        // Flush any in-flight phase by accumulating its time up to now.
-        if let Some((phase, started)) = self.start.lock().unwrap().take() {
-            let mut totals = self.totals.lock().unwrap();
-            *totals.entry(phase.as_str()).or_default() += started.elapsed();
-        }
-    }
-}
-
-impl DetectionProgressCallback for PhaseTimer {
-    fn on_phase(&self, phase: DetectionPhase, total: u32) {
-        let now = Instant::now();
-        let mut start = self.start.lock().unwrap();
-        if let Some((prev_phase, prev_started)) = start.take() {
-            let mut totals = self.totals.lock().unwrap();
-            *totals.entry(prev_phase.as_str()).or_default() += now.duration_since(prev_started);
-        }
-        *start = Some((phase, now));
-        *self.items_total.lock().unwrap().entry(phase.as_str()).or_default() += total;
-    }
-
-    fn on_progress(&self) {
-        if let Some((phase, _)) = *self.start.lock().unwrap() {
-            *self.items_seen.lock().unwrap().entry(phase.as_str()).or_default() += 1;
-        }
-    }
-}
-
-fn load_gpx(path: &Path) -> Vec<GpsPoint> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut points = Vec::new();
-    for line in content.lines() {
-        if !line.contains("<trkpt") {
-            continue;
-        }
-        if let (Some(lat_start), Some(lon_start)) = (line.find("lat=\""), line.find("lon=\""))
-            && let (Some(lat_end), Some(lon_end)) = (
-                line[lat_start + 5..].find('"'),
-                line[lon_start + 5..].find('"'),
-            )
-            && let (Ok(lat), Ok(lon)) = (
-                line[lat_start + 5..lat_start + 5 + lat_end].parse::<f64>(),
-                line[lon_start + 5..lon_start + 5 + lon_end].parse::<f64>(),
-            )
-        {
-            points.push(GpsPoint::new(lat, lon));
-        }
-    }
-    points
-}
-
-fn fmt_ms(ms: u128) -> String {
-    if ms >= 1000 {
-        format!("{:.2} s", ms as f64 / 1000.0)
-    } else {
-        format!("{} ms", ms)
-    }
-}
+#[path = "common/corpus.rs"]
+mod corpus;
+use corpus::{PhaseTimer, fmt_ms, load_gpx};
 
 fn main() {
     let dir = Path::new("sionrunning");
@@ -184,10 +99,7 @@ fn main() {
         .map(|g| {
             (
                 g.activity_ids.len(),
-                g.activity_ids
-                    .first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("?"),
+                g.activity_ids.first().map(|s| s.as_str()).unwrap_or("?"),
             )
         })
         .collect();
@@ -265,7 +177,11 @@ fn main() {
     let median_visits = {
         let mut visits: Vec<usize> = sections.iter().map(|s| s.activity_ids.len()).collect();
         visits.sort();
-        if visits.is_empty() { 0 } else { visits[visits.len() / 2] }
+        if visits.is_empty() {
+            0
+        } else {
+            visits[visits.len() / 2]
+        }
     };
 
     println!(
@@ -280,10 +196,7 @@ fn main() {
     );
 
     println!("  Pair funnel:");
-    println!(
-        "    Exhaustive (N*(N-1)/2):  {:>7}",
-        exhaustive_pairs
-    );
+    println!("    Exhaustive (N*(N-1)/2):  {:>7}", exhaustive_pairs);
     println!(
         "    After grid + bbox filter: {:>7} ({:.1}% kept)",
         evaluated,
@@ -331,12 +244,23 @@ fn main() {
     // --- 5. Bottom-line totals --------------------------------------
     let dur_total = dur_load + dur_sig + dur_group + dur_sec;
     println!("## Totals");
-    println!("  Load + signatures:   {}", fmt_ms((dur_load + dur_sig).as_millis()));
+    println!(
+        "  Load + signatures:   {}",
+        fmt_ms((dur_load + dur_sig).as_millis())
+    );
     println!("  Route grouping:      {}", fmt_ms(dur_group.as_millis()));
     println!("  Section detection:   {}", fmt_ms(dur_sec.as_millis()));
     println!("  ─────────────────────────────");
     println!("  End-to-end:          {}", fmt_ms(dur_total.as_millis()));
     println!();
-    println!("MatchConfig: endpoint_threshold = {} m, min_match_percentage = {}%", match_config.endpoint_threshold, match_config.min_match_percentage);
-    println!("SectionConfig: proximity_threshold = {} m, min_section_length = {} m, min_activities = {}", section_config.proximity_threshold, section_config.min_section_length, section_config.min_activities);
+    println!(
+        "MatchConfig: endpoint_threshold = {} m, min_match_percentage = {}%",
+        match_config.endpoint_threshold, match_config.min_match_percentage
+    );
+    println!(
+        "SectionConfig: proximity_threshold = {} m, min_section_length = {} m, min_activities = {}",
+        section_config.proximity_threshold,
+        section_config.min_section_length,
+        section_config.min_activities
+    );
 }

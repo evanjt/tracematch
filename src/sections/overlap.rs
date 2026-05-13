@@ -199,12 +199,12 @@ pub fn find_full_track_overlap(
     let mut best_end_a = 0;
     let mut best_min_b = usize::MAX;
     let mut best_max_b = 0;
-    let mut best_length = 0.0;
+    let mut best_length: f64 = 0.0;
 
     let mut current_start_a: Option<usize> = None;
     let mut current_min_b = usize::MAX;
     let mut current_max_b = 0;
-    let mut current_length = 0.0;
+    let mut current_length: f64 = 0.0;
 
     for (i, point_a) in track_a.iter().enumerate() {
         // Use R-tree to find nearest point in track B

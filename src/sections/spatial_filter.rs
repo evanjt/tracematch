@@ -87,15 +87,14 @@ pub fn compute_fine_cells(track: &[GpsPoint], cell_size_deg: f64) -> HashSet<Fin
 
 /// Derive a sensible cell size from the proximity threshold.
 ///
-/// We want the effective filter radius (~1.5 × cell_size) to be
-/// comfortably larger than `proximity_threshold` to avoid false negatives
-/// at cell boundaries. `4 × proximity_threshold` gives 6× safety margin,
-/// which handles GPS drift and route variation while still pruning
-/// aggressively in real-world data.
+/// The minimum safe cell size equals `proximity_threshold` (any two
+/// points within proximity must land in cells whose 3×3 neighbourhoods
+/// overlap). We use 2× as buffer — accounts for longitudinal cell
+/// distortion at high latitudes (cos(60°) ≈ 0.5 shrinks the lng axis)
+/// and float-arithmetic boundary effects, while pruning ~4× more pairs
+/// than the previous 4× factor.
 pub fn cell_size_for_proximity(proximity_threshold_meters: f64) -> f64 {
-    // 111_000 m/degree latitude (Equator-ish; close enough at any latitude
-    // for the modest precision needed here).
-    let cell_size_meters = (proximity_threshold_meters * 4.0).max(50.0);
+    let cell_size_meters = (proximity_threshold_meters * 2.0).max(50.0);
     cell_size_meters / 111_000.0
 }
 
@@ -160,10 +159,10 @@ mod tests {
 
     #[test]
     fn cell_size_scales_with_proximity() {
-        // 50m proximity should give a cell of ~200m (50 * 4 = 200m).
+        // 50m proximity should give a cell of ~100m (50 * 2 = 100m).
         let cell_deg = cell_size_for_proximity(50.0);
         let cell_meters = cell_deg * 111_000.0;
-        assert!((cell_meters - 200.0).abs() < 1.0, "got {cell_meters}");
+        assert!((cell_meters - 100.0).abs() < 1.0, "got {cell_meters}");
 
         // Floor at 50m so tiny proximity values don't produce useless cells.
         let cell_deg_tiny = cell_size_for_proximity(5.0);
@@ -383,12 +382,7 @@ mod tests {
                     let id_a = format!("a_{i}");
                     let id_b = format!("a_{j}");
                     find_full_track_overlap(
-                        &id_a,
-                        &tracks[i],
-                        &id_b,
-                        &tracks[j],
-                        &rtrees[j],
-                        &config,
+                        &id_a, &tracks[i], &id_b, &tracks[j], &rtrees[j], &config,
                     )
                     .map(|_| (i, j))
                 })

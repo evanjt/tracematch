@@ -65,15 +65,14 @@ pub(crate) use overlap::{
 };
 pub(crate) use portions::compute_activity_portions;
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
+pub use postprocess::{
+    filter_low_quality_sections, merge_nearby_sections, remove_overlapping_sections,
+};
 pub(crate) use postprocess::{
     split_at_gradient_changes, split_at_heading_changes, split_folding_sections,
     split_high_variance_sections,
 };
-pub use postprocess::{
-    filter_low_quality_sections, merge_nearby_sections, remove_overlapping_sections,
-};
-pub(crate) use rtree::IndexedPoint;
-pub use rtree::build_rtree;
+pub use rtree::{IndexedPoint, build_rtree};
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
 
 // Re-export single-route section utilities (find/split known sections).
@@ -958,7 +957,7 @@ pub fn detect_sections_from_tracks(
     }
 
     // Sort by visit count (most visited first)
-    all_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    all_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     info!("[Sections] Detected {} total sections", all_sections.len());
 
@@ -1608,7 +1607,7 @@ pub fn detect_sections_multiscale_with_progress(
 
     // Sort sections by visit count
     let mut sorted_sections = final_sections;
-    sorted_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    sorted_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     // Re-assign unique IDs after all post-processing
     // Each scale generates IDs independently (sec_run_0, sec_run_1, ...),

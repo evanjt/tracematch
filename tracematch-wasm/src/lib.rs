@@ -5,15 +5,6 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-// Re-export wasm-bindgen-rayon's `init_thread_pool` when the `parallel`
-// feature is enabled. JS must `await init_thread_pool(N)` once before
-// calling any parallel function (`group_routes`, `detect_sections`).
-//
-// Requires SharedArrayBuffer (COOP/COEP headers on the host page) and
-// a build configured with `+atomics,+bulk-memory,+mutable-globals`.
-#[cfg(feature = "parallel")]
-pub use wasm_bindgen_rayon::init_thread_pool;
-
 /// Create a RouteSignature from raw GPS points.
 ///
 /// points_json: `[{"latitude": f64, "longitude": f64, "elevation": f64?}, ...]`
@@ -89,9 +80,6 @@ pub fn group_routes(signatures_json: &str, config_json: &str) -> Result<JsValue,
         serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
     };
 
-    #[cfg(feature = "parallel")]
-    let groups = tracematch::group_signatures_parallel(&sigs, &config);
-    #[cfg(not(feature = "parallel"))]
     let groups = tracematch::group_signatures(&sigs, &config);
 
     let val = serde_wasm_bindgen::to_value(&groups).map_err(|e| JsError::new(&e.to_string()))?;

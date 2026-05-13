@@ -96,3 +96,7 @@ required-features = ["synthetic"]
 [[example]]
 name = "sion_corpus_report"
 path = "examples/sion_corpus_report.rs"
+
+[[example]]
+name = "density_grid_report"
+path = "examples/density_grid_report.rs"

@@ -181,7 +181,10 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
     // hot loop rebuilds the same R-trees on every pair comparison — at
     // 91k pairs that's 182k R-tree builds and Vec allocations, which is
     // catastrophic in WASM.
-    let prepared: Vec<PreparedRoute> = signatures.iter().map(|s| prepare_route(s, config)).collect();
+    let prepared: Vec<PreparedRoute> = signatures
+        .iter()
+        .map(|s| prepare_route(s, config))
+        .collect();
 
     let mut uf = UnionFind::with_capacity(signatures.len());
     for sig in signatures {
@@ -350,10 +353,10 @@ pub fn group_signatures_parallel_with_matches(
 
 /// Incremental grouping: efficiently add new signatures to existing groups.
 ///
-/// Layers the endpoint grid pre-filter on top of the "new × existing
-/// + new × new" pair set, so even at thousands of existing routes the
-/// per-new-activity work stays bounded by the spatial density of routes
-/// in the same area.
+/// Layers the endpoint grid pre-filter on top of the "new x existing
+/// plus new x new" pair set, so even at thousands of existing routes
+/// the per-new-activity work stays bounded by the spatial density of
+/// routes in the same area.
 ///
 /// Existing-vs-existing pairs are never re-evaluated (they're already
 /// in their final group). Only pairs where at least one side is new
