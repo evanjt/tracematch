@@ -41,6 +41,17 @@
   let sectionLayers: { activityIds: string[]; layers: L.Layer[] }[] = [];
   let L: typeof import('leaflet') | null = null;
 
+  // Theme state
+  let themeMode = $state<'system' | 'light' | 'dark'>(
+    typeof localStorage !== 'undefined' ? (localStorage.getItem('theme') as any) || 'system' : 'system'
+  );
+  let resolvedDark = $state(false);
+  let tileLayer: L.TileLayer | null = null;
+
+  // Display strategy state
+  let visibleGroups = $state(new Set<string>());
+  let showUngrouped = $state(true);
+
   const GROUP_COLORS = [
     '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
     '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
@@ -129,14 +140,30 @@
     }
     for (let i = 0; i < analysis.groups.length; i++) {
       if (analysis.groups[i].activityIds.includes(traceId)) {
+        const groupId = analysis.groups[i].groupId;
+        if (!visibleGroups.has(groupId)) {
+          return { color: GROUP_COLORS[i % GROUP_COLORS.length], weight: 3, opacity: 0 };
+        }
+        const isRepresentative = analysis.groups[i].representativeId === traceId;
+        if (isRepresentative) {
+          return {
+            color: GROUP_COLORS[i % GROUP_COLORS.length],
+            weight: 3,
+            opacity: 0.75
+          };
+        }
         return {
           color: GROUP_COLORS[i % GROUP_COLORS.length],
           weight: 3,
-          opacity: 0.75
+          opacity: 0
         };
       }
     }
-    return { color: TRACE_GRAY, weight: 2, opacity: 0.4, dashArray: '6 4' };
+    // Ungrouped trace
+    if (showUngrouped) {
+      return { color: TRACE_GRAY, weight: 2, opacity: 0.4, dashArray: '6 4' };
+    }
+    return { color: TRACE_GRAY, weight: 2, opacity: 0 };
   }
 
   onMount(async () => {
@@ -147,6 +174,18 @@
     } catch (e) {
       error = `Failed to load WASM: ${e}`;
     }
+
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', () => { if (themeMode === 'system') resolvedDark = mq.matches; });
+  });
+
+  // Theme effect
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    resolvedDark = themeMode === 'system' ? systemDark : themeMode === 'dark';
+    document.documentElement.setAttribute('data-theme', resolvedDark ? 'dark' : 'light');
+    localStorage.setItem('theme', themeMode);
   });
 
   // Sync traces to map — incremental add/remove, no full rebuild
@@ -267,8 +306,11 @@
       import('leaflet/dist/leaflet.css');
       L = leaflet;
       map = L.map(mapContainer).setView([30, 0], 2);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors',
+      const tileUrl = resolvedDark
+        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+      tileLayer = L.tileLayer(tileUrl, {
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
         maxZoom: 19
       }).addTo(map);
       traceLayerGroup = L.layerGroup().addTo(map);
@@ -281,6 +323,16 @@
     });
   });
 
+  // Swap tiles when theme changes
+  $effect(() => {
+    const dark = resolvedDark;
+    if (!map || !L || !tileLayer) return;
+    const newUrl = dark
+      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    tileLayer.setUrl(newUrl);
+  });
+
   // React to trace list changes — incremental sync
   $effect(() => {
     traceStore.traces;
@@ -288,7 +340,7 @@
     syncTracesToMap();
   });
 
-  // React to analysis changes — restyle traces and rebuild sections
+  // React to analysis changes — restyle traces, rebuild sections, populate visibleGroups, collapse traces
   $effect(() => {
     const analysis = traceStore.analysis;
     if (!map || !L) return;
@@ -300,11 +352,44 @@
     }
   });
 
+  // Populate visibleGroups when analysis completes, and auto-collapse traces panel
+  $effect(() => {
+    const analysis = traceStore.analysis;
+    if (!analysis) return;
+    visibleGroups = new Set(analysis.groups.map(g => g.groupId));
+    tracesCollapsed = true;
+  });
+
   // React to hidden traces — just restyle
   $effect(() => {
     hiddenTraces;
     if (!map || !L) return;
     applyStyles();
+  });
+
+  // React to visibleGroups / showUngrouped changes — restyle traces and update section overlays
+  $effect(() => {
+    visibleGroups;
+    showUngrouped;
+    if (!map || !L) return;
+    applyStyles();
+
+    // Update section overlay visibility based on whether their activities' groups are visible
+    const analysis = traceStore.analysis;
+    if (!analysis) return;
+    for (const sl of sectionLayers) {
+      const anyActivityVisible = sl.activityIds.some((actId) => {
+        const g = groupForTraceId(actId);
+        if (g) return visibleGroups.has(analysis.groups[g.index].groupId);
+        return showUngrouped;
+      });
+      for (const layer of sl.layers) {
+        const el = (layer as L.Polyline | L.Marker).getElement?.() as HTMLElement | undefined;
+        if (el) {
+          el.style.opacity = anyActivityVisible ? '' : '0';
+        }
+      }
+    }
   });
 
   // Highlight effect — update styles on existing polylines
@@ -324,8 +409,17 @@
         continue;
       }
       if (activeIds === null) {
+        // No hover — revert to display strategy
         entry.polyline.setStyle(entry.baseStyle);
       } else if (activeIds.includes(id)) {
+        // Check if the trace's group is visible
+        const g = groupForTraceId(id);
+        const analysis = traceStore.analysis;
+        const groupVisible = g && analysis ? visibleGroups.has(analysis.groups[g.index].groupId) : showUngrouped;
+        if (!groupVisible) {
+          entry.polyline.setStyle({ opacity: 0, weight: 0 });
+          continue;
+        }
         if (portions) {
           entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.65, weight: 2.5 });
           const trace = traceStore.traces.find((t) => t.id === id);
@@ -349,7 +443,7 @@
           entry.polyline.bringToFront();
         }
       } else {
-        entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.1, weight: 1.5 });
+        entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.05, weight: 1.5 });
       }
     }
 
@@ -508,6 +602,17 @@
 <div class="app">
   <header>
     <h1>tracematch</h1>
+    <button class="theme-toggle" onclick={() => {
+      themeMode = themeMode === 'system' ? 'light' : themeMode === 'light' ? 'dark' : 'system';
+    }} title="Theme: {themeMode}">
+      {#if themeMode === 'system'}
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41m12.73-12.73l1.41-1.41"/></svg>
+      {:else if themeMode === 'light'}
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      {:else}
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      {/if}
+    </button>
     <div
       class="header-drop"
       class:drag-over={dragOver}
@@ -800,6 +905,37 @@
       role="region"
     >
       <div class="map-container" bind:this={mapContainer}></div>
+      {#if traceStore.analysis && traceStore.analysis.groups.length > 0}
+        <div class="map-legend">
+          <div class="legend-title">Routes</div>
+          {#each traceStore.analysis.groups as group, i}
+            {@const color = GROUP_COLORS[i % GROUP_COLORS.length]}
+            {@const isVisible = visibleGroups.has(group.groupId)}
+            <label class="legend-entry" class:dimmed={!isVisible}
+              onmouseenter={() => highlightedGroup = { ids: group.activityIds }}
+              onmouseleave={() => highlightedGroup = null}>
+              <input type="checkbox" checked={isVisible}
+                onchange={() => {
+                  const next = new Set(visibleGroups);
+                  if (next.has(group.groupId)) next.delete(group.groupId);
+                  else next.add(group.groupId);
+                  visibleGroups = next;
+                }} />
+              <span class="legend-swatch" style="background: {color}"></span>
+              <span class="legend-label">{group.customName || `Route ${i + 1}`}</span>
+              <span class="legend-count">{group.activityIds.length}</span>
+            </label>
+          {/each}
+          {#if traceStore.traces.length > traceStore.analysis.groups.flatMap(g => g.activityIds).length}
+            <label class="legend-entry" class:dimmed={!showUngrouped}>
+              <input type="checkbox" checked={showUngrouped}
+                onchange={() => showUngrouped = !showUngrouped} />
+              <span class="legend-swatch ungrouped"></span>
+              <span class="legend-label">Ungrouped</span>
+            </label>
+          {/if}
+        </div>
+      {/if}
       {#if mapDragOver}
         <div class="map-drop-overlay">Drop GPX files here</div>
       {/if}
@@ -835,6 +971,23 @@
     font-weight: 700;
     color: var(--text);
     flex-shrink: 0;
+  }
+
+  .theme-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 6px;
+    cursor: pointer;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    transition: all 0.15s;
+  }
+  .theme-toggle:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--primary-subtle);
   }
 
   .header-drop {
@@ -887,7 +1040,7 @@
 
   .sidebar {
     width: 360px;
-    background: var(--card);
+    background: var(--bg-elevated);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
@@ -897,19 +1050,12 @@
   }
 
   .error {
-    background: #fef2f2;
-    color: #b91c1c;
+    background: color-mix(in srgb, #b91c1c 10%, var(--card));
+    color: #ef4444;
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 13px;
     word-break: break-word;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .error {
-      background: #2d1b1b;
-      color: #fca5a5;
-    }
   }
 
   .panel-toggle h2 {
@@ -964,6 +1110,11 @@
     border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 8px;
+    box-shadow: var(--shadow);
+  }
+
+  .group-card:hover {
+    background: var(--card-hover);
   }
 
   .group-header {
@@ -1004,7 +1155,7 @@
   }
 
   .group-activity.highlighted {
-    background: var(--border);
+    background: var(--highlight);
     border-radius: 4px;
     margin: 0 -4px;
     padding: 1px 4px;
@@ -1024,7 +1175,7 @@
   }
 
   .btn-vis:hover {
-    background: var(--border);
+    background: var(--highlight);
     color: var(--text);
   }
 
@@ -1034,7 +1185,7 @@
 
   .btn-vis.is-hidden:hover {
     color: var(--text-muted);
-    background: var(--bg);
+    background: var(--highlight);
   }
 
   .btn-vis.sm {
@@ -1067,14 +1218,15 @@
     margin-bottom: 8px;
     cursor: pointer;
     transition: background 0.1s;
+    box-shadow: var(--shadow);
   }
 
   .section-card:hover {
-    background: var(--border);
+    background: var(--card-hover);
   }
 
   .section-card.expanded {
-    background: var(--border);
+    background: var(--card-hover);
   }
 
   .section-header {
@@ -1175,7 +1327,7 @@
 
   .section-activity-row:hover,
   .section-activity-row.highlighted {
-    background: var(--border);
+    background: var(--highlight);
     color: var(--text);
   }
 
@@ -1208,22 +1360,13 @@
   .panel-action {
     margin-left: auto;
     font-size: 11px;
-    color: #b91c1c;
+    color: #ef4444;
     padding: 2px 8px;
     border-radius: 3px;
   }
 
   .panel-action:hover {
-    background: #fef2f2;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .panel-action {
-      color: #fca5a5;
-    }
-    .panel-action:hover {
-      background: #2d1b1b;
-    }
+    background: color-mix(in srgb, #ef4444 10%, var(--card));
   }
 
   .assignment-tag {
@@ -1385,6 +1528,69 @@
     height: 100%;
   }
 
+  .map-legend {
+    position: absolute;
+    bottom: 24px;
+    right: 12px;
+    z-index: 1000;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    box-shadow: var(--shadow-lg);
+    max-height: 300px;
+    overflow-y: auto;
+    min-width: 140px;
+  }
+  .legend-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .legend-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    padding: 2px 0;
+  }
+  .legend-entry.dimmed {
+    opacity: 0.4;
+  }
+  .legend-entry input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--primary);
+    margin: 0;
+    cursor: pointer;
+  }
+  .legend-swatch {
+    width: 16px;
+    height: 4px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .legend-swatch.ungrouped {
+    background: #64748b;
+    border: 1px dashed #64748b;
+    height: 2px;
+  }
+  .legend-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .legend-count {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
   .map-overlay {
     position: absolute;
     top: 50%;
@@ -1397,7 +1603,7 @@
     color: var(--text-muted);
     pointer-events: none;
     z-index: 1000;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-lg);
   }
 
   .map-drop-overlay {

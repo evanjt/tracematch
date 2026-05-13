@@ -8,6 +8,43 @@ export interface ParsedTrace {
   sportType: string;
 }
 
+const SPORT_MAP: Record<string, string> = {
+  running: 'Run',
+  run: 'Run',
+  trail_running: 'Run',
+  '9': 'Run',
+  '10': 'Run',
+  cycling: 'Ride',
+  biking: 'Ride',
+  ride: 'Ride',
+  '1': 'Ride',
+  '2': 'Ride',
+  '3': 'Ride',
+  walking: 'Walk',
+  walk: 'Walk',
+  hiking: 'Walk',
+  hike: 'Walk',
+  '6': 'Walk',
+  '11': 'Walk',
+  swimming: 'Swim',
+  swim: 'Swim',
+  '5': 'Swim',
+  '12': 'Swim'
+};
+
+function extractTrackTypes(dom: Document): Map<number, string> {
+  const types = new Map<number, string>();
+  dom.querySelectorAll('trk').forEach((trk, i) => {
+    const typeEl = trk.querySelector('type');
+    if (typeEl?.textContent) {
+      const raw = typeEl.textContent.trim().toLowerCase();
+      const mapped = SPORT_MAP[raw];
+      if (mapped) types.set(i, mapped);
+    }
+  });
+  return types;
+}
+
 function inferSport(name: string): string {
   const lower = name.toLowerCase();
   if (lower.includes('run')) return 'Run';
@@ -18,9 +55,11 @@ function inferSport(name: string): string {
 
 export function parseGpx(xmlString: string): ParsedTrace[] {
   const dom = new DOMParser().parseFromString(xmlString, 'text/xml');
+  const trackTypes = extractTrackTypes(dom);
   const geoJson = gpx(dom);
   const traces: ParsedTrace[] = [];
 
+  let trackIndex = 0;
   for (const feature of geoJson.features) {
     if (feature.geometry.type !== 'LineString' && feature.geometry.type !== 'MultiLineString') {
       continue;
@@ -38,14 +77,19 @@ export function parseGpx(xmlString: string): ParsedTrace[] {
       elevation: c[2] != null ? c[2] : undefined
     }));
 
-    if (points.length < 2) continue;
+    if (points.length < 2) {
+      trackIndex++;
+      continue;
+    }
 
     let distance = 0;
     for (let i = 1; i < points.length; i++) {
       distance += haversine(points[i - 1], points[i]);
     }
 
-    traces.push({ name, points, distance, sportType: inferSport(name) });
+    const sportType = trackTypes.get(trackIndex) ?? inferSport(name);
+    traces.push({ name, points, distance, sportType });
+    trackIndex++;
   }
 
   return traces;
