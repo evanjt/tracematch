@@ -944,7 +944,7 @@ pub fn detect_sections_from_tracks(
     }
 
     // Sort by visit count (most visited first)
-    all_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    all_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     info!("[Sections] Detected {} total sections", all_sections.len());
 
@@ -1589,7 +1589,7 @@ pub fn detect_sections_multiscale_with_progress(
 
     // Sort sections by visit count
     let mut sorted_sections = final_sections;
-    sorted_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    sorted_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     // Re-assign unique IDs after all post-processing
     // Each scale generates IDs independently (sec_run_0, sec_run_1, ...),

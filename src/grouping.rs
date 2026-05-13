@@ -196,7 +196,24 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
             }
 
             if let Some(sig2) = sig_map.get(bounds.activity_id.as_str()) {
-                // Only group if match exists AND passes strict grouping criteria
+                // Endpoint pre-filter: skip the expensive AMD computation if
+                // endpoints can't match in either direction. should_group_routes
+                // would reject these pairs anyway, so this is a pure prune.
+                let threshold = config.endpoint_threshold;
+                let same_ok = haversine_distance(&sig1.start_point, &sig2.start_point) < threshold
+                    && haversine_distance(&sig1.end_point, &sig2.end_point) < threshold;
+                let rev_ok = haversine_distance(&sig1.start_point, &sig2.end_point) < threshold
+                    && haversine_distance(&sig1.end_point, &sig2.start_point) < threshold;
+                if !same_ok && !rev_ok {
+                    let is_loop1 =
+                        haversine_distance(&sig1.start_point, &sig1.end_point) < threshold;
+                    let is_loop2 =
+                        haversine_distance(&sig2.start_point, &sig2.end_point) < threshold;
+                    if !is_loop1 || !is_loop2 {
+                        continue;
+                    }
+                }
+
                 if let Some(match_result) = compare_routes(sig1, sig2, config)
                     && should_group_routes(sig1, sig2, &match_result, config)
                 {
