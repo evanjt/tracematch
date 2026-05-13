@@ -61,7 +61,10 @@ pub mod grouping_filter;
 pub use grouping::{
     group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
 };
-pub use grouping::{group_signatures, group_signatures_with_matches, should_group_routes};
+pub use grouping::{
+    GROUPING_PHASE_COMPARING, group_signatures, group_signatures_with_matches,
+    group_signatures_with_progress, should_group_routes,
+};
 
 // Geographic utilities (distance, bounds, center calculations)
 pub mod geo_utils;

@@ -31,14 +31,17 @@ class TraceStore {
     this.loading = true;
     this.loadProgress = null;
     try {
+      console.time('[tracematch] idb:keys');
       const allKeys = await idbKeys();
       const traceKeys = allKeys.filter(
         (k) => typeof k === 'string' && k.startsWith(TRACES_PREFIX)
       );
+      console.timeEnd('[tracematch] idb:keys');
 
       const total = traceKeys.length;
       this.loadProgress = { current: 0, total };
 
+      console.time('[tracematch] idb:load-traces');
       const loaded: StoredTrace[] = [];
       const batchSize = 50;
       for (let i = 0; i < traceKeys.length; i += batchSize) {
@@ -49,12 +52,16 @@ class TraceStore {
         }
         this.loadProgress = { current: Math.min(i + batchSize, total), total };
       }
+      console.timeEnd('[tracematch] idb:load-traces');
+      console.log(`[tracematch] Loaded ${loaded.length} traces from IndexedDB`);
 
       loaded.sort((a, b) => b.addedAt - a.addedAt);
       this.traces = loaded;
 
+      console.time('[tracematch] idb:load-analysis');
       const saved = await idbGet(ANALYSIS_KEY);
       if (saved) this.analysis = saved;
+      console.timeEnd('[tracematch] idb:load-analysis');
     } finally {
       this.loading = false;
       this.loadProgress = null;

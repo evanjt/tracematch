@@ -11,7 +11,24 @@
  */
 
 import type { FrequentSection, GpsPoint, RouteGroup, RouteSignature } from './types';
-import init, { createSignature, groupRoutes, detectSections } from './pkg/tracematch_wasm.js';
+import init, {
+  createSignature,
+  groupRoutesWithProgress,
+  detectSectionsWithProgress,
+} from './pkg/tracematch_wasm.js';
+
+// Map raw phase strings from the Rust library to human-readable labels
+// for the progress overlay. Falls back to the raw string when unknown.
+const PHASE_LABELS: Record<string, string> = {
+  comparing_pairs: 'Comparing route pairs',
+  building_rtrees: 'Building spatial indices',
+  finding_overlaps: 'Finding section overlaps',
+  postprocessing: 'Post-processing sections',
+};
+
+function labelFor(phase: string): string {
+  return PHASE_LABELS[phase] ?? phase;
+}
 
 let wasmReady: Promise<void> | null = null;
 
@@ -47,9 +64,13 @@ function progress(requestId: number, phase: string, current: number, total: numb
 
 async function handleAnalyse(req: AnalyseRequest) {
   try {
+    console.time('[worker] wasm-init');
+    progress(req.requestId, 'Initializing WASM engine', 0, 0);
     await ensureWasm();
+    console.timeEnd('[worker] wasm-init');
     const traces = req.traces;
 
+    console.time('[worker] signatures');
     const signatures: RouteSignature[] = [];
     const tracks: [string, GpsPoint[]][] = [];
     const sportTypes: Record<string, string> = {};
@@ -68,23 +89,46 @@ async function handleAnalyse(req: AnalyseRequest) {
       }
       progress(req.requestId, 'Creating signatures', end, traces.length);
     }
+    console.timeEnd('[worker] signatures');
+    console.log(`[worker] ${signatures.length} signatures from ${traces.length} traces`);
 
-    progress(req.requestId, 'Grouping routes', 0, 1);
-    const groups = groupRoutes(JSON.stringify(signatures), '{}');
-    progress(req.requestId, 'Grouping routes', 1, 1);
+    // Emit a transition status BEFORE the (potentially multi-second)
+    // JSON.stringify so the progress bar doesn't sit at 100% of the
+    // signatures phase while we prepare data for the next WASM call.
+    progress(req.requestId, 'Serializing routes for grouping', 0, 0);
+    console.time('[worker] grouping');
+    const sigJson = JSON.stringify(signatures);
+    console.log(`[worker] signatures JSON: ${(sigJson.length / 1024 / 1024).toFixed(1)} MB`);
+    progress(req.requestId, 'Preparing route comparison', 0, 0);
+    const groups = groupRoutesWithProgress(sigJson, '{}', (phase: string, current: number, total: number) => {
+      progress(req.requestId, labelFor(phase), current, total);
+    });
+    console.timeEnd('[worker] grouping');
+    console.log(`[worker] ${groups.length} groups`);
 
     let sections: FrequentSection[] = [];
     if (tracks.length >= 3) {
-      progress(req.requestId, 'Detecting sections', 0, 1);
-      sections = detectSections(
-        JSON.stringify(tracks),
-        JSON.stringify(sportTypes),
-        JSON.stringify(groups),
+      progress(req.requestId, 'Serializing tracks for section detection', 0, 0);
+      console.time('[worker] sections');
+      const tracksJson = JSON.stringify(tracks);
+      const sportTypesJson = JSON.stringify(sportTypes);
+      const groupsJson = JSON.stringify(groups);
+      console.log(`[worker] tracks JSON: ${(tracksJson.length / 1024 / 1024).toFixed(1)} MB`);
+      progress(req.requestId, 'Preparing section detection', 0, 0);
+      sections = detectSectionsWithProgress(
+        tracksJson,
+        sportTypesJson,
+        groupsJson,
         req.sectionConfig,
+        (phase: string, current: number, total: number) => {
+          progress(req.requestId, labelFor(phase), current, total);
+        },
       );
-      progress(req.requestId, 'Detecting sections', 1, 1);
+      console.timeEnd('[worker] sections');
+      console.log(`[worker] ${sections.length} sections detected`);
     }
 
+    progress(req.requestId, 'Finalizing results', 0, 0);
     self.postMessage({
       type: 'analyse:ok',
       requestId: req.requestId,

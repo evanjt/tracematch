@@ -161,6 +161,22 @@ pub fn check_middle_points_match(
 /// pruned pair set. For large datasets prefer
 /// [`group_signatures_parallel`].
 pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> Vec<RouteGroup> {
+    group_signatures_with_progress(signatures, config, &mut |_, _, _| {})
+}
+
+/// Phase name used by `group_signatures_with_progress`.
+pub const GROUPING_PHASE_COMPARING: &str = "comparing_pairs";
+
+/// Group similar routes together while reporting progress.
+///
+/// The callback receives `(phase_name, current, total)`. Updates are
+/// batched (~100 emissions per phase) so the cost of crossing FFI
+/// boundaries stays negligible compared to the pair work itself.
+pub fn group_signatures_with_progress(
+    signatures: &[RouteSignature],
+    config: &MatchConfig,
+    on_progress: &mut dyn FnMut(&str, u32, u32),
+) -> Vec<RouteGroup> {
     if signatures.is_empty() {
         return vec![];
     }
@@ -191,13 +207,27 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
         uf.make_set(sig.activity_id.clone());
     }
 
-    for (i, j) in candidate_pairs {
+    let total_pairs = candidate_pairs.len() as u32;
+    // Emit ~100 progress ticks across the full pair loop. Threshold is
+    // pair count / 100, clamped to [1, 1000] so very small or very large
+    // datasets still get sensible update granularity.
+    let tick_interval = total_pairs.div_ceil(100).clamp(1, 1000);
+    on_progress(GROUPING_PHASE_COMPARING, 0, total_pairs);
+
+    for (idx, (i, j)) in candidate_pairs.into_iter().enumerate() {
         let sig1 = &signatures[i];
         let sig2 = &signatures[j];
         if !distance_ratio_ok(sig1.total_distance, sig2.total_distance) {
+            // Still tick to keep the bar moving even on skipped pairs.
+            if (idx as u32 + 1).is_multiple_of(tick_interval) {
+                on_progress(GROUPING_PHASE_COMPARING, idx as u32 + 1, total_pairs);
+            }
             continue;
         }
         if !endpoints_could_group(sig1, sig2, config) {
+            if (idx as u32 + 1).is_multiple_of(tick_interval) {
+                on_progress(GROUPING_PHASE_COMPARING, idx as u32 + 1, total_pairs);
+            }
             continue;
         }
         if let Some(match_result) =
@@ -206,7 +236,11 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
         {
             uf.union(&sig1.activity_id, &sig2.activity_id);
         }
+        if (idx as u32 + 1).is_multiple_of(tick_interval) {
+            on_progress(GROUPING_PHASE_COMPARING, idx as u32 + 1, total_pairs);
+        }
     }
+    on_progress(GROUPING_PHASE_COMPARING, total_pairs, total_pairs);
 
     let groups_map = uf.groups();
     build_route_groups(groups_map, &sig_map)

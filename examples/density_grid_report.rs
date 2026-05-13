@@ -23,8 +23,11 @@ use std::time::Instant;
 
 use rstar::{PointDistance, RTree};
 use tracematch::geo_utils::haversine_distance;
-use tracematch::sections::IndexedPoint;
-use tracematch::sections::build_rtree;
+use tracematch::sections::{
+    FullTrackOverlap, IndexedPoint, OverlapCluster, build_rtree,
+    filter_low_quality_sections, merge_nearby_sections, process_cluster,
+    remove_overlapping_sections,
+};
 use tracematch::{
     FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, UnionFind,
 };
@@ -132,9 +135,36 @@ fn rasterise_track(track: &[GpsPoint], grid: &CellGrid) -> HashSet<(i32, i32)> {
 
 #[derive(Debug, Clone)]
 struct DensityCandidate {
-    activity_ids: Vec<String>,
-    polyline: Vec<GpsPoint>,
-    distance_m: f64,
+    /// Per-track portions: (track_idx, start_idx, end_idx, distance_m).
+    /// `track_idx` is the index into the `tracks` slice passed to
+    /// `detect_via_density_grid`. start_idx/end_idx are indices into
+    /// that track's full GPS points (start inclusive, end exclusive).
+    portions: Vec<(usize, usize, usize, f64)>,
+}
+
+impl DensityCandidate {
+    fn visit_count(&self) -> usize {
+        self.portions.len()
+    }
+    fn max_distance_m(&self) -> f64 {
+        self.portions.iter().map(|p| p.3).fold(0.0, f64::max)
+    }
+    /// Representative polyline = the longest contributing portion's points.
+    fn representative_polyline<'a>(
+        &self,
+        tracks: &'a [(String, Vec<GpsPoint>)],
+    ) -> Option<&'a [GpsPoint]> {
+        let (t_idx, s, e, _) = self
+            .portions
+            .iter()
+            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))?;
+        let pts = &tracks[*t_idx].1;
+        let end = (*e).min(pts.len());
+        if *s >= end {
+            return None;
+        }
+        Some(&pts[*s..end])
+    }
 }
 
 #[derive(Default)]
@@ -149,14 +179,28 @@ struct PhaseStats {
     final_sections: usize,
 }
 
+/// Output of the density-grid detection. Includes the raw cell→track
+/// map so callers can write a heatmap GeoJSON for visualisation.
+struct DensityResult {
+    candidates: Vec<DensityCandidate>,
+    cell_to_tracks: HashMap<(i32, i32), Vec<u32>>,
+    grid: CellGrid,
+    stats: PhaseStats,
+}
+
 fn detect_via_density_grid(
     tracks: &[(String, Vec<GpsPoint>)],
     config: &SectionConfig,
-) -> (Vec<DensityCandidate>, PhaseStats) {
+) -> DensityResult {
     let mut stats = PhaseStats::default();
 
     if tracks.is_empty() {
-        return (Vec::new(), stats);
+        return DensityResult {
+            candidates: Vec::new(),
+            cell_to_tracks: HashMap::new(),
+            grid: CellGrid::new(config.proximity_threshold / 2.0, 0.0),
+            stats,
+        };
     }
 
     // Reference latitude: midpoint of the corpus bbox (good enough for
@@ -322,7 +366,12 @@ fn detect_via_density_grid(
     stats.extract_ms = t0.elapsed().as_millis();
     stats.final_sections = candidates.len();
 
-    (candidates, stats)
+    DensityResult {
+        candidates,
+        cell_to_tracks,
+        grid,
+        stats,
+    }
 }
 
 /// For one connected component, gather contributing tracks and produce
@@ -368,50 +417,36 @@ fn extract_candidate(
     // For each contributing track, find the longest continuous run of
     // points whose cell is in cell_set. Skip if shorter than
     // min_section_length OR longer than max_section_length.
-    let mut valid_ids: Vec<String> = Vec::new();
-    let mut best_portion: Option<(Vec<GpsPoint>, f64)> = None;
+    let mut portions: Vec<(usize, usize, usize, f64)> = Vec::new();
 
     let mut t_indices: Vec<u32> = contributing.into_iter().collect();
     t_indices.sort_unstable();
 
     for &t_idx in &t_indices {
-        let (id, pts) = &tracks[t_idx as usize];
-        let portion = longest_run_in_cells(pts, &cell_set, grid);
-        if let Some((portion_pts, dist)) = portion
+        let pts = &tracks[t_idx as usize].1;
+        if let Some((s, e, dist)) = longest_run_in_cells(pts, &cell_set, grid)
             && dist >= config.min_section_length
             && dist <= config.max_section_length
         {
-            valid_ids.push(id.clone());
-            if best_portion
-                .as_ref()
-                .map(|(_, d)| dist > *d)
-                .unwrap_or(true)
-            {
-                best_portion = Some((portion_pts, dist));
-            }
+            portions.push((t_idx as usize, s, e, dist));
         }
     }
 
-    if valid_ids.len() < min_acts {
+    if portions.len() < min_acts {
         return None;
     }
-    let (polyline, distance_m) = best_portion?;
 
-    Some(DensityCandidate {
-        activity_ids: valid_ids,
-        polyline,
-        distance_m,
-    })
+    Some(DensityCandidate { portions })
 }
 
 /// Walk a track's GPS points, find the longest contiguous run whose
-/// cells are in `cell_set`. Returns the points and the haversine
-/// path length of that run.
+/// cells are in `cell_set`. Returns `(start_idx, end_idx, distance_m)`
+/// for the run (end_idx is exclusive).
 fn longest_run_in_cells(
     pts: &[GpsPoint],
     cell_set: &HashSet<(i32, i32)>,
     grid: &CellGrid,
-) -> Option<(Vec<GpsPoint>, f64)> {
+) -> Option<(usize, usize, f64)> {
     let mut best_start = 0usize;
     let mut best_end = 0usize;
     let mut best_dist = 0.0f64;
@@ -448,7 +483,126 @@ fn longest_run_in_cells(
     if best_dist == 0.0 {
         return None;
     }
-    Some((pts[best_start..best_end].to_vec(), best_dist))
+    Some((best_start, best_end, best_dist))
+}
+
+// ============================================================================
+// Hybrid: density candidate → OverlapCluster → process_cluster → FrequentSection
+// ============================================================================
+
+/// Synthesise an OverlapCluster from a DensityCandidate.
+///
+/// `process_cluster` (and `select_medoid` underneath it) consumes
+/// `FullTrackOverlap` entries to learn each activity's portion range.
+/// We construct N-1 anchor-paired entries: each contributing track
+/// gets paired with `portions[0]` so every track surfaces in
+/// `select_medoid`'s seen-set.
+fn synthesise_cluster(
+    candidate: &DensityCandidate,
+    tracks: &[(String, Vec<GpsPoint>)],
+) -> OverlapCluster {
+    let anchor = candidate.portions[0];
+    let anchor_id = tracks[anchor.0].0.clone();
+    let anchor_range = (anchor.1, anchor.2);
+    let anchor_pts = &tracks[anchor.0].1[anchor.1..anchor.2.min(tracks[anchor.0].1.len())];
+    let center = if anchor_pts.is_empty() {
+        GpsPoint::new(0.0, 0.0)
+    } else {
+        anchor_pts[anchor_pts.len() / 2]
+    };
+
+    let mut overlaps: Vec<FullTrackOverlap> = Vec::with_capacity(candidate.portions.len());
+    let mut activity_ids: HashSet<String> = HashSet::with_capacity(candidate.portions.len());
+    activity_ids.insert(anchor_id.clone());
+
+    for &(t_idx, s, e, dist) in candidate.portions.iter().skip(1) {
+        let other_id = tracks[t_idx].0.clone();
+        activity_ids.insert(other_id.clone());
+        overlaps.push(FullTrackOverlap {
+            activity_a: anchor_id.clone(),
+            activity_b: other_id,
+            range_a: anchor_range,
+            range_b: (s, e),
+            center,
+            overlap_length: dist.min(anchor.3),
+        });
+    }
+
+    // Single-track candidates can't satisfy min_activities anyway, but
+    // guard explicitly: if we somehow have a one-portion candidate,
+    // emit a self-paired entry so select_medoid still sees the activity.
+    if overlaps.is_empty() {
+        overlaps.push(FullTrackOverlap {
+            activity_a: anchor_id.clone(),
+            activity_b: anchor_id.clone(),
+            range_a: anchor_range,
+            range_b: anchor_range,
+            center,
+            overlap_length: anchor.3,
+        });
+    }
+
+    OverlapCluster {
+        overlaps,
+        activity_ids,
+    }
+}
+
+/// Full hybrid pipeline: density candidates → process_cluster → postprocess.
+fn run_hybrid_pipeline(
+    candidates: &[DensityCandidate],
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    activity_to_route: &HashMap<&str, &str>,
+    config: &SectionConfig,
+) -> (Vec<FrequentSection>, u128, u128) {
+    let track_map: HashMap<&str, &[GpsPoint]> = tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+
+    // Resolve sport — assume single-sport corpus for prototype; pick the
+    // first activity's sport, fall back to "Run".
+    let sport = tracks
+        .iter()
+        .find_map(|(id, _)| sport_types.get(id).cloned())
+        .unwrap_or_else(|| "Run".to_string());
+
+    // 1. Synthesise OverlapClusters
+    let t_synth = Instant::now();
+    let clusters: Vec<OverlapCluster> = candidates
+        .iter()
+        .map(|c| synthesise_cluster(c, tracks))
+        .collect();
+    let dur_synth = t_synth.elapsed().as_millis();
+
+    // 2. Run process_cluster on each
+    let t_proc = Instant::now();
+    #[cfg(feature = "parallel")]
+    let mut sections: Vec<FrequentSection> = clusters
+        .into_par_iter()
+        .enumerate()
+        .filter_map(|(idx, c)| process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None))
+        .collect();
+    #[cfg(not(feature = "parallel"))]
+    let mut sections: Vec<FrequentSection> = clusters
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, c)| process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None))
+        .collect();
+
+    // 3. Postprocess: same three public steps as detect_sections_multiscale
+    sections = filter_low_quality_sections(sections, tracks.len());
+    sections = merge_nearby_sections(sections, config);
+    sections = remove_overlapping_sections(sections, config);
+
+    // Renumber IDs deterministically
+    for (i, s) in sections.iter_mut().enumerate() {
+        s.id = format!("sec_{}_{}", sport.to_lowercase(), i);
+    }
+    let dur_proc = t_proc.elapsed().as_millis();
+
+    (sections, dur_synth, dur_proc)
 }
 
 // ============================================================================
@@ -487,65 +641,136 @@ fn symmetric_hausdorff_m(
     ab.max(ba)
 }
 
-/// For each density-grid section, find the closest baseline section by
-/// Hausdorff distance. Returns (match_rate_at_30m, top5_match_count).
-fn compare_section_sets(
-    density: &[DensityCandidate],
-    baseline: &[FrequentSection],
-) -> (f64, usize) {
-    if density.is_empty() {
-        return (0.0, 0);
+/// For each section set, count how many sections have a match in the
+/// other set within `cutoff_m` Hausdorff. Returns (a→b, b→a).
+fn bidirectional_match(
+    a: &[FrequentSection],
+    b: &[FrequentSection],
+    cutoff_m: f64,
+) -> (usize, usize) {
+    if a.is_empty() || b.is_empty() {
+        return (0, 0);
     }
-    let baseline_trees: Vec<RTree<IndexedPoint>> =
-        baseline.iter().map(|b| build_rtree(&b.polyline)).collect();
-    let density_trees: Vec<RTree<IndexedPoint>> =
-        density.iter().map(|d| build_rtree(&d.polyline)).collect();
+    let a_trees: Vec<RTree<IndexedPoint>> =
+        a.iter().map(|s| build_rtree(&s.polyline)).collect();
+    let b_trees: Vec<RTree<IndexedPoint>> =
+        b.iter().map(|s| build_rtree(&s.polyline)).collect();
 
-    // For each density section, find any baseline section with Hausdorff < 30m.
-    let mut matched = 0;
-    for (di, d) in density.iter().enumerate() {
-        for (bi, b) in baseline.iter().enumerate() {
-            let h = symmetric_hausdorff_m(
-                &d.polyline,
-                &b.polyline,
-                &density_trees[di],
-                &baseline_trees[bi],
-            );
-            if h < 30.0 {
-                matched += 1;
+    let mut ab = 0;
+    for (ai, sa) in a.iter().enumerate() {
+        for (bi, sb) in b.iter().enumerate() {
+            let h = symmetric_hausdorff_m(&sa.polyline, &sb.polyline, &a_trees[ai], &b_trees[bi]);
+            if h < cutoff_m {
+                ab += 1;
                 break;
             }
         }
     }
-    let match_rate = matched as f64 / density.len() as f64;
-
-    // Top 5 by visits — how many of the new top-5 have a baseline equivalent?
-    let mut top_new: Vec<usize> = (0..density.len()).collect();
-    top_new.sort_by(|&a, &b| {
-        density[b]
-            .activity_ids
-            .len()
-            .cmp(&density[a].activity_ids.len())
-    });
-    top_new.truncate(5);
-
-    let mut top5_match = 0;
-    for &di in &top_new {
-        for (bi, b) in baseline.iter().enumerate() {
-            let h = symmetric_hausdorff_m(
-                &density[di].polyline,
-                &b.polyline,
-                &density_trees[di],
-                &baseline_trees[bi],
-            );
-            if h < 30.0 {
-                top5_match += 1;
+    let mut ba = 0;
+    for (bi, sb) in b.iter().enumerate() {
+        for (ai, sa) in a.iter().enumerate() {
+            let h = symmetric_hausdorff_m(&sa.polyline, &sb.polyline, &a_trees[ai], &b_trees[bi]);
+            if h < cutoff_m {
+                ba += 1;
                 break;
             }
         }
     }
+    (ab, ba)
+}
 
-    (match_rate, top5_match)
+// ============================================================================
+// GeoJSON export
+// ============================================================================
+
+/// Polygon corners (lng, lat) for a single cell, closed ring.
+fn cell_polygon_coords(grid: &CellGrid, cell: (i32, i32)) -> [(f64, f64); 5] {
+    let (lat_sw, lng_sw) = grid.cell_corner(cell);
+    let (lat_ne, lng_ne) = grid.cell_corner((cell.0 + 1, cell.1 + 1));
+    [
+        (lng_sw, lat_sw),
+        (lng_ne, lat_sw),
+        (lng_ne, lat_ne),
+        (lng_sw, lat_ne),
+        (lng_sw, lat_sw),
+    ]
+}
+
+fn write_cells_geojson(
+    path: &str,
+    cell_to_tracks: &HashMap<(i32, i32), Vec<u32>>,
+    grid: &CellGrid,
+    min_acts: usize,
+    hot_only: bool,
+) -> std::io::Result<usize> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    write!(file, "{{\"type\":\"FeatureCollection\",\"features\":[")?;
+    let mut first = true;
+    let mut written = 0usize;
+    for (cell, tracks) in cell_to_tracks {
+        let count = tracks.len();
+        if hot_only && count < min_acts {
+            continue;
+        }
+        let coords = cell_polygon_coords(grid, *cell);
+        let coords_str: String = coords
+            .iter()
+            .map(|(lng, lat)| format!("[{:.6},{:.6}]", lng, lat))
+            .collect::<Vec<_>>()
+            .join(",");
+        if !first {
+            write!(file, ",")?;
+        }
+        first = false;
+        write!(
+            file,
+            "{{\"type\":\"Feature\",\"geometry\":{{\"type\":\"Polygon\",\"coordinates\":[[{}]]}},\"properties\":{{\"count\":{},\"is_hot\":{}}}}}",
+            coords_str,
+            count,
+            count >= min_acts
+        )?;
+        written += 1;
+    }
+    write!(file, "]}}")?;
+    Ok(written)
+}
+
+fn write_sections_geojson(
+    path: &str,
+    sections: &[FrequentSection],
+    layer_name: &str,
+) -> std::io::Result<usize> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    write!(file, "{{\"type\":\"FeatureCollection\",\"features\":[")?;
+    let mut first = true;
+    for s in sections {
+        if s.polyline.is_empty() {
+            continue;
+        }
+        let coords: String = s
+            .polyline
+            .iter()
+            .map(|p| format!("[{:.6},{:.6}]", p.longitude, p.latitude))
+            .collect::<Vec<_>>()
+            .join(",");
+        if !first {
+            write!(file, ",")?;
+        }
+        first = false;
+        write!(
+            file,
+            "{{\"type\":\"Feature\",\"geometry\":{{\"type\":\"LineString\",\"coordinates\":[{}]}},\"properties\":{{\"id\":\"{}\",\"layer\":\"{}\",\"visits\":{},\"distance_m\":{:.0}}}}}",
+            coords,
+            s.id,
+            layer_name,
+            s.activity_ids.len(),
+            s.distance_meters
+        )?;
+    }
+    write!(file, "]}}")?;
+    Ok(sections.len())
 }
 
 // ============================================================================
@@ -643,37 +868,23 @@ fn main() {
     }
     println!();
 
-    // ---- Density-grid prototype ----
+    // ---- Density-grid stage 1: find candidate regions ----
     let t_dg = Instant::now();
-    let (mut candidates, stats) = detect_via_density_grid(&raw_tracks, &section_config);
+    let density = detect_via_density_grid(&raw_tracks, &section_config);
     let dur_dg = t_dg.elapsed();
-    candidates.sort_by(|a, b| b.activity_ids.len().cmp(&a.activity_ids.len()));
+    let mut candidates = density.candidates;
+    let stats = density.stats;
+    let cell_to_tracks = density.cell_to_tracks;
+    let grid = density.grid;
+    candidates.sort_by(|a, b| b.visit_count().cmp(&a.visit_count()));
 
     println!(
-        "## Density-grid prototype\n  Sections:            {}\n  Total visits:        {}\n  Largest section:     {} visits, {:.0} m\n  Time:                {}\n",
+        "## Density-grid stage 1 (candidate detection)\n  Candidates:          {}\n  Largest candidate:   {} contributors, {:.0} m\n  Time:                {}\n",
         candidates.len(),
-        candidates
-            .iter()
-            .map(|s| s.activity_ids.len())
-            .sum::<usize>(),
-        candidates
-            .first()
-            .map(|s| s.activity_ids.len())
-            .unwrap_or(0),
-        candidates.first().map(|s| s.distance_m).unwrap_or(0.0),
+        candidates.first().map(|s| s.visit_count()).unwrap_or(0),
+        candidates.first().map(|s| s.max_distance_m()).unwrap_or(0.0),
         fmt_ms(dur_dg.as_millis())
     );
-    println!("  Top 5 density-grid sections by visits:");
-    for (i, c) in candidates.iter().take(5).enumerate() {
-        println!(
-            "    #{:>1}  {:>4} visits  {:>6.0} m  ({} polyline pts)",
-            i + 1,
-            c.activity_ids.len(),
-            c.distance_m,
-            c.polyline.len()
-        );
-    }
-    println!();
 
     println!("  Phase breakdown:");
     println!("    rasterise           {:>9}", fmt_ms(stats.rasterise_ms));
@@ -689,144 +900,118 @@ fn main() {
         stats.components
     );
     println!(
-        "    extract portions    {:>9}  final sections: {}",
+        "    extract portions    {:>9}  final candidates: {}",
         fmt_ms(stats.extract_ms),
         stats.final_sections
     );
     println!();
 
-    // ---- Gate analysis ----
-    println!("## Medium gate check\n");
-    let baseline_count = baseline.len();
-    let dg_count = candidates.len();
-    let count_lo = (baseline_count as f64 * 0.9).floor() as usize;
-    let count_hi = (baseline_count as f64 * 1.1).ceil() as usize;
-    let count_pass = dg_count >= count_lo && dg_count <= count_hi;
+    // ---- Hybrid: candidates → process_cluster + postprocess → FrequentSection ----
+    let activity_to_route: HashMap<&str, &str> = groups
+        .iter()
+        .filter(|g| g.activity_ids.len() >= 2)
+        .flat_map(|g| {
+            g.activity_ids
+                .iter()
+                .map(|aid| (aid.as_str(), g.group_id.as_str()))
+        })
+        .collect();
+
+    let t_hyb = Instant::now();
+    let (mut hybrid, dur_synth, dur_proc) = run_hybrid_pipeline(
+        &candidates,
+        &raw_tracks,
+        &sport_types,
+        &activity_to_route,
+        &section_config,
+    );
+    let dur_hyb = t_hyb.elapsed();
+    hybrid.sort_by(|a, b| b.activity_ids.len().cmp(&a.activity_ids.len()));
+
     println!(
-        "  Section count:  {} (baseline {}, allowed range {}..={})  {}",
-        dg_count,
-        baseline_count,
+        "## Hybrid (density grid → process_cluster → postprocess)\n  Sections:            {}\n  Total visits:        {}\n  Largest section:     {} visits, {:.0} m\n  Time (total hybrid): {}\n    synthesise         {:>9}\n    process+post       {:>9}\n",
+        hybrid.len(),
+        hybrid.iter().map(|s| s.activity_ids.len()).sum::<usize>(),
+        hybrid.first().map(|s| s.activity_ids.len()).unwrap_or(0),
+        hybrid.first().map(|s| s.distance_meters).unwrap_or(0.0),
+        fmt_ms(dur_hyb.as_millis()),
+        fmt_ms(dur_synth),
+        fmt_ms(dur_proc),
+    );
+    println!("  Top 5 hybrid sections by visits:");
+    for s in hybrid.iter().take(5) {
+        let start = s.polyline.first();
+        let coord = start
+            .map(|p| format!("({:.5}, {:.5})", p.latitude, p.longitude))
+            .unwrap_or_else(|| "(?)".into());
+        println!(
+            "    {:>4}  {:>6.0} m  start {}  {}",
+            s.activity_ids.len(),
+            s.distance_meters,
+            coord,
+            s.id
+        );
+    }
+    println!();
+
+    // ---- Comparison: hybrid vs baseline ----
+    println!("## Hybrid vs baseline comparison\n");
+
+    let dg_full = dur_dg + dur_hyb;
+    let speedup = dur_base.as_secs_f64() / dg_full.as_secs_f64().max(1e-9);
+    println!(
+        "  Wall clock: baseline {}, hybrid {} (detection {}, pipeline {}) → speedup {:.1}×",
+        fmt_ms(dur_base.as_millis()),
+        fmt_ms(dg_full.as_millis()),
+        fmt_ms(dur_dg.as_millis()),
+        fmt_ms(dur_hyb.as_millis()),
+        speedup,
+    );
+
+    let count_lo = (baseline.len() as f64 * 0.9).floor() as usize;
+    let count_hi = (baseline.len() as f64 * 1.1).ceil() as usize;
+    println!(
+        "  Section count: hybrid {} vs baseline {} (±10% allowed: {}..={})",
+        hybrid.len(),
+        baseline.len(),
         count_lo,
         count_hi,
-        if count_pass { "PASS" } else { "FAIL" }
     );
 
-    // Diagnostic: print spatial relation of top-3 density to top-3 baseline.
-    if !candidates.is_empty() && !baseline.is_empty() {
-        println!("\n  Diagnostic — top density section anchor points:");
-        for c in candidates.iter().take(3) {
-            if let Some(p) = c.polyline.first() {
-                println!(
-                    "    density: start ({:.5}, {:.5}), dist {:.0}m, visits {}",
-                    p.latitude,
-                    p.longitude,
-                    c.distance_m,
-                    c.activity_ids.len()
-                );
-            }
-        }
-        println!("  Diagnostic — top baseline section anchor points:");
-        for b in baseline.iter().take(3) {
-            if let Some(p) = b.polyline.first() {
-                println!(
-                    "    baseline: start ({:.5}, {:.5}), dist {:.0}m, visits {}",
-                    p.latitude,
-                    p.longitude,
-                    b.distance_meters,
-                    b.activity_ids.len()
-                );
-            }
-        }
-        // What's the min Hausdorff distance for each density top-5 against ALL baseline?
-        println!("  Diagnostic — density top-5 closest baseline distances:");
-        for (ci, c) in candidates.iter().take(5).enumerate() {
-            let d_tree = build_rtree(&c.polyline);
-            let mut min_h = f64::INFINITY;
-            let mut min_idx = 0;
-            for (bi, b) in baseline.iter().enumerate() {
-                let b_tree = build_rtree(&b.polyline);
-                let h = symmetric_hausdorff_m(&c.polyline, &b.polyline, &d_tree, &b_tree);
-                if h < min_h {
-                    min_h = h;
-                    min_idx = bi;
-                }
-            }
-            println!(
-                "    density #{}: closest baseline idx {} (visits {}, dist {:.0}m) at Hausdorff {:.1} m",
-                ci + 1,
-                min_idx,
-                baseline[min_idx].activity_ids.len(),
-                baseline[min_idx].distance_meters,
-                min_h
-            );
-        }
-        // Reverse direction: for each baseline top-5, what's the closest density?
-        println!("  Diagnostic — baseline top-5 closest density distances:");
-        for (bi, b) in baseline.iter().take(5).enumerate() {
-            let b_tree = build_rtree(&b.polyline);
-            let mut min_h = f64::INFINITY;
-            let mut min_idx = 0;
-            for (ci, c) in candidates.iter().enumerate() {
-                let d_tree = build_rtree(&c.polyline);
-                let h = symmetric_hausdorff_m(&c.polyline, &b.polyline, &d_tree, &b_tree);
-                if h < min_h {
-                    min_h = h;
-                    min_idx = ci;
-                }
-            }
-            println!(
-                "    baseline #{}: closest density idx {} (visits {}, dist {:.0}m) at Hausdorff {:.1} m",
-                bi + 1,
-                min_idx,
-                candidates[min_idx].activity_ids.len(),
-                candidates[min_idx].distance_m,
-                min_h
-            );
-        }
+    println!("\n  Hausdorff overlap by distance threshold:");
+    for cutoff in [30.0_f64, 60.0, 100.0, 150.0] {
+        let (h_to_b, b_to_h) = bidirectional_match(&hybrid, &baseline, cutoff);
+        println!(
+            "    <{:>4.0} m: hybrid→baseline {:>3}/{} ({:>5.1}%), baseline→hybrid {:>3}/{} ({:>5.1}%)",
+            cutoff,
+            h_to_b,
+            hybrid.len(),
+            100.0 * h_to_b as f64 / hybrid.len().max(1) as f64,
+            b_to_h,
+            baseline.len(),
+            100.0 * b_to_h as f64 / baseline.len().max(1) as f64,
+        );
     }
 
-    let t_cmp = Instant::now();
-    let (match_rate, top5_match) = compare_section_sets(&candidates, &baseline);
-    let dur_cmp = t_cmp.elapsed();
-    let match_pass = match_rate >= 0.75;
-    println!(
-        "  Hausdorff <30m: {:.1}% of density sections match baseline ({:.0}/{}) [compare took {}]  {}",
-        match_rate * 100.0,
-        match_rate * candidates.len() as f64,
-        candidates.len(),
-        fmt_ms(dur_cmp.as_millis()),
-        if match_pass { "PASS" } else { "FAIL" }
-    );
-    let top5_pass = top5_match >= 5;
-    println!(
-        "  Top-5 shape:    {}/5 of density top-5 have a baseline match  {}",
-        top5_match,
-        if top5_pass { "PASS" } else { "FAIL" }
-    );
-    let speed_pass = dur_dg.as_millis() < 1000;
-    println!(
-        "  Detection time: {} (gate <1000 ms)  {}",
-        fmt_ms(dur_dg.as_millis()),
-        if speed_pass { "PASS" } else { "FAIL" }
-    );
-
-    let speedup = dur_base.as_secs_f64() / dur_dg.as_secs_f64().max(1e-9);
-    println!(
-        "\n  Speedup vs baseline: {:.1}×  ({} → {})",
-        speedup,
-        fmt_ms(dur_base.as_millis()),
-        fmt_ms(dur_dg.as_millis())
-    );
-
-    let all_pass = count_pass && match_pass && top5_pass && speed_pass;
-    println!(
-        "\n  Overall: {}",
-        if all_pass {
-            "ALL PASS — proceed to Phase 2 integration"
-        } else {
-            "FAIL — diagnose gap before Phase 2"
-        }
-    );
+    // ---- GeoJSON export for visualisation ----
+    println!("\n## GeoJSON output (drag into geojson.io or QGIS)\n");
+    let min_acts = section_config.min_activities as usize;
+    match write_cells_geojson("density_cells.geojson", &cell_to_tracks, &grid, min_acts, true) {
+        Ok(n) => println!("  density_cells.geojson         {} hot cells (≥{} tracks each)", n, min_acts),
+        Err(e) => eprintln!("  density_cells.geojson FAILED: {}", e),
+    }
+    match write_cells_geojson("density_all_cells.geojson", &cell_to_tracks, &grid, min_acts, false) {
+        Ok(n) => println!("  density_all_cells.geojson     {} total cells (full heatmap)", n),
+        Err(e) => eprintln!("  density_all_cells.geojson FAILED: {}", e),
+    }
+    match write_sections_geojson("density_hybrid_sections.geojson", &hybrid, "hybrid") {
+        Ok(n) => println!("  density_hybrid_sections.geojson  {} polylines (hybrid pipeline)", n),
+        Err(e) => eprintln!("  density_hybrid_sections.geojson FAILED: {}", e),
+    }
+    match write_sections_geojson("density_baseline_sections.geojson", &baseline, "baseline") {
+        Ok(n) => println!("  density_baseline_sections.geojson {} polylines (pairwise baseline)", n),
+        Err(e) => eprintln!("  density_baseline_sections.geojson FAILED: {}", e),
+    }
     let _ = dur_load + dur_sig;
 }
 

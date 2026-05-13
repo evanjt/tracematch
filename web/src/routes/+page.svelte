@@ -26,7 +26,40 @@
   let wasmReady = $state(false);
   let analysing = $state(false);
   let analysisProgress = $state<{ phase: string; current: number; total: number } | null>(null);
+  let overallProgress = $state(0);
   let error = $state<string | null>(null);
+
+  // Each analysis pipeline step gets an equal slice of the overall 0-100
+  // bar. Within a step, sub-progress (current/total) fills its slice.
+  // Transitions ("Serializing...", "Preparing...") snap to the start of the
+  // next step so the bar advances cleanly between phases.
+  const ANALYSIS_STEPS = [
+    'Creating signatures',
+    'Comparing route pairs',
+    'Building spatial indices',
+    'Finding section overlaps',
+    'Post-processing sections',
+    'Saving results'
+  ] as const;
+  const TOTAL_STEPS = ANALYSIS_STEPS.length;
+  // Maps every phase string (including transitions and the init phase) to
+  // the step index it belongs to. Step index = 0 for everything before
+  // grouping; transitions hop to the index of the upcoming real step.
+  const PHASE_TO_STEP: Record<string, number> = {
+    'Preparing': 0,
+    'Initializing WASM engine': 0,
+    'Creating signatures': 0,
+    'Serializing routes for grouping': 1,
+    'Preparing route comparison': 1,
+    'Comparing route pairs': 1,
+    'Serializing tracks for section detection': 2,
+    'Preparing section detection': 2,
+    'Building spatial indices': 2,
+    'Finding section overlaps': 3,
+    'Post-processing sections': 4,
+    'Finalizing results': 5,
+    'Saving results': 5
+  };
   let sectionError = $state<string | null>(null);
   let dragOver = $state(false);
   let mapDragOver = $state(false);
@@ -412,9 +445,14 @@
 
   // --- Lifecycle ---
   onMount(async () => {
+    console.time('[tracematch] startup:total');
+    console.time('[tracematch] startup:idb-load');
     await traceStore.load();
+    console.timeEnd('[tracematch] startup:idb-load');
     // WASM is loaded lazily inside the analysis worker on first run.
     wasmReady = true;
+    console.timeEnd('[tracematch] startup:total');
+    console.log(`[tracematch] ${traceStore.traces.length} traces loaded, analysis: ${traceStore.analysis ? 'yes' : 'no'}`);
 
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     mq.addEventListener('change', () => { if (themeMode === 'system') resolvedDark = mq.matches; });
@@ -489,6 +527,22 @@
     }
   });
 
+  // Derive overall analysis progress from the current sub-step progress.
+  // Unknown phases (no entry in PHASE_TO_STEP) keep the bar where it was
+  // rather than snapping back to zero.
+  $effect(() => {
+    if (!analysisProgress) {
+      overallProgress = 0;
+      return;
+    }
+    const idx = PHASE_TO_STEP[analysisProgress.phase];
+    if (idx === undefined) return;
+    const sub = analysisProgress.total > 0
+      ? Math.min(analysisProgress.current / analysisProgress.total, 1)
+      : 0;
+    overallProgress = ((idx + sub) / TOTAL_STEPS) * 100;
+  });
+
   // React to layer toggles
   $effect(() => {
     showTraces; showRoutes; showSections;
@@ -517,22 +571,30 @@
     // synchronous-ish parse loop.
     await new Promise((r) => setTimeout(r, 0));
 
-    const batchSize = 20;
+    console.time('[tracematch] import:total');
+
+    // Read + parse files in parallel within each batch. Sequential
+    // `await file.text()` over 400+ files was the dominant cost.
+    // Promise.all lets the browser overlap the disk reads while we
+    // bulk-insert each batch.
+    const batchSize = 50;
+    let completed = 0;
 
     for (let i = 0; i < fileArray.length; i += batchSize) {
-      const batch: StoredTrace[] = [];
       const end = Math.min(i + batchSize, fileArray.length);
-      for (let j = i; j < end; j++) {
-        const file = fileArray[j];
-        if (!file.name.endsWith('.gpx')) {
-          error = `Skipped ${file.name} — only GPX files are supported currently`;
-          continue;
-        }
-        try {
-          const text = await file.text();
-          const parsed = parseGpx(text);
-          for (const trace of parsed) {
-            batch.push({
+      const slice = fileArray.slice(i, end);
+
+      const perFile = await Promise.all(
+        slice.map(async (file): Promise<{ err: string | null; traces: StoredTrace[] }> => {
+          if (!file.name.endsWith('.gpx')) {
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: `Skipped ${file.name} — only GPX files are supported currently`, traces: [] };
+          }
+          try {
+            const text = await file.text();
+            const parsed = parseGpx(text);
+            const traces: StoredTrace[] = parsed.map((trace) => ({
               id: crypto.randomUUID(),
               name: trace.name,
               fileName: file.name,
@@ -540,20 +602,31 @@
               distance: trace.distance,
               sportType: trace.sportType,
               addedAt: Date.now()
-            });
+            }));
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: null, traces };
+          } catch (e) {
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: `Failed to parse ${file.name}: ${e}`, traces: [] };
           }
-        } catch (e) {
-          error = `Failed to parse ${file.name}: ${e}`;
-        }
-        // Update progress per-file inside the batch so the user sees
-        // motion even on the very first batch.
-        importProgress = { current: j + 1, total };
+        })
+      );
+
+      const batch: StoredTrace[] = [];
+      for (const r of perFile) {
+        if (r.err) error = r.err;
+        if (r.traces.length > 0) batch.push(...r.traces);
       }
       if (batch.length > 0) {
         await traceStore.addTraces(batch);
       }
       await new Promise((r) => setTimeout(r, 0));
     }
+
+    console.timeEnd('[tracematch] import:total');
+    console.log(`[tracematch] imported ${total} files, ${traceStore.traces.length} traces total`);
 
     importProgress = null;
   }
@@ -621,6 +694,10 @@
         sections: result.sections,
         analyzedAt: Date.now()
       });
+      // Show 100% briefly so the user sees a completed bar before it
+      // disappears, instead of jumping from ~83% back to nothing.
+      analysisProgress = { phase: 'Saving results', current: 1, total: 1 };
+      await new Promise((r) => setTimeout(r, 250));
     } catch (e) {
       error = `Analysis failed: ${e}`;
     } finally {
@@ -826,8 +903,15 @@
                 <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
               {/if}
             </div>
-            <div class="progress-bar">
+            <div class="progress-bar progress-bar-step">
               <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+            </div>
+            <div class="progress-overall-row">
+              <span>Overall</span>
+              <span class="progress-count">{Math.round(overallProgress)}%</span>
+            </div>
+            <div class="progress-bar progress-bar-overall">
+              <div class="progress-fill" style="width: {overallProgress}%"></div>
             </div>
           {:else if analysing}
             Analysing...
@@ -907,8 +991,15 @@
                   <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
                 {/if}
               </div>
-              <div class="progress-bar">
+              <div class="progress-bar progress-bar-step">
                 <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+              </div>
+              <div class="progress-overall-row">
+                <span>Overall</span>
+                <span class="progress-count">{Math.round(overallProgress)}%</span>
+              </div>
+              <div class="progress-bar progress-bar-overall">
+                <div class="progress-fill" style="width: {overallProgress}%"></div>
               </div>
             {:else if analysing}
               Analysing...
@@ -1446,6 +1537,21 @@
     background: rgba(255, 255, 255, 0.3);
     border-radius: 2px;
     overflow: hidden;
+  }
+  .progress-bar-step .progress-fill {
+    background: rgba(255, 255, 255, 0.6);
+  }
+  .progress-overall-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    margin-top: 8px;
+    margin-bottom: 4px;
+    opacity: 0.85;
+  }
+  .progress-bar-overall {
+    height: 5px;
   }
   .progress-fill {
     height: 100%;

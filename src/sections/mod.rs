@@ -60,9 +60,8 @@ pub use consensus::{
     merge_traces_into_consensus_with_cache,
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
-pub(crate) use overlap::{
-    FullTrackOverlap, OverlapCluster, cluster_overlaps, find_full_track_overlap,
-};
+pub use overlap::{FullTrackOverlap, OverlapCluster};
+pub(crate) use overlap::{cluster_overlaps, find_full_track_overlap};
 pub(crate) use portions::compute_activity_portions;
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub use postprocess::{
@@ -508,7 +507,7 @@ pub struct DetectionStats {
 }
 
 /// Process a single cluster into a FrequentSection.
-fn process_cluster(
+pub fn process_cluster(
     idx: usize,
     cluster: OverlapCluster,
     sport_type: &str,
