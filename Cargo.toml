@@ -72,7 +72,7 @@ required-features = ["synthetic"]
 [profile.release]
 lto = true
 codegen-units = 1
-opt-level = "s"
+opt-level = 3
 strip = false
 
 [profile.release-mobile]

@@ -6,7 +6,7 @@ services:
     entrypoint: []
     command: >
       sh -c "
-        cd tracematch-wasm && wasm-pack build --target web --dev &&
+        cd tracematch-wasm && wasm-pack build --target web --release &&
         cp -r pkg /shared/wasm
       "
     volumes:

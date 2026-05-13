@@ -38,7 +38,6 @@
 //! ```
 
 use geo::{Coord, LineString, algorithm::simplify::Simplify};
-use rstar::{AABB, RTreeObject};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -57,6 +56,7 @@ pub use matching::compare_routes;
 
 // Route grouping algorithms
 pub mod grouping;
+pub mod grouping_filter;
 #[cfg(feature = "parallel")]
 pub use grouping::{
     group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
@@ -356,18 +356,6 @@ impl RouteSignature {
         })
     }
 
-    /// Get the bounding box of this route as RouteBounds (for R-tree indexing).
-    pub fn route_bounds(&self) -> RouteBounds {
-        RouteBounds {
-            activity_id: self.activity_id.clone(),
-            min_lat: self.bounds.min_lat,
-            max_lat: self.bounds.max_lat,
-            min_lng: self.bounds.min_lng,
-            max_lng: self.bounds.max_lng,
-            distance: self.total_distance,
-        }
-    }
-
     /// Compare this signature against another using the given config.
     ///
     /// Convenience wrapper around [`compare_routes`].
@@ -519,29 +507,6 @@ pub struct GroupingResult {
     pub groups: Vec<RouteGroup>,
     /// Match info per activity: route_id -> Vec<ActivityMatchInfo>
     pub activity_matches: std::collections::HashMap<String, Vec<ActivityMatchInfo>>,
-}
-
-// ============================================================================
-// Spatial Indexing Types
-// ============================================================================
-
-/// Bounding box for a route (used for spatial indexing).
-#[derive(Debug, Clone)]
-pub struct RouteBounds {
-    pub activity_id: String,
-    pub min_lat: f64,
-    pub max_lat: f64,
-    pub min_lng: f64,
-    pub max_lng: f64,
-    pub distance: f64,
-}
-
-impl RTreeObject for RouteBounds {
-    type Envelope = AABB<[f64; 2]>;
-
-    fn envelope(&self) -> Self::Envelope {
-        AABB::from_corners([self.min_lng, self.min_lat], [self.max_lng, self.max_lat])
-    }
 }
 
 // ============================================================================
