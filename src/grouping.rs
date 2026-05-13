@@ -107,7 +107,14 @@ pub fn should_group_routes(
         sig2.points.clone()
     };
 
-    check_middle_points_match(&sig1.points, &points2_for_middle, config.endpoint_threshold)
+    // Middle-point tolerance is 1.5× endpoint to accommodate slight day-to-day
+    // mid-route variation (lane changes, shortcuts around obstacles) that the
+    // 43a39da change made too strict at 1× endpoint.
+    check_middle_points_match(
+        &sig1.points,
+        &points2_for_middle,
+        config.endpoint_threshold * 1.5,
+    )
 }
 
 /// Check that the middle portions of two routes also match.

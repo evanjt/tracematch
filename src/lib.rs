@@ -450,13 +450,17 @@ pub struct MatchConfig {
 
 impl Default for MatchConfig {
     fn default() -> Self {
+        // Softened from the 43a39da "Optimise parameters" defaults, which
+        // were too strict for commute-like routes with day-to-day GPS
+        // variation. These become the "Default" preset; users can tune via
+        // the in-app strictness slider + SectionConfig controls.
         Self {
             perfect_threshold: 15.0,
             zero_threshold: 100.0,
-            min_match_percentage: 60.0,
+            min_match_percentage: 55.0,
             min_route_distance: 500.0,
             max_distance_diff_ratio: 0.25,
-            endpoint_threshold: 200.0,
+            endpoint_threshold: 250.0,
             resample_count: 50,
             resample_spacing_meters: 50.0,
             min_resample_points: 20,

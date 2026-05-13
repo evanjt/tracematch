@@ -4,8 +4,9 @@
 //! - TRACLUS (Lee, Han, Whang 2007) — avoid over-segmentation principle
 //! - TS-MF (Xu et al. 2022) — two-phase split-then-merge pipeline
 
+use super::portions::find_all_track_portions;
 use super::rtree::{IndexedPoint, build_rtree};
-use super::{FrequentSection, SectionConfig};
+use super::{FrequentSection, SectionConfig, SectionPortion};
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
@@ -1526,6 +1527,29 @@ fn split_section_by_density(
         // Only create the split section if it has enough activities
         let split_activity_count = split_activity_ids.len();
         if split_activity_count >= config.min_activities as usize {
+            // Compute activity_portions for the split section. Without these,
+            // save_sections() inserts zero rows into section_activities for
+            // this section — the section exists in the DB but appears as
+            // "0 sections attached" in the UI. This was the smoking-gun bug.
+            let split_activity_portions: Vec<SectionPortion> = split_activity_ids
+                .iter()
+                .flat_map(|activity_id| {
+                    let Some(track) = track_map.get(activity_id.as_str()) else {
+                        return Vec::new();
+                    };
+                    find_all_track_portions(track, &split_polyline, config.proximity_threshold)
+                        .into_iter()
+                        .map(|(start_idx, end_idx, direction)| SectionPortion {
+                            activity_id: activity_id.clone(),
+                            start_index: start_idx as u32,
+                            end_index: end_idx as u32,
+                            distance_meters: calculate_route_distance(&track[start_idx..end_idx]),
+                            direction,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
             let split_section = FrequentSection {
                 id: format!("{}_split{}", section.id, split_idx),
                 name: None,
@@ -1533,7 +1557,7 @@ fn split_section_by_density(
                 polyline: split_polyline,
                 representative_activity_id: section.representative_activity_id.clone(),
                 activity_ids: split_activity_ids,
-                activity_portions: Vec::new(), // Will be recomputed later if needed
+                activity_portions: split_activity_portions,
                 route_ids: section.route_ids.clone(),
                 // visit_count should equal unique activities
                 visit_count: split_activity_count as u32,
@@ -1772,13 +1796,17 @@ fn trim_to_unclaimed(
 // probably noise—but short sections visited many times are meaningful patterns.
 
 /// Minimum visits required based on section length and dataset size.
-/// Shorter sections need more visits. Larger datasets use higher thresholds
-/// to avoid drowning in noise.
+/// Shorter sections need more visits. Larger datasets use slightly higher
+/// thresholds to avoid drowning in noise — but the bonus is intentionally
+/// modest so a user with 500 activities doesn't have all their valid
+/// sections filtered away.
 fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+    // Softened from the 43a39da bonus of (0 / +1 / +2): the +2 tier was
+    // filtering out genuine sections for users with many activities. The
+    // base thresholds (2-6) already encode noise rejection per length tier.
     let bonus: u32 = match total_activities {
-        0..=50 => 0,
-        51..=200 => 1,
-        _ => 2,
+        0..=200 => 0,
+        _ => 1,
     };
 
     let base = match distance_meters {
@@ -1826,4 +1854,162 @@ pub fn filter_low_quality_sections(
     );
 
     filtered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Direction;
+
+    /// Build a 1km north-south reference polyline at 45°N. 200 points.
+    fn make_reference_polyline(num_points: usize) -> Vec<GpsPoint> {
+        // 0.009 degrees latitude ≈ 1km
+        let length_degrees = 0.009;
+        (0..num_points)
+            .map(|i| {
+                GpsPoint::new(
+                    45.0 + (i as f64 / (num_points - 1) as f64) * length_degrees,
+                    7.0,
+                )
+            })
+            .collect()
+    }
+
+    /// Density profile: low at endpoints, high in the middle. This forces
+    /// `find_split_candidates` to identify the middle as a high-traffic
+    /// portion. Endpoint density ~2, middle density ~10 → ratio of 5×.
+    fn make_high_variance_density(num_points: usize) -> Vec<u32> {
+        let mid = num_points / 2;
+        let band = num_points / 4;
+        (0..num_points)
+            .map(|i| if i.abs_diff(mid) < band { 10 } else { 2 })
+            .collect()
+    }
+
+    /// Walk every point of the reference plus tiny jitter so the synthesized
+    /// track lies within proximity_threshold for every point.
+    fn make_full_traversal(reference: &[GpsPoint]) -> Vec<GpsPoint> {
+        reference
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                GpsPoint::new(p.latitude + 0.000005 * (i as f64 % 3.0 - 1.0), p.longitude)
+            })
+            .collect()
+    }
+
+    /// Regression test for the smoking-gun bug: `split_section_by_density`
+    /// used to construct split sections with `activity_portions: Vec::new()`.
+    /// `save_sections()` iterates over `activity_portions` to insert junction
+    /// rows, so empty portions meant zero rows in `section_activities` →
+    /// "0 sections attached" in the UI.
+    ///
+    /// This test forces the split path with a high-variance density profile
+    /// and asserts the resulting split sections have non-empty portions
+    /// matching the activity IDs.
+    #[test]
+    fn split_high_variance_sections_populates_activity_portions() {
+        const NUM_POINTS: usize = 200;
+        const NUM_ACTIVITIES: usize = 5;
+
+        let reference = make_reference_polyline(NUM_POINTS);
+        let density = make_high_variance_density(NUM_POINTS);
+
+        // Synthesize N activity tracks that all traverse the reference.
+        let activity_id_strings: Vec<String> = (0..NUM_ACTIVITIES)
+            .map(|i| format!("activity_{i}"))
+            .collect();
+        let tracks: Vec<Vec<GpsPoint>> = (0..NUM_ACTIVITIES)
+            .map(|_| make_full_traversal(&reference))
+            .collect();
+
+        let mut track_map: HashMap<&str, &[GpsPoint]> = HashMap::new();
+        for (id, track) in activity_id_strings.iter().zip(tracks.iter()) {
+            track_map.insert(id.as_str(), track.as_slice());
+        }
+
+        // Build a parent section with high density variance in its middle.
+        let parent = FrequentSection {
+            id: "test_parent".to_string(),
+            name: None,
+            sport_type: "Run".to_string(),
+            polyline: reference.clone(),
+            representative_activity_id: activity_id_strings[0].clone(),
+            activity_ids: activity_id_strings.clone(),
+            activity_portions: Vec::new(),
+            route_ids: vec![],
+            visit_count: NUM_ACTIVITIES as u32,
+            distance_meters: calculate_route_distance(&reference),
+            activity_traces: HashMap::new(),
+            confidence: 0.9,
+            observation_count: NUM_ACTIVITIES as u32,
+            average_spread: 5.0,
+            point_density: density,
+            scale: None,
+            is_user_defined: false,
+            stability: 0.8,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        };
+
+        let config = SectionConfig {
+            proximity_threshold: 50.0,
+            min_activities: 3,
+            ..SectionConfig::default()
+        };
+
+        let split_result = split_high_variance_sections(vec![parent], &track_map, &config);
+
+        // Expect at least one split section was created (plus the original).
+        let split_sections: Vec<&FrequentSection> = split_result
+            .iter()
+            .filter(|s| s.id.contains("_split"))
+            .collect();
+
+        assert!(
+            !split_sections.is_empty(),
+            "split_high_variance_sections did not create any splits — \
+             check that the synthetic density profile still triggers \
+             SPLIT_DENSITY_RATIO ({SPLIT_DENSITY_RATIO})"
+        );
+
+        // The bug being regressed: every split section must have non-empty
+        // activity_portions matching its activity_ids.
+        for split in &split_sections {
+            assert!(
+                !split.activity_ids.is_empty(),
+                "split section {} has empty activity_ids",
+                split.id
+            );
+            assert!(
+                !split.activity_portions.is_empty(),
+                "split section {} has empty activity_portions \
+                 (the smoking-gun bug)",
+                split.id
+            );
+
+            // Every portion must reference one of the section's activities.
+            for portion in &split.activity_portions {
+                assert!(
+                    split.activity_ids.contains(&portion.activity_id),
+                    "split section {} has portion for unknown activity {}",
+                    split.id,
+                    portion.activity_id
+                );
+                assert!(
+                    portion.end_index > portion.start_index,
+                    "portion has invalid range {}..{}",
+                    portion.start_index,
+                    portion.end_index
+                );
+                // Direction must be either Same or Reverse — never garbage.
+                assert!(matches!(
+                    portion.direction,
+                    Direction::Same | Direction::Reverse
+                ));
+            }
+        }
+    }
 }

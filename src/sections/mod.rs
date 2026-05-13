@@ -33,6 +33,7 @@ mod portions;
 mod postprocess;
 pub mod progress;
 mod rtree;
+mod spatial_filter;
 mod traces;
 
 use crate::geo_utils::{bounds_overlap, compute_bounds};
@@ -66,11 +67,12 @@ pub(crate) use overlap::{
 pub(crate) use portions::compute_activity_portions;
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub(crate) use postprocess::{
-    consolidate_fragments, filter_low_quality_sections, make_sections_exclusive,
-    split_at_gradient_changes, split_at_heading_changes, split_folding_sections,
-    split_high_variance_sections,
+    consolidate_fragments, make_sections_exclusive, split_at_gradient_changes,
+    split_at_heading_changes, split_folding_sections, split_high_variance_sections,
 };
-pub use postprocess::{merge_nearby_sections, remove_overlapping_sections};
+pub use postprocess::{
+    filter_low_quality_sections, merge_nearby_sections, remove_overlapping_sections,
+};
 pub(crate) use rtree::IndexedPoint;
 pub use rtree::build_rtree;
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
@@ -728,10 +730,36 @@ pub fn detect_sections_from_tracks(
         // Find pairwise overlaps - PARALLELIZED with rayon
         let overlap_start = web_time::Instant::now();
 
-        // Generate all pairs
-        let pairs: Vec<(usize, usize)> = (0..sport_tracks.len())
-            .flat_map(|i| ((i + 1)..sport_tracks.len()).map(move |j| (i, j)))
+        // Hierarchical grid pre-filter (Phase 3): instead of generating
+        // all N(N-1)/2 pairs and relying on `bounds_overlap` to discard
+        // most of them, build a fine spatial grid keyed off the proximity
+        // threshold and only emit pairs whose tracks share a cell or
+        // neighbour. For typical user data this drops the pair count by
+        // 10–100×, replacing the quadratic factor with one that scales
+        // with the number of geographically-distinct routes the user
+        // actually rides/runs. The bounds_overlap check still runs below
+        // as a cheap second filter, and the exact R-tree overlap search
+        // is unchanged — so detection quality is identical to the naive
+        // all-pairs approach.
+        let cell_size_deg = spatial_filter::cell_size_for_proximity(config.proximity_threshold);
+        let filter_start = web_time::Instant::now();
+        let track_cells: Vec<_> = sport_tracks
+            .iter()
+            .map(|(_, pts)| spatial_filter::compute_fine_cells(pts, cell_size_deg))
             .collect();
+        let pairs = spatial_filter::fine_grid_filtered_pairs(&track_cells);
+        let naive_pair_count = sport_tracks.len() * sport_tracks.len().saturating_sub(1) / 2;
+        info!(
+            "[Sections] Spatial pre-filter pruned {} -> {} pairs ({:.1}% kept) in {}ms",
+            naive_pair_count,
+            pairs.len(),
+            if naive_pair_count > 0 {
+                (pairs.len() as f64 * 100.0) / naive_pair_count as f64
+            } else {
+                0.0
+            },
+            filter_start.elapsed().as_millis()
+        );
 
         let total_pairs = pairs.len();
 
@@ -1072,18 +1100,33 @@ pub fn detect_sections_multiscale_with_progress(
         let ds_bounds: Vec<Bounds> = downsampled.iter().map(|ds| compute_bounds(ds)).collect();
 
         // Grid filter BEFORE R-tree construction — skip R-trees for unpaired tracks
+        //
+        // Phase 3 upgrade: switched from the legacy 5 km `optimized::GridCell`
+        // to the fine-grain `spatial_filter::FineGridCell` keyed off the
+        // proximity threshold (~200 m cells for the default 50 m proximity).
+        // The 5 km grid was useless for the "user runs the same area
+        // repeatedly" case where all tracks fall in the same 1-2 cells.
+        // Finer cells distinguish different routes within the same broad
+        // geography while still being safely conservative about which
+        // pairs could possibly overlap. Cells are computed from full
+        // tracks (not downsampled) so a sparse downsample doesn't miss
+        // intermediate cells.
+        let fine_cell_size_deg =
+            spatial_filter::cell_size_for_proximity(overlap_config.proximity_threshold);
         #[cfg(feature = "parallel")]
-        let track_cells: Vec<std::collections::HashSet<optimized::GridCell>> = downsampled
-            .par_iter()
-            .map(|ds| optimized::compute_grid_cells(ds))
-            .collect();
+        let track_cells: Vec<std::collections::HashSet<spatial_filter::FineGridCell>> =
+            sport_tracks
+                .par_iter()
+                .map(|(_, pts)| spatial_filter::compute_fine_cells(pts, fine_cell_size_deg))
+                .collect();
 
         #[cfg(not(feature = "parallel"))]
-        let track_cells: Vec<std::collections::HashSet<optimized::GridCell>> = downsampled
-            .iter()
-            .map(|ds| optimized::compute_grid_cells(ds))
-            .collect();
-        let pairs = optimized::grid_filtered_pairs(&track_cells);
+        let track_cells: Vec<std::collections::HashSet<spatial_filter::FineGridCell>> =
+            sport_tracks
+                .iter()
+                .map(|(_, pts)| spatial_filter::compute_fine_cells(pts, fine_cell_size_deg))
+                .collect();
+        let pairs = spatial_filter::fine_grid_filtered_pairs(&track_cells);
         drop(track_cells);
 
         let exhaustive_pairs = sport_tracks.len() * sport_tracks.len().saturating_sub(1) / 2;
