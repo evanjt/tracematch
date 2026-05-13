@@ -10,71 +10,150 @@
   } from '$lib/wasm/engine';
   import type { RouteSignature, RouteGroup, FrequentSection, GpsPoint, SectionPortion } from '$lib/wasm/types';
 
+  // --- Sport color system ---
+  const SPORT_COLORS: Record<string, string> = {
+    Ride: '#3B82F6', Run: '#10B981', Walk: '#8B5CF6', Swim: '#06B6D4'
+  };
+  const DEFAULT_SPORT_COLOR = '#64748b';
+  const SECTION_COLOR = '#FC4C02';
+
+  function sportColor(sportType: string | undefined): string {
+    return SPORT_COLORS[sportType ?? ''] ?? DEFAULT_SPORT_COLOR;
+  }
+
+  function getRouteStyle(sportType: string, activityCount: number, maxCount: number) {
+    const color = SPORT_COLORS[sportType] ?? DEFAULT_SPORT_COLOR;
+    const ratio = activityCount / Math.max(maxCount, 1);
+    return { color, weight: 1.5 + ratio * 3.5, opacity: 0.3 + ratio * 0.55 };
+  }
+
+  // --- Core state ---
   let wasmReady = $state(false);
   let analysing = $state(false);
   let analysisProgress = $state<{ phase: string; current: number; total: number } | null>(null);
+  let error = $state<string | null>(null);
+  let sectionError = $state<string | null>(null);
+  let dragOver = $state(false);
+  let mapDragOver = $state(false);
+  let mapContainer: HTMLDivElement;
 
   // Section detection parameters
   let proximityThreshold = $state(50);
   let minSectionLength = $state(200);
   let minActivities = $state(3);
   let settingsCollapsed = $state(true);
-  let error = $state<string | null>(null);
-  let sectionError = $state<string | null>(null);
-  let dragOver = $state(false);
-  let mapDragOver = $state(false);
-  let mapContainer: HTMLDivElement;
-  let map: L.Map | null = null;
-  let traceLayerGroup: L.LayerGroup | null = null;
-  let sectionLayerGroup: L.LayerGroup | null = null;
-  let hiddenTraces = $state(new Set<string>());
-  let expandedSections = $state(new Set<string>());
-  let tracesCollapsed = $state(true);
-  let groupsCollapsed = $state(true);
-  let sectionsCollapsed = $state(true);
-  let highlightedTrace = $state<string | null>(null);
-  let highlightedGroup = $state<{ ids: string[]; portions?: SectionPortion[] } | null>(null);
-  let portionOverlays: L.Polyline[] = [];
-  let hasFitOnce = false;
-  let lastAnalyzedAt: number | null = null;
-  let tracePolylines = new Map<string, { polyline: L.Polyline; baseStyle: { color: string; weight: number; opacity: number; dashArray?: string } }>();
-  let sectionLayers: { activityIds: string[]; layers: L.Layer[] }[] = [];
-  let L: typeof import('leaflet') | null = null;
+
+  // Layer visibility
+  let showTraces = $state(true);
+  let showRoutes = $state(false);
+  let showSections = $state(false);
+  let sportFilters = $state(new Set(['Ride', 'Run', 'Walk', 'Swim', 'Other']));
+
+  // Sidebar state
+  let showAllRoutes = $state(false);
+  let showAllSections = $state(false);
+
+  // Hover state
+  let highlightedRouteGroupId = $state<string | null>(null);
+  let highlightedSectionId = $state<string | null>(null);
 
   // Theme state
   let themeMode = $state<'system' | 'light' | 'dark'>(
     typeof localStorage !== 'undefined' ? (localStorage.getItem('theme') as any) || 'system' : 'system'
   );
   let resolvedDark = $state(false);
+
+  // Map internals
+  let map: L.Map | null = null;
   let tileLayer: L.TileLayer | null = null;
+  let traceLayerGroup: L.LayerGroup | null = null;
+  let routeLayerGroup: L.LayerGroup | null = null;
+  let sectionLayerGroup: L.LayerGroup | null = null;
+  let L: typeof import('leaflet') | null = null;
+  let hasFitOnce = false;
+  let lastAnalyzedAt: number | null = null;
 
-  // Display strategy state
-  let visibleGroups = $state(new Set<string>());
-  let showUngrouped = $state(true);
+  // Polyline maps
+  let tracePolylines = new Map<string, { polyline: L.Polyline; sportType: string }>();
+  let routePolylines = new Map<string, { polyline: L.Polyline; groupId: string; sportType: string }>();
+  let portionOverlays: L.Polyline[] = [];
 
-  const GROUP_COLORS = [
-    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
-    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
-    '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000'
-  ];
+  // --- Derived data ---
+  let sportBreakdown = $derived.by(() => {
+    const counts: Record<string, { traces: number; routes: number }> = {};
+    for (const t of traceStore.traces) {
+      const s = t.sportType || 'Other';
+      if (!counts[s]) counts[s] = { traces: 0, routes: 0 };
+      counts[s].traces++;
+    }
+    const analysis = traceStore.analysis;
+    if (analysis) {
+      for (const g of analysis.groups) {
+        const s = g.sportType || 'Other';
+        if (!counts[s]) counts[s] = { traces: 0, routes: 0 };
+        counts[s].routes++;
+      }
+    }
+    return counts;
+  });
 
-  const TRACE_GRAY = '#64748b';
+  let sortedRoutes = $derived.by(() => {
+    const analysis = traceStore.analysis;
+    if (!analysis) return [];
+    return [...analysis.groups].sort((a, b) => b.activityIds.length - a.activityIds.length);
+  });
 
-  function toggleSectionExpand(id: string) {
-    const next = new Set(expandedSections);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    expandedSections = next;
+  let sortedSections = $derived.by(() => {
+    const analysis = traceStore.analysis;
+    if (!analysis) return [];
+    return [...analysis.sections].sort((a, b) => b.visitCount - a.visitCount);
+  });
+
+  let maxRouteCount = $derived.by(() => {
+    if (sortedRoutes.length === 0) return 1;
+    return sortedRoutes[0].activityIds.length;
+  });
+
+  let hasAnalysis = $derived(traceStore.analysis !== null);
+
+  // --- Helpers ---
+  function traceNameById(id: string): string {
+    return traceStore.traces.find((t) => t.id === id)?.name ?? id.slice(0, 8);
   }
 
-  function zoomToTrace(traceId: string) {
-    const trace = traceStore.traces.find((t) => t.id === traceId);
-    if (!trace || !map || !L) return;
+  function traceSportById(id: string): string {
+    return traceStore.traces.find((t) => t.id === id)?.sportType ?? 'Other';
+  }
+
+  function traceDistanceById(id: string): number {
+    return traceStore.traces.find((t) => t.id === id)?.distance ?? 0;
+  }
+
+  function toggleSportFilter(sport: string) {
+    const next = new Set(sportFilters);
+    if (next.has(sport)) next.delete(sport);
+    else next.add(sport);
+    sportFilters = next;
+  }
+
+  function isTraceVisible(trace: StoredTrace): boolean {
+    const s = trace.sportType || 'Other';
+    return sportFilters.has(s);
+  }
+
+  function isGroupVisible(group: RouteGroup): boolean {
+    const s = group.sportType || 'Other';
+    return sportFilters.has(s);
+  }
+
+  function zoomToGroup(group: RouteGroup) {
+    if (!map || !L) return;
+    const trace = traceStore.traces.find((t) => t.id === group.representativeId);
+    if (!trace) return;
     const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
     if (latlngs.length > 0) {
       map.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60] });
     }
-    if (hiddenTraces.has(traceId)) toggleTrace(traceId);
   }
 
   function zoomToSection(section: FrequentSection) {
@@ -85,87 +164,243 @@
     }
   }
 
-  function traceDistanceById(id: string): number {
-    return traceStore.traces.find((t) => t.id === id)?.distance ?? 0;
+  function routeIndexLabel(group: RouteGroup): string {
+    const idx = traceStore.analysis?.groups.indexOf(group) ?? -1;
+    return group.customName || `Route ${idx + 1}`;
   }
 
-  function groupForTraceId(id: string): { index: number; group: RouteGroup } | null {
-    const analysis = traceStore.analysis;
-    if (!analysis) return null;
-    for (let i = 0; i < analysis.groups.length; i++) {
-      if (analysis.groups[i].activityIds.includes(id)) {
-        return { index: i, group: analysis.groups[i] };
+  function sectionIndexLabel(section: FrequentSection): string {
+    const idx = traceStore.analysis?.sections.indexOf(section) ?? -1;
+    return section.name || `Section ${idx + 1}`;
+  }
+
+  // --- CSS-class hover helpers ---
+  function getOverlayPane(): Element | null {
+    if (!map) return null;
+    return map.getPane('overlayPane') ?? null;
+  }
+
+  function clearHighlight() {
+    const pane = getOverlayPane();
+    if (pane) pane.classList.remove('dimmed');
+    // Remove .hl from everything
+    document.querySelectorAll('.leaflet-overlay-pane path.hl').forEach((el) => el.classList.remove('hl'));
+    // Clear portion overlays
+    for (const ol of portionOverlays) ol.remove();
+    portionOverlays = [];
+  }
+
+  function highlightPolylines(polylines: L.Polyline[]) {
+    const pane = getOverlayPane();
+    if (!pane) return;
+    pane.classList.add('dimmed');
+    for (const pl of polylines) {
+      pl.getElement()?.classList.add('hl');
+    }
+  }
+
+  function onRouteHover(group: RouteGroup) {
+    highlightedRouteGroupId = group.groupId;
+    clearHighlight();
+    // Highlight the route representative polyline
+    const entry = routePolylines.get(group.groupId);
+    if (entry) highlightPolylines([entry.polyline]);
+    // Also highlight matching trace polylines
+    const tracePls: L.Polyline[] = [];
+    for (const id of group.activityIds) {
+      const te = tracePolylines.get(id);
+      if (te) tracePls.push(te.polyline);
+    }
+    if (tracePls.length > 0) highlightPolylines(tracePls);
+  }
+
+  function onRouteLeave() {
+    highlightedRouteGroupId = null;
+    clearHighlight();
+  }
+
+  function onSectionHover(section: FrequentSection) {
+    highlightedSectionId = section.id;
+    clearHighlight();
+    // Highlight the section's portion traces on map
+    const pane = getOverlayPane();
+    if (!pane) return;
+    pane.classList.add('dimmed');
+
+    // Highlight section polyline layers (they are in sectionLayerGroup)
+    // All section layers get .hl — we rely on them being in the section layer group
+    // For now, highlight all matching trace polylines + create portion overlays
+    for (const portion of section.activityPortions) {
+      const trace = traceStore.traces.find((t) => t.id === portion.activityId);
+      if (!trace || !L || !traceLayerGroup) continue;
+      const pts = trace.points.slice(portion.startIndex, portion.endIndex + 1);
+      if (pts.length < 2) continue;
+      const latlngs = pts.map((pt) => L!.latLng(pt.latitude, pt.longitude));
+      const ol = L.polyline(latlngs, {
+        color: SECTION_COLOR,
+        weight: 5,
+        opacity: 1,
+        className: 'hl'
+      }).addTo(traceLayerGroup);
+      ol.bringToFront();
+      portionOverlays.push(ol);
+    }
+
+    // Also highlight the section's own polyline elements
+    sectionLayerGroup?.eachLayer((layer: any) => {
+      layer.getElement?.()?.classList.add('hl');
+    });
+  }
+
+  function onSectionLeave() {
+    highlightedSectionId = null;
+    clearHighlight();
+  }
+
+  // --- Map sync functions ---
+  function syncTracesToMap() {
+    if (!map || !L || !traceLayerGroup) return;
+    const traces = traceStore.traces;
+    const currentIds = new Set(traces.map((t) => t.id));
+
+    // Remove polylines for traces that no longer exist
+    for (const [id, entry] of tracePolylines) {
+      if (!currentIds.has(id)) {
+        entry.polyline.remove();
+        tracePolylines.delete(id);
       }
     }
-    return null;
-  }
 
-  function sectionsForTraceId(id: string): { index: number; section: FrequentSection }[] {
-    const analysis = traceStore.analysis;
-    if (!analysis) return [];
-    const result: { index: number; section: FrequentSection }[] = [];
-    for (let i = 0; i < analysis.sections.length; i++) {
-      if (analysis.sections[i].activityIds.includes(id)) {
-        result.push({ index: i, section: analysis.sections[i] });
-      }
-    }
-    return result;
-  }
-
-  function toggleTrace(id: string) {
-    const next = new Set(hiddenTraces);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    hiddenTraces = next;
-  }
-
-  function toggleGroup(activityIds: string[]) {
-    const allHidden = activityIds.every((id) => hiddenTraces.has(id));
-    const next = new Set(hiddenTraces);
-    for (const id of activityIds) {
-      if (allHidden) next.delete(id);
-      else next.add(id);
-    }
-    hiddenTraces = next;
-  }
-
-  function traceNameById(id: string): string {
-    return traceStore.traces.find((t) => t.id === id)?.name ?? id.slice(0, 8);
-  }
-
-  function getTraceStyle(traceId: string): { color: string; weight: number; opacity: number; dashArray?: string } {
-    const analysis = traceStore.analysis;
-    if (!analysis?.groups) {
-      return { color: TRACE_GRAY, weight: 2, opacity: 0.6 };
-    }
-    for (let i = 0; i < analysis.groups.length; i++) {
-      if (analysis.groups[i].activityIds.includes(traceId)) {
-        const groupId = analysis.groups[i].groupId;
-        if (!visibleGroups.has(groupId)) {
-          return { color: GROUP_COLORS[i % GROUP_COLORS.length], weight: 3, opacity: 0 };
+    // Add polylines for new traces
+    let addedAny = false;
+    const allLatLngs: L.LatLng[] = [];
+    for (const trace of traces) {
+      if (tracePolylines.has(trace.id)) {
+        if (isTraceVisible(trace)) {
+          const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+          allLatLngs.push(...latlngs);
         }
-        const isRepresentative = analysis.groups[i].representativeId === traceId;
-        if (isRepresentative) {
-          return {
-            color: GROUP_COLORS[i % GROUP_COLORS.length],
-            weight: 3,
-            opacity: 0.75
-          };
-        }
-        return {
-          color: GROUP_COLORS[i % GROUP_COLORS.length],
-          weight: 3,
-          opacity: 0
-        };
+        continue;
+      }
+      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+      if (latlngs.length === 0) continue;
+
+      const traceId = trace.id;
+      const color = sportColor(trace.sportType);
+      const pl = L.polyline(latlngs, { color, weight: 2, opacity: 0.5 })
+        .bindPopup(
+          `<b>${trace.name}</b><br>` +
+            `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts` +
+            `<br>${trace.sportType || 'Unknown'}`
+        )
+        .addTo(traceLayerGroup!);
+      tracePolylines.set(traceId, { polyline: pl, sportType: trace.sportType || 'Other' });
+      addedAny = true;
+      if (isTraceVisible(trace)) {
+        allLatLngs.push(...latlngs);
       }
     }
-    // Ungrouped trace
-    if (showUngrouped) {
-      return { color: TRACE_GRAY, weight: 2, opacity: 0.4, dashArray: '6 4' };
+
+    // Fit bounds only on first batch load
+    if (addedAny && !hasFitOnce && allLatLngs.length > 0) {
+      hasFitOnce = true;
+      map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
     }
-    return { color: TRACE_GRAY, weight: 2, opacity: 0 };
   }
 
+  function syncRoutesToMap() {
+    if (!map || !L || !routeLayerGroup) return;
+    routeLayerGroup.clearLayers();
+    routePolylines.clear();
+
+    const analysis = traceStore.analysis;
+    if (!analysis) return;
+
+    for (const group of analysis.groups) {
+      const trace = traceStore.traces.find((t) => t.id === group.representativeId);
+      if (!trace) continue;
+      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+      if (latlngs.length === 0) continue;
+
+      const style = getRouteStyle(group.sportType, group.activityIds.length, maxRouteCount);
+      const idx = analysis.groups.indexOf(group);
+      const pl = L.polyline(latlngs, style)
+        .bindPopup(
+          `<b>${group.customName || `Route ${idx + 1}`}</b><br>` +
+            `${group.activityIds.length} activities &middot; ${group.sportType}` +
+            `<br>${(trace.distance / 1000).toFixed(1)} km`
+        )
+        .on('mouseover', () => onRouteHover(group))
+        .on('mouseout', () => onRouteLeave())
+        .addTo(routeLayerGroup!);
+      routePolylines.set(group.groupId, { polyline: pl, groupId: group.groupId, sportType: group.sportType });
+    }
+  }
+
+  function syncSections() {
+    if (!map || !L || !sectionLayerGroup) return;
+    sectionLayerGroup.clearLayers();
+
+    const analysis = traceStore.analysis;
+    if (!analysis?.sections) return;
+
+    for (const section of analysis.sections) {
+      const latlngs = section.polyline.map((p: GpsPoint) =>
+        L!.latLng(p.latitude, p.longitude)
+      );
+      if (latlngs.length < 2) continue;
+
+      L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.8 }).addTo(sectionLayerGroup!);
+
+      const idx = analysis.sections.indexOf(section);
+      L.polyline(latlngs, { color: SECTION_COLOR, weight: 5, opacity: 0.9 })
+        .bindPopup(
+          `<b>${section.name || `Section ${idx + 1}`}</b><br>` +
+            `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
+            `${section.visitCount} traversals`
+        )
+        .on('mouseover', () => onSectionHover(section))
+        .on('mouseout', () => onSectionLeave())
+        .addTo(sectionLayerGroup!);
+
+      const markerIcon = L.divIcon({
+        className: 'section-marker',
+        html: '<div style="width:10px;height:10px;border-radius:50%;background:#FC4C02;border:2px solid white;"></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+      L.marker(latlngs[0], { icon: markerIcon }).addTo(sectionLayerGroup!);
+      L.marker(latlngs[latlngs.length - 1], { icon: markerIcon }).addTo(sectionLayerGroup!);
+    }
+  }
+
+  function updateLayerVisibility() {
+    if (!map || !traceLayerGroup || !routeLayerGroup || !sectionLayerGroup) return;
+    if (showTraces) traceLayerGroup.addTo(map);
+    else traceLayerGroup.remove();
+    if (showRoutes) routeLayerGroup.addTo(map);
+    else routeLayerGroup.remove();
+    if (showSections) sectionLayerGroup.addTo(map);
+    else sectionLayerGroup.remove();
+  }
+
+  function applyTraceFilters() {
+    for (const [id, entry] of tracePolylines) {
+      const s = entry.sportType === 'Other' ? 'Other' : entry.sportType;
+      const visible = sportFilters.has(s);
+      entry.polyline.setStyle({ opacity: visible ? 0.5 : 0, weight: visible ? 2 : 0 });
+    }
+  }
+
+  function applyRouteFilters() {
+    for (const [, entry] of routePolylines) {
+      const s = entry.sportType === 'Other' ? 'Other' : entry.sportType;
+      const visible = sportFilters.has(s);
+      entry.polyline.setStyle({ opacity: visible ? undefined : 0, weight: visible ? undefined : 0 });
+    }
+  }
+
+  // --- Lifecycle ---
   onMount(async () => {
     await traceStore.load();
     try {
@@ -188,119 +423,10 @@
     localStorage.setItem('theme', themeMode);
   });
 
-  // Sync traces to map — incremental add/remove, no full rebuild
-  function syncTracesToMap() {
-    if (!map || !L || !traceLayerGroup) return;
-    const traces = traceStore.traces;
-    const currentIds = new Set(traces.map((t) => t.id));
-
-    // Remove polylines for traces that no longer exist
-    for (const [id, entry] of tracePolylines) {
-      if (!currentIds.has(id)) {
-        entry.polyline.remove();
-        tracePolylines.delete(id);
-      }
-    }
-
-    // Add polylines for new traces
-    let addedAny = false;
-    const allLatLngs: L.LatLng[] = [];
-    for (const trace of traces) {
-      if (tracePolylines.has(trace.id)) {
-        if (!hiddenTraces.has(trace.id)) {
-          const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
-          allLatLngs.push(...latlngs);
-        }
-        continue;
-      }
-      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
-      if (latlngs.length === 0) continue;
-
-      const traceId = trace.id;
-      const baseStyle = getTraceStyle(traceId);
-      const pl = L.polyline(latlngs, baseStyle)
-        .bindPopup(
-          `<b>${trace.name}</b><br>` +
-            `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts`
-        )
-        .on('mouseover', () => { highlightedTrace = traceId; })
-        .on('mouseout', () => { if (highlightedTrace === traceId) highlightedTrace = null; })
-        .addTo(traceLayerGroup!);
-      tracePolylines.set(traceId, { polyline: pl, baseStyle });
-      addedAny = true;
-      if (!hiddenTraces.has(trace.id)) {
-        allLatLngs.push(...latlngs);
-      }
-    }
-
-    // Fit bounds only on first batch load
-    if (addedAny && !hasFitOnce && allLatLngs.length > 0) {
-      hasFitOnce = true;
-      map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-    }
-  }
-
-  // Apply styles to existing polylines (used when analysis changes or traces hidden/shown)
-  function applyStyles() {
-    if (!traceLayerGroup) return;
-    for (const [id, entry] of tracePolylines) {
-      const newStyle = getTraceStyle(id);
-      entry.baseStyle = newStyle;
-      entry.polyline.setStyle(newStyle);
-      if (hiddenTraces.has(id)) {
-        entry.polyline.setStyle({ opacity: 0, weight: 0 });
-      }
-    }
-  }
-
-  // Rebuild section layers (only when analysis changes)
-  function syncSections() {
-    if (!map || !L || !sectionLayerGroup) return;
-    sectionLayerGroup.clearLayers();
-    sectionLayers = [];
-
-    const analysis = traceStore.analysis;
-    if (!analysis?.sections) return;
-
-    for (const section of analysis.sections) {
-      const latlngs = section.polyline.map((p: GpsPoint) =>
-        L!.latLng(p.latitude, p.longitude)
-      );
-      if (latlngs.length < 2) continue;
-
-      const sLayers: L.Layer[] = [];
-
-      const border = L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.8 }).addTo(sectionLayerGroup!);
-      sLayers.push(border);
-
-      const line = L.polyline(latlngs, { color: '#FC4C02', weight: 5, opacity: 0.9 })
-        .bindPopup(
-          `<b>${section.name || 'Detected section'}</b><br>` +
-            `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
-            `${section.activityIds.length} activities`
-        )
-        .addTo(sectionLayerGroup!);
-      sLayers.push(line);
-
-      // Only start and end markers
-      const markerIcon = L.divIcon({
-        className: 'section-marker',
-        html: '<div style="width:10px;height:10px;border-radius:50%;background:#FC4C02;border:2px solid white;"></div>',
-        iconSize: [14, 14],
-        iconAnchor: [7, 7]
-      });
-      const m1 = L.marker(latlngs[0], { icon: markerIcon }).addTo(sectionLayerGroup!);
-      const m2 = L.marker(latlngs[latlngs.length - 1], { icon: markerIcon }).addTo(sectionLayerGroup!);
-      sLayers.push(m1, m2);
-
-      sectionLayers.push({ activityIds: section.activityIds, layers: sLayers });
-    }
-  }
-
   // Initialize map
   $effect(() => {
     if (!mapContainer || typeof window === 'undefined') return;
-    if (map) return; // Already initialized
+    if (map) return;
 
     import('leaflet').then((leaflet) => {
       import('leaflet/dist/leaflet.css');
@@ -314,12 +440,11 @@
         maxZoom: 19
       }).addTo(map);
       traceLayerGroup = L.layerGroup().addTo(map);
-      sectionLayerGroup = L.layerGroup().addTo(map);
+      routeLayerGroup = L.layerGroup();
+      sectionLayerGroup = L.layerGroup();
 
-      // Initial sync if traces were already loaded
       syncTracesToMap();
-      applyStyles();
-      syncSections();
+      updateLayerVisibility();
     });
   });
 
@@ -333,131 +458,46 @@
     tileLayer.setUrl(newUrl);
   });
 
-  // React to trace list changes — incremental sync
+  // React to trace list changes
   $effect(() => {
     traceStore.traces;
     if (!map || !L) return;
     syncTracesToMap();
   });
 
-  // React to analysis changes — restyle traces, rebuild sections, populate visibleGroups, collapse traces
+  // React to analysis changes
   $effect(() => {
     const analysis = traceStore.analysis;
     if (!map || !L) return;
     const analyzedAt = analysis?.analyzedAt ?? null;
     if (analyzedAt !== lastAnalyzedAt) {
       lastAnalyzedAt = analyzedAt;
-      applyStyles();
+      syncRoutesToMap();
       syncSections();
+      if (analysis) {
+        showTraces = false;
+        showRoutes = true;
+        showSections = true;
+      }
+      updateLayerVisibility();
     }
   });
 
-  // Populate visibleGroups when analysis completes, and auto-collapse traces panel
+  // React to layer toggles
   $effect(() => {
-    const analysis = traceStore.analysis;
-    if (!analysis) return;
-    visibleGroups = new Set(analysis.groups.map(g => g.groupId));
-    tracesCollapsed = true;
+    showTraces; showRoutes; showSections;
+    updateLayerVisibility();
   });
 
-  // React to hidden traces — just restyle
+  // React to sport filter changes
   $effect(() => {
-    hiddenTraces;
+    sportFilters;
     if (!map || !L) return;
-    applyStyles();
+    applyTraceFilters();
+    applyRouteFilters();
   });
 
-  // React to visibleGroups / showUngrouped changes — restyle traces and update section overlays
-  $effect(() => {
-    visibleGroups;
-    showUngrouped;
-    if (!map || !L) return;
-    applyStyles();
-
-    // Update section overlay visibility based on whether their activities' groups are visible
-    const analysis = traceStore.analysis;
-    if (!analysis) return;
-    for (const sl of sectionLayers) {
-      const anyActivityVisible = sl.activityIds.some((actId) => {
-        const g = groupForTraceId(actId);
-        if (g) return visibleGroups.has(analysis.groups[g.index].groupId);
-        return showUngrouped;
-      });
-      for (const layer of sl.layers) {
-        const el = (layer as L.Polyline | L.Marker).getElement?.() as HTMLElement | undefined;
-        if (el) {
-          el.style.opacity = anyActivityVisible ? '' : '0';
-        }
-      }
-    }
-  });
-
-  // Highlight effect — update styles on existing polylines
-  $effect(() => {
-    const ht = highlightedTrace;
-    const hg = highlightedGroup;
-    const activeIds = hg?.ids ?? (ht ? [ht] : null);
-    const portions = hg?.portions ?? null;
-
-    // Clear previous portion overlays
-    for (const ol of portionOverlays) ol.remove();
-    portionOverlays = [];
-
-    for (const [id, entry] of tracePolylines) {
-      if (hiddenTraces.has(id)) {
-        entry.polyline.setStyle({ opacity: 0, weight: 0 });
-        continue;
-      }
-      if (activeIds === null) {
-        // No hover — revert to display strategy
-        entry.polyline.setStyle(entry.baseStyle);
-      } else if (activeIds.includes(id)) {
-        // Check if the trace's group is visible
-        const g = groupForTraceId(id);
-        const analysis = traceStore.analysis;
-        const groupVisible = g && analysis ? visibleGroups.has(analysis.groups[g.index].groupId) : showUngrouped;
-        if (!groupVisible) {
-          entry.polyline.setStyle({ opacity: 0, weight: 0 });
-          continue;
-        }
-        if (portions) {
-          entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.65, weight: 2.5 });
-          const trace = traceStore.traces.find((t) => t.id === id);
-          if (trace && L) {
-            const matching = portions.filter((p) => p.activityId === id);
-            for (const p of matching) {
-              const pts = trace.points.slice(p.startIndex, p.endIndex + 1);
-              if (pts.length < 2) continue;
-              const latlngs = pts.map((pt) => L!.latLng(pt.latitude, pt.longitude));
-              const ol = L.polyline(latlngs, {
-                color: entry.baseStyle.color,
-                weight: 5,
-                opacity: 1
-              }).addTo(traceLayerGroup!);
-              ol.bringToFront();
-              portionOverlays.push(ol);
-            }
-          }
-        } else {
-          entry.polyline.setStyle({ ...entry.baseStyle, weight: 5, opacity: 1 });
-          entry.polyline.bringToFront();
-        }
-      } else {
-        entry.polyline.setStyle({ ...entry.baseStyle, opacity: 0.05, weight: 1.5 });
-      }
-    }
-
-    for (const sl of sectionLayers) {
-      const relevant = activeIds === null || activeIds.some((id) => sl.activityIds.includes(id));
-      for (const layer of sl.layers) {
-        const el = (layer as L.Polyline | L.Marker).getElement?.() as HTMLElement | undefined;
-        if (el) {
-          el.style.opacity = relevant ? '' : '0.1';
-        }
-      }
-    }
-  });
-
+  // --- File handling ---
   async function handleFiles(files: FileList | File[]) {
     error = null;
     const batch: StoredTrace[] = [];
@@ -505,6 +545,7 @@
     if (input.files) handleFiles(input.files);
   }
 
+  // --- Analysis ---
   async function runAnalysis() {
     if (!wasmReady || traceStore.traces.length < 2) return;
     analysing = true;
@@ -534,20 +575,14 @@
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      console.log(
-        `[tracematch] Created ${signatures.length} signatures from ${traces.length} traces`
-      );
-
       analysisProgress = { phase: 'Grouping routes', current: 0, total: 1 };
       await new Promise((r) => setTimeout(r, 0));
       const groups = groupRoutes(signatures);
-      console.log(`[tracematch] Grouped into ${groups.length} route groups`);
 
       let sections: FrequentSection[] = [];
       if (tracks.length >= 3) {
         analysisProgress = { phase: 'Detecting sections', current: 0, total: 1 };
         await new Promise((r) => setTimeout(r, 0));
-        console.log(`[tracematch] Detecting sections across ${tracks.length} tracks...`);
         try {
           const sectionConfig = JSON.stringify({
             proximityThreshold,
@@ -566,9 +601,7 @@
             preserveHierarchy: true
           });
           sections = detectSections(tracks, sportTypes, groups, sectionConfig);
-          console.log(`[tracematch] Found ${sections.length} sections`);
         } catch (e) {
-          console.error('[tracematch] Section detection failed:', e);
           sectionError = `Section detection failed: ${e}`;
         }
       }
@@ -582,7 +615,6 @@
       });
     } catch (e) {
       error = `Analysis failed: ${e}`;
-      console.error('[tracematch] Analysis error:', e);
     } finally {
       analysing = false;
       analysisProgress = null;
@@ -640,199 +672,104 @@
         <div class="error">{error}</div>
       {/if}
 
-      {#if traceStore.traces.length > 0}
-        <div class="result-section">
-          <button class="panel-toggle" onclick={() => tracesCollapsed = !tracesCollapsed}>
-            <span class="panel-chevron">{tracesCollapsed ? '▸' : '▾'}</span>
-            <h2>Traces ({traceStore.traces.length})</h2>
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <span class="panel-action" onclick={(e) => { e.stopPropagation(); traceStore.clearAll(); }}>Clear</span>
-          </button>
-          {#if !tracesCollapsed}
-            {#each traceStore.traces as trace (trace.id)}
-              {@const traceGroup = groupForTraceId(trace.id)}
-              {@const traceSections = sectionsForTraceId(trace.id)}
-              {@const dotColor = traceGroup ? GROUP_COLORS[traceGroup.index % GROUP_COLORS.length] : TRACE_GRAY}
-              <div
-                class="group-activity"
-                class:highlighted={highlightedTrace === trace.id}
-                onmouseenter={() => highlightedTrace = trace.id}
-                onmouseleave={() => highlightedTrace = null}
-              >
-                <span class="color-dot sm" style="background: {dotColor}"></span>
-                <span class="activity-name">{trace.name}</span>
-                {#if traceGroup}
-                  <span class="assignment-tag" style="border-color: {dotColor}">G{traceGroup.index + 1}</span>
-                {/if}
-                {#each traceSections as ts}
-                  <span class="assignment-tag section-tag">S{ts.index + 1}</span>
-                {/each}
-                <span class="activity-dist">{(trace.distance / 1000).toFixed(1)} km</span>
-                <button
-                  class="btn-remove-sm"
-                  onclick={() => traceStore.removeTrace(trace.id)}
-                  title="Remove trace"
-                >&times;</button>
-              </div>
-            {/each}
-          {/if}
-        </div>
-      {/if}
+      {#if hasAnalysis}
+        <!-- Post-analysis sidebar -->
+        {@const analysis = traceStore.analysis!}
 
-      {#if traceStore.analysis}
-        <div class="results">
-          <div class="result-section">
-            <button class="panel-toggle" onclick={() => groupsCollapsed = !groupsCollapsed}>
-              <span class="panel-chevron">{groupsCollapsed ? '▸' : '▾'}</span>
-              <h2>Route groups ({traceStore.analysis.groups.length})</h2>
+        <!-- Summary bar -->
+        <div class="summary-bar">
+          {traceStore.traces.length} traces &middot; {analysis.groups.length} routes &middot; {analysis.sections.length} sections
+        </div>
+
+        <!-- Sport breakdown / filter -->
+        <div class="sport-breakdown">
+          {#each Object.entries(sportBreakdown) as [sport, counts]}
+            {@const active = sportFilters.has(sport)}
+            <button
+              class="sport-row"
+              class:inactive={!active}
+              onclick={() => toggleSportFilter(sport)}
+            >
+              <span class="sport-dot" style="background: {sportColor(sport)}"></span>
+              <span class="sport-name">{sport}</span>
+              <span class="sport-stat">{counts.traces} traces</span>
+              {#if counts.routes > 0}
+                <span class="sport-stat">{counts.routes} routes</span>
+              {/if}
             </button>
-            {#if !groupsCollapsed}
-            {#each traceStore.analysis.groups as group, i}
-              {@const groupColor = GROUP_COLORS[i % GROUP_COLORS.length]}
-              {@const allHidden = group.activityIds.every((id) => hiddenTraces.has(id))}
-              <div
-                class="group-card"
-                onmouseenter={() => highlightedGroup = { ids: group.activityIds }}
-                onmouseleave={() => highlightedGroup = null}
+          {/each}
+        </div>
+
+        <!-- Top Routes -->
+        {#if sortedRoutes.length > 0}
+          <div class="result-section">
+            <div class="section-title-row">
+              <h2>Routes</h2>
+              <span class="section-count">{analysis.groups.length}</span>
+            </div>
+            {#each (showAllRoutes ? sortedRoutes : sortedRoutes.slice(0, 5)) as group, i (group.groupId)}
+              {@const isHl = highlightedRouteGroupId === group.groupId}
+              <button
+                class="list-row"
+                class:highlighted={isHl}
+                onmouseenter={() => onRouteHover(group)}
+                onmouseleave={() => onRouteLeave()}
+                onclick={() => zoomToGroup(group)}
               >
-                <div class="group-header">
-                  <span class="color-dot" style="background: {groupColor}"></span>
-                  <span class="group-title">Group {i + 1}</span>
-                  <span class="group-count">{group.activityIds.length} activities</span>
-                  <button
-                    class="btn-vis"
-                    class:is-hidden={allHidden}
-                    onclick={() => toggleGroup(group.activityIds)}
-                    title={allHidden ? 'Show group' : 'Hide group'}
-                  >
-                    {#if allHidden}
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                    {:else}
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                    {/if}
-                  </button>
-                </div>
-                <div class="group-activities">
-                  {#each group.activityIds as actId}
-                    {@const isHidden = hiddenTraces.has(actId)}
-                    <div
-                      class="group-activity"
-                      class:dimmed={isHidden}
-                      class:highlighted={highlightedTrace === actId}
-                      onmouseenter={() => highlightedTrace = actId}
-                      onmouseleave={() => highlightedTrace = null}
-                    >
-                      <span class="color-line" style="background: {groupColor}"></span>
-                      <span class="activity-name">{traceNameById(actId)}</span>
-                      <button
-                        class="btn-vis sm"
-                        class:is-hidden={isHidden}
-                        onclick={() => toggleTrace(actId)}
-                        title={isHidden ? 'Show on map' : 'Hide from map'}
-                      >
-                        {#if isHidden}
-                          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                        {:else}
-                          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        {/if}
-                      </button>
-                    </div>
-                  {/each}
-                </div>
-              </div>
+                <span class="color-swatch" style="background: {sportColor(group.sportType)}"></span>
+                <span class="row-name">{routeIndexLabel(group)}</span>
+                <span class="row-count">{group.activityIds.length}&times;</span>
+                <span class="row-dist">{(traceDistanceById(group.representativeId) / 1000).toFixed(1)} km</span>
+              </button>
             {/each}
+            {#if sortedRoutes.length > 5}
+              <button class="show-all-btn" onclick={() => showAllRoutes = !showAllRoutes}>
+                {showAllRoutes ? 'Show less' : `Show all ${sortedRoutes.length}`}
+              </button>
             {/if}
           </div>
+        {/if}
 
-          {#if sectionError}
-            <div class="error">{sectionError}</div>
-          {/if}
+        <!-- Top Sections -->
+        {#if sectionError}
+          <div class="error">{sectionError}</div>
+        {/if}
 
-          {#if traceStore.analysis.sections.length > 0}
-            <div class="result-section">
-              <button class="panel-toggle" onclick={() => sectionsCollapsed = !sectionsCollapsed}>
-                <span class="panel-chevron">{sectionsCollapsed ? '▸' : '▾'}</span>
-                <h2>Sections ({traceStore.analysis.sections.length})</h2>
+        {#if sortedSections.length > 0}
+          <div class="result-section">
+            <div class="section-title-row">
+              <h2>Sections</h2>
+              <span class="section-count">{analysis.sections.length}</span>
+            </div>
+            {#each (showAllSections ? sortedSections : sortedSections.slice(0, 5)) as section (section.id)}
+              {@const isHl = highlightedSectionId === section.id}
+              <button
+                class="list-row"
+                class:highlighted={isHl}
+                onmouseenter={() => onSectionHover(section)}
+                onmouseleave={() => onSectionLeave()}
+                onclick={() => zoomToSection(section)}
+              >
+                <span class="color-swatch" style="background: {SECTION_COLOR}"></span>
+                <span class="row-name">{sectionIndexLabel(section)}</span>
+                <span class="row-count">{section.visitCount}&times;</span>
+                <span class="row-dist">{(section.distanceMeters / 1000).toFixed(1)} km</span>
               </button>
-              {#if !sectionsCollapsed}
-              {#each traceStore.analysis.sections as section, si}
-                {@const isExpanded = expandedSections.has(section.id)}
-                <div
-                  class="section-card"
-                  class:expanded={isExpanded}
-                  onclick={() => { toggleSectionExpand(section.id); if (!isExpanded) zoomToSection(section); }}
-                  onmouseenter={() => highlightedGroup = { ids: section.activityIds, portions: section.activityPortions }}
-                  onmouseleave={() => highlightedGroup = null}
-                  role="button"
-                  tabindex="0"
-                >
-                  <div class="section-header">
-                    <span class="section-dot"></span>
-                    <span class="section-name">{section.name || `Section ${si + 1}`}</span>
-                    <span class="section-chevron">{isExpanded ? '▾' : '▸'}</span>
-                  </div>
-                  <div class="section-summary">
-                    {(section.distanceMeters / 1000).toFixed(1)} km &middot;
-                    {section.activityIds.length} activities &middot;
-                    {section.visitCount} traversals
-                  </div>
-                  {#if isExpanded}
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <div class="section-details" onclick={(e) => e.stopPropagation()}>
-                      <div class="section-stats">
-                        <div class="stat-row">
-                          <span class="stat-label">Avg spread</span>
-                          <span class="stat-value">{section.averageSpread.toFixed(1)} m</span>
-                        </div>
-                        <div class="stat-row">
-                          <span class="stat-label">Observations</span>
-                          <span class="stat-value">{section.observationCount}</span>
-                        </div>
-                        <div class="stat-row">
-                          <span class="stat-label">Quality</span>
-                          <span class="stat-value">{(section.confidence * 100).toFixed(0)}%</span>
-                        </div>
-                      </div>
-                      <div class="section-activities-header">Activities</div>
-                      <div class="section-activity-list">
-                        {#each section.activityIds as actId}
-                          <button
-                            class="section-activity-row"
-                            class:highlighted={highlightedTrace === actId}
-                            onclick={() => zoomToTrace(actId)}
-                            onmouseenter={() => highlightedTrace = actId}
-                            onmouseleave={() => highlightedTrace = null}
-                            title="Zoom to this activity"
-                          >
-                            <span class="activity-name">{traceNameById(actId)}</span>
-                            <span class="activity-dist"
-                              >{(traceDistanceById(actId) / 1000).toFixed(1)} km</span
-                            >
-                            <span class="zoom-icon">&#8599;</span>
-                          </button>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                </div>
-              {/each}
-              {/if}
-            </div>
-          {:else if traceStore.traces.length >= 3 && !sectionError}
-            <div class="result-section">
-              <h2>Sections</h2>
-              <p class="no-results">No frequent sections detected in these traces.</p>
-            </div>
-          {:else if traceStore.traces.length < 3}
-            <div class="result-section">
-              <h2>Sections</h2>
-              <p class="no-results">Add at least 3 traces to detect sections.</p>
-            </div>
-          {/if}
-        </div>
-      {/if}
+            {/each}
+            {#if sortedSections.length > 5}
+              <button class="show-all-btn" onclick={() => showAllSections = !showAllSections}>
+                {showAllSections ? 'Show less' : `Show all ${sortedSections.length}`}
+              </button>
+            {/if}
+          </div>
+        {:else if traceStore.traces.length >= 3 && !sectionError}
+          <div class="result-section">
+            <div class="section-title-row"><h2>Sections</h2></div>
+            <p class="no-results">No frequent sections detected.</p>
+          </div>
+        {/if}
 
-      {#if traceStore.traces.length >= 2}
+        <!-- Settings + re-analyse -->
         <div class="result-section">
           <button class="panel-toggle" onclick={() => settingsCollapsed = !settingsCollapsed}>
             <span class="panel-chevron">{settingsCollapsed ? '▸' : '▾'}</span>
@@ -874,12 +811,92 @@
             </div>
           {:else if analysing}
             Analysing...
-          {:else if traceStore.analysis}
-            Re-analyse
           {:else}
-            Analyse routes
+            Re-analyse
           {/if}
         </button>
+
+      {:else}
+        <!-- Pre-analysis sidebar -->
+        {#if traceStore.traces.length > 0}
+          <div class="summary-bar">
+            {traceStore.traces.length} traces loaded
+          </div>
+
+          <!-- Sport breakdown -->
+          <div class="sport-breakdown">
+            {#each Object.entries(sportBreakdown) as [sport, counts]}
+              <div class="sport-row">
+                <span class="sport-dot" style="background: {sportColor(sport)}"></span>
+                <span class="sport-name">{sport}</span>
+                <span class="sport-stat">{counts.traces} traces</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- File drop zone -->
+        <div
+          class="drop-zone"
+          class:drag-over={dragOver}
+          ondrop={handleDrop}
+          ondragover={handleDragOver}
+          ondragleave={() => (dragOver = false)}
+          role="button"
+          tabindex="0"
+        >
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Drop GPX files or click to browse</span>
+          <input type="file" accept=".gpx" multiple onchange={handleFileInput} />
+        </div>
+
+        {#if traceStore.traces.length >= 2}
+          <div class="result-section">
+            <button class="panel-toggle" onclick={() => settingsCollapsed = !settingsCollapsed}>
+              <span class="panel-chevron">{settingsCollapsed ? '▸' : '▾'}</span>
+              <h2>Settings</h2>
+            </button>
+            {#if !settingsCollapsed}
+              <div class="settings-panel">
+                <label class="slider-row">
+                  <span class="slider-label">Proximity threshold</span>
+                  <span class="slider-value">{proximityThreshold} m</span>
+                  <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} />
+                  <span class="slider-hint">Max distance between tracks to overlap</span>
+                </label>
+                <label class="slider-row">
+                  <span class="slider-label">Min section length</span>
+                  <span class="slider-value">{minSectionLength} m</span>
+                  <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} />
+                  <span class="slider-hint">Shortest section to detect</span>
+                </label>
+                <label class="slider-row">
+                  <span class="slider-label">Min activities</span>
+                  <span class="slider-value">{minActivities}</span>
+                  <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
+                  <span class="slider-hint">Activities needed to form a section</span>
+                </label>
+              </div>
+            {/if}
+          </div>
+          <button class="btn-analyse" onclick={runAnalysis} disabled={analysing || !wasmReady}>
+            {#if analysing && analysisProgress}
+              <div class="progress-content">
+                <span>{analysisProgress.phase}</span>
+                {#if analysisProgress.total > 1}
+                  <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
+                {/if}
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+              </div>
+            {:else if analysing}
+              Analysing...
+            {:else}
+              Analyse routes
+            {/if}
+          </button>
+        {/if}
       {/if}
 
       <footer class="sidebar-footer">
@@ -905,37 +922,62 @@
       role="region"
     >
       <div class="map-container" bind:this={mapContainer}></div>
-      {#if traceStore.analysis && traceStore.analysis.groups.length > 0}
-        <div class="map-legend">
-          <div class="legend-title">Routes</div>
-          {#each traceStore.analysis.groups as group, i}
-            {@const color = GROUP_COLORS[i % GROUP_COLORS.length]}
-            {@const isVisible = visibleGroups.has(group.groupId)}
-            <label class="legend-entry" class:dimmed={!isVisible}
-              onmouseenter={() => highlightedGroup = { ids: group.activityIds }}
-              onmouseleave={() => highlightedGroup = null}>
-              <input type="checkbox" checked={isVisible}
-                onchange={() => {
-                  const next = new Set(visibleGroups);
-                  if (next.has(group.groupId)) next.delete(group.groupId);
-                  else next.add(group.groupId);
-                  visibleGroups = next;
-                }} />
-              <span class="legend-swatch" style="background: {color}"></span>
-              <span class="legend-label">{group.customName || `Route ${i + 1}`}</span>
-              <span class="legend-count">{group.activityIds.length}</span>
-            </label>
+
+      <!-- Layer control bar (top-right) -->
+      {#if traceStore.traces.length > 0}
+        <div class="layer-control">
+          <button
+            class="layer-btn"
+            class:active={showTraces}
+            onclick={() => showTraces = !showTraces}
+            title="Traces"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          </button>
+          <button
+            class="layer-btn"
+            class:active={showRoutes}
+            onclick={() => showRoutes = !showRoutes}
+            title="Routes"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </button>
+          <button
+            class="layer-btn"
+            class:active={showSections}
+            onclick={() => showSections = !showSections}
+            title="Sections"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+          </button>
+          <div class="layer-divider"></div>
+          {#each [['Ride', SPORT_COLORS.Ride], ['Run', SPORT_COLORS.Run], ['Walk', SPORT_COLORS.Walk], ['Swim', SPORT_COLORS.Swim], ['Other', DEFAULT_SPORT_COLOR]] as [sport, color]}
+            <button
+              class="sport-filter-dot"
+              class:active={sportFilters.has(sport)}
+              style="--dot-color: {color}"
+              onclick={() => toggleSportFilter(sport)}
+              title="{sport}"
+            ></button>
           {/each}
-          {#if traceStore.traces.length > traceStore.analysis.groups.flatMap(g => g.activityIds).length}
-            <label class="legend-entry" class:dimmed={!showUngrouped}>
-              <input type="checkbox" checked={showUngrouped}
-                onchange={() => showUngrouped = !showUngrouped} />
-              <span class="legend-swatch ungrouped"></span>
-              <span class="legend-label">Ungrouped</span>
-            </label>
-          {/if}
         </div>
       {/if}
+
+      <!-- Compact legend (bottom-left) -->
+      {#if traceStore.traces.length > 0}
+        <div class="compact-legend">
+          <div class="legend-grid">
+            <span class="legend-line" style="background: {SPORT_COLORS.Ride}"></span><span class="legend-text">Ride</span>
+            <span class="legend-line" style="background: {SPORT_COLORS.Run}"></span><span class="legend-text">Run</span>
+            <span class="legend-line" style="background: {SPORT_COLORS.Walk}"></span><span class="legend-text">Walk</span>
+            <span class="legend-line" style="background: {SPORT_COLORS.Swim}"></span><span class="legend-text">Swim</span>
+            {#if hasAnalysis}
+              <span class="legend-line" style="background: {SECTION_COLOR}"></span><span class="legend-text">Section</span>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       {#if mapDragOver}
         <div class="map-drop-overlay">Drop GPX files here</div>
       {/if}
@@ -950,6 +992,16 @@
 </div>
 
 <style>
+  /* --- CSS-class hover system --- */
+  :global(.leaflet-overlay-pane.dimmed path) {
+    opacity: 0.06 !important;
+    transition: opacity 0.12s;
+  }
+  :global(.leaflet-overlay-pane.dimmed path.hl) {
+    opacity: 1 !important;
+  }
+
+  /* --- Layout --- */
   .app {
     height: 100vh;
     display: flex;
@@ -997,7 +1049,6 @@
     transition: all 0.15s;
     flex-shrink: 0;
   }
-
   .header-drop:hover,
   .header-drop.drag-over {
     border-color: var(--primary);
@@ -1013,18 +1064,10 @@
     color: var(--text-muted);
     font-weight: 500;
   }
+  .header-drop-label:hover { color: var(--primary); }
+  .header-drop-label input { display: none; }
 
-  .header-drop-label:hover {
-    color: var(--primary);
-  }
-
-  .header-drop-label input {
-    display: none;
-  }
-
-  .header-spacer {
-    flex: 1;
-  }
+  .header-spacer { flex: 1; }
 
   .header-count {
     font-size: 12px;
@@ -1038,14 +1081,15 @@
     overflow: hidden;
   }
 
+  /* --- Sidebar --- */
   .sidebar {
-    width: 360px;
+    width: 340px;
     background: var(--bg-elevated);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
-    padding: 16px;
+    padding: 12px 14px;
     gap: 0;
   }
 
@@ -1056,30 +1100,195 @@
     border-radius: 6px;
     font-size: 13px;
     word-break: break-word;
+    margin-bottom: 8px;
   }
 
-  .panel-toggle h2 {
-    margin: 0;
+  .summary-bar {
     font-size: 13px;
-    font-weight: 600;
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+    font-weight: 500;
   }
 
+  /* --- Sport breakdown --- */
+  .sport-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-bottom: 12px;
+  }
+
+  .sport-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+    width: 100%;
+    transition: opacity 0.12s;
+  }
+  .sport-row:hover { background: var(--highlight); }
+  .sport-row.inactive { opacity: 0.35; }
+
+  .sport-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .sport-name {
+    font-weight: 500;
+    min-width: 40px;
+  }
+
+  .sport-stat {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: auto;
+  }
+  .sport-stat + .sport-stat {
+    margin-left: 8px;
+  }
+
+  /* --- Result sections --- */
   .result-section {
     margin-bottom: 12px;
   }
 
-  .result-section > h2 {
-    margin: 0 0 6px 0;
-    font-size: 13px;
+  .section-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .section-title-row h2 {
+    margin: 0;
+    font-size: 12px;
     font-weight: 600;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
+  .section-count {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--highlight);
+    padding: 1px 6px;
+    border-radius: 8px;
+  }
+
+  /* --- List rows (routes + sections) --- */
+  .list-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    color: var(--text);
+    font-size: 13px;
+    text-align: left;
+    width: 100%;
+    transition: background 0.1s;
+  }
+  .list-row:hover,
+  .list-row.highlighted {
+    background: var(--highlight);
+  }
+
+  .color-swatch {
+    width: 14px;
+    height: 4px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .row-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .row-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .row-dist {
+    font-size: 11px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .show-all-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    color: var(--primary);
+    padding: 4px 8px;
+    width: 100%;
+    text-align: left;
+  }
+  .show-all-btn:hover { text-decoration: underline; }
+
+  .no-results {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 0;
+    font-style: italic;
+  }
+
+  /* --- Drop zone (pre-analysis) --- */
+  .drop-zone {
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 6%, transparent);
+    color: var(--primary);
+  }
+  .drop-zone input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  /* --- Settings + analyse --- */
   .panel-toggle {
     display: flex;
     align-items: center;
@@ -1094,9 +1303,15 @@
     font: inherit;
     color: var(--text);
   }
+  .panel-toggle:hover h2 { color: var(--text); }
 
-  .panel-toggle:hover h2 {
-    color: var(--text);
+  .panel-toggle h2 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
 
   .panel-chevron {
@@ -1105,318 +1320,11 @@
     width: 12px;
   }
 
-  .group-card {
-    background: var(--bg);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    box-shadow: var(--shadow);
-  }
-
-  .group-card:hover {
-    background: var(--card-hover);
-  }
-
-  .group-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-  }
-
-  .group-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
-
-  .group-count {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-left: auto;
-  }
-
-  .group-activities {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding-left: 18px;
-  }
-
-  .group-activity {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .group-activity.dimmed {
-    opacity: 0.4;
-  }
-
-  .group-activity.highlighted {
-    background: var(--highlight);
-    border-radius: 4px;
-    margin: 0 -4px;
-    padding: 1px 4px;
-  }
-
-  .btn-vis {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 3px 5px;
-    color: var(--text-muted);
-    line-height: 1;
-    border-radius: 4px;
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-  }
-
-  .btn-vis:hover {
-    background: var(--highlight);
-    color: var(--text);
-  }
-
-  .btn-vis.is-hidden {
-    color: var(--border);
-  }
-
-  .btn-vis.is-hidden:hover {
-    color: var(--text-muted);
-    background: var(--highlight);
-  }
-
-  .btn-vis.sm {
-    padding: 2px 4px;
-  }
-
-  .color-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .color-dot.sm {
-    width: 8px;
-    height: 8px;
-  }
-
-  .color-line {
-    width: 12px;
-    height: 3px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }
-
-  .section-card {
-    background: var(--bg);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    cursor: pointer;
-    transition: background 0.1s;
-    box-shadow: var(--shadow);
-  }
-
-  .section-card:hover {
-    background: var(--card-hover);
-  }
-
-  .section-card.expanded {
-    background: var(--card-hover);
-  }
-
-  .section-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .section-card:hover .section-name {
-    color: var(--section-orange);
-  }
-
-  .section-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--section-orange);
-    flex-shrink: 0;
-  }
-
-  .section-name {
-    font-weight: 500;
-    font-size: 13px;
-    transition: color 0.1s;
-  }
-
-  .section-chevron {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .section-summary {
-    font-size: 12px;
-    color: var(--text-muted);
-    padding-left: 18px;
-    margin-top: 2px;
-  }
-
-  .section-details {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-  }
-
-  .section-stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px 12px;
-    margin-bottom: 10px;
-  }
-
-  .stat-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-  }
-
-  .stat-label {
-    color: var(--text-muted);
-  }
-
-  .stat-value {
-    font-weight: 500;
-    color: var(--text);
-  }
-
-  .section-activities-header {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
-  }
-
-  .section-activity-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .section-activity-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border-radius: 4px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    font: inherit;
-    color: var(--text-muted);
-    font-size: 12px;
-    text-align: left;
-    width: 100%;
-  }
-
-  .section-activity-row:hover,
-  .section-activity-row.highlighted {
-    background: var(--highlight);
-    color: var(--text);
-  }
-
-  .section-activity-row .activity-dist {
-    color: var(--text-muted);
-    margin-left: auto;
-    font-size: 11px;
-    flex-shrink: 0;
-  }
-
-  .zoom-icon {
-    color: var(--text-muted);
-    font-size: 11px;
-    flex-shrink: 0;
-    opacity: 0.5;
-  }
-
-  .section-activity-row:hover .zoom-icon {
-    color: var(--section-orange);
-    opacity: 1;
-  }
-
-  .no-results {
-    font-size: 13px;
-    color: var(--text-muted);
-    margin: 0;
-    font-style: italic;
-  }
-
-  .panel-action {
-    margin-left: auto;
-    font-size: 11px;
-    color: #ef4444;
-    padding: 2px 8px;
-    border-radius: 3px;
-  }
-
-  .panel-action:hover {
-    background: color-mix(in srgb, #ef4444 10%, var(--card));
-  }
-
-  .assignment-tag {
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    background: var(--card);
-    flex-shrink: 0;
-  }
-
-  .assignment-tag.section-tag {
-    border-color: var(--section-orange);
-    color: var(--section-orange);
-  }
-
-  .btn-remove-sm {
-    background: none;
-    border: none;
-    color: var(--border);
-    font-size: 14px;
-    cursor: pointer;
-    padding: 0 4px;
-    line-height: 1;
-    flex-shrink: 0;
-  }
-
-  .btn-remove-sm:hover {
-    color: #e11d48;
-  }
-
-  .activity-name {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 250px;
-  }
-
-  .activity-dist {
-    font-size: 11px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-
   .settings-panel {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    margin-bottom: 8px;
   }
 
   .slider-row {
@@ -1427,18 +1335,8 @@
     font-size: 12px;
     cursor: default;
   }
-
-  .slider-label {
-    color: var(--text);
-    font-weight: 500;
-  }
-
-  .slider-value {
-    color: var(--text-muted);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
+  .slider-label { color: var(--text); font-weight: 500; }
+  .slider-value { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
   .slider-row input[type='range'] {
     grid-column: 1 / -1;
     width: 100%;
@@ -1446,7 +1344,6 @@
     accent-color: var(--primary);
     cursor: pointer;
   }
-
   .slider-hint {
     grid-column: 1 / -1;
     font-size: 11px;
@@ -1466,16 +1363,10 @@
     transition: background 0.15s;
     overflow: hidden;
     position: relative;
+    margin-bottom: 12px;
   }
-
-  .btn-analyse:hover:not(:disabled) {
-    background: var(--primary-dark);
-  }
-
-  .btn-analyse:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
+  .btn-analyse:hover:not(:disabled) { background: var(--primary-dark); }
+  .btn-analyse:disabled { opacity: 0.6; cursor: not-allowed; }
 
   .progress-content {
     display: flex;
@@ -1484,20 +1375,13 @@
     font-size: 13px;
     margin-bottom: 6px;
   }
-
-  .progress-count {
-    opacity: 0.8;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-
+  .progress-count { opacity: 0.8; font-size: 12px; font-variant-numeric: tabular-nums; }
   .progress-bar {
     height: 3px;
     background: rgba(255, 255, 255, 0.3);
     border-radius: 2px;
     overflow: hidden;
   }
-
   .progress-fill {
     height: 100%;
     background: white;
@@ -1513,11 +1397,9 @@
     color: var(--text-muted);
     line-height: 1.5;
   }
+  .sidebar-footer a { color: var(--primary); }
 
-  .sidebar-footer a {
-    color: var(--primary);
-  }
-
+  /* --- Map panel --- */
   .map-panel {
     flex: 1;
     position: relative;
@@ -1528,69 +1410,102 @@
     height: 100%;
   }
 
-  .map-legend {
+  /* --- Layer control (top-right) --- */
+  .layer-control {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .layer-btn {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    background: transparent;
+    color: var(--text-muted);
+    transition: all 0.12s;
+  }
+  .layer-btn:hover { background: var(--highlight); color: var(--text); }
+  .layer-btn.active { background: var(--primary-subtle); color: var(--primary); }
+
+  .layer-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 2px 4px;
+  }
+
+  .sport-filter-dot {
+    width: 34px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: transparent;
+    padding: 0;
+    transition: opacity 0.12s;
+  }
+  .sport-filter-dot::after {
+    content: '';
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--dot-color);
+    opacity: 0.3;
+    transition: opacity 0.12s;
+  }
+  .sport-filter-dot.active::after { opacity: 1; }
+  .sport-filter-dot:hover::after { opacity: 0.8; }
+
+  /* --- Compact legend (bottom-left) --- */
+  .compact-legend {
     position: absolute;
     bottom: 24px;
-    right: 12px;
+    left: 10px;
     z-index: 1000;
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 10px 12px;
-    box-shadow: var(--shadow-lg);
-    max-height: 300px;
-    overflow-y: auto;
-    min-width: 140px;
-  }
-  .legend-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 6px;
-  }
-  .legend-entry {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text);
-    cursor: pointer;
-    padding: 2px 0;
-  }
-  .legend-entry.dimmed {
-    opacity: 0.4;
-  }
-  .legend-entry input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--primary);
-    margin: 0;
-    cursor: pointer;
-  }
-  .legend-swatch {
-    width: 16px;
-    height: 4px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }
-  .legend-swatch.ungrouped {
-    background: #64748b;
-    border: 1px dashed #64748b;
-    height: 2px;
-  }
-  .legend-label {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .legend-count {
-    margin-left: auto;
-    color: var(--text-dim);
-    font-size: 11px;
+    border-radius: 6px;
+    padding: 6px 10px;
+    box-shadow: var(--shadow);
   }
 
+  .legend-grid {
+    display: grid;
+    grid-template-columns: 16px auto 16px auto;
+    gap: 3px 6px;
+    align-items: center;
+  }
+
+  .legend-line {
+    width: 14px;
+    height: 3px;
+    border-radius: 2px;
+  }
+
+  .legend-text {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* --- Map overlays --- */
   .map-overlay {
     position: absolute;
     top: 50%;
