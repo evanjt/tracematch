@@ -116,9 +116,10 @@ pub fn detect_sections(
         serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
     };
 
-    let result = tracematch::detect_sections_from_tracks(&tracks, &sport_types, &groups, &config);
+    let ms = tracematch::detect_sections_multiscale(&tracks, &sport_types, &groups, &config);
 
-    let val = serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))?;
+    let val =
+        serde_wasm_bindgen::to_value(&ms.sections).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(val)
 }
 

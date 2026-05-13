@@ -80,10 +80,9 @@ pub use sections::{
     DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
     MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
     SectionPortion, SplitResult, detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, detect_sections_optimized, find_all_track_portions,
-    find_sections_in_route, incremental::IncrementalResult,
-    incremental::detect_sections_incremental, recalculate_section_polyline, split_section_at_index,
-    split_section_at_point,
+    detect_sections_multiscale_with_progress, find_all_track_portions, find_sections_in_route,
+    incremental::IncrementalResult, incremental::detect_sections_incremental,
+    recalculate_section_polyline, split_section_at_index, split_section_at_point,
 };
 
 // ============================================================================
@@ -511,14 +510,6 @@ pub struct ActivityMatchInfo {
     pub match_percentage: f64,
     /// Match direction relative to the representative route
     pub direction: Direction,
-    /// GPS point index where the route portion starts (into the activity's track)
-    pub start_index: Option<u32>,
-    /// GPS point index where the route portion ends
-    pub end_index: Option<u32>,
-    /// Distance in meters of the matched route portion
-    pub route_distance: Option<f64>,
-    /// Time in seconds for the matched route portion (from time_streams)
-    pub lap_time: Option<f64>,
 }
 
 /// Result from grouping signatures, including per-activity match info.

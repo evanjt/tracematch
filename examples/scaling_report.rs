@@ -15,8 +15,6 @@ fn main() {
 
     common::bench_scaling_multiscale();
     println!();
-    common::bench_scaling_optimized();
-    println!();
     common::bench_route_length();
     println!();
     common::bench_overlap_density();
@@ -26,8 +24,6 @@ fn main() {
     common::bench_predefined_scenarios();
     println!();
     common::bench_predefined_scenarios_large();
-    println!();
-    common::bench_grid_filtering();
     println!();
     common::bench_incremental();
     println!();

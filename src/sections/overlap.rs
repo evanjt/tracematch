@@ -294,19 +294,6 @@ pub fn resolve_points_a<'a>(
     &[]
 }
 
-/// Resolve overlap points from track_map using stored index ranges.
-pub fn resolve_points_a_from_map<'a>(
-    overlap: &FullTrackOverlap,
-    track_map: &'a std::collections::HashMap<&str, &[GpsPoint]>,
-) -> &'a [GpsPoint] {
-    if let Some(pts) = track_map.get(overlap.activity_a.as_str()) {
-        let end = overlap.range_a.1.min(pts.len());
-        &pts[overlap.range_a.0..end]
-    } else {
-        &[]
-    }
-}
-
 /// Cluster overlaps that represent the same physical section.
 /// Requires access to original tracks to resolve points for geometric matching.
 pub fn cluster_overlaps(
@@ -347,59 +334,6 @@ pub fn cluster_overlaps(
             if center_dist <= config.cluster_tolerance {
                 // Additional check: verify overlaps are geometrically similar
                 let other_points = resolve_points_a(other, tracks);
-                if overlaps_match(seed_points, other_points, config.proximity_threshold) {
-                    cluster_overlaps.push(other.clone());
-                    cluster_activities.insert(other.activity_a.clone());
-                    cluster_activities.insert(other.activity_b.clone());
-                    assigned.insert(j);
-                }
-            }
-        }
-
-        clusters.push(OverlapCluster {
-            overlaps: cluster_overlaps,
-            activity_ids: cluster_activities,
-        });
-    }
-
-    clusters
-}
-
-/// Cluster overlaps using a HashMap-based track lookup.
-/// Used by the multiscale path where tracks are stored in a HashMap.
-pub fn cluster_overlaps_with_map(
-    overlaps: Vec<FullTrackOverlap>,
-    config: &SectionConfig,
-    track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
-) -> Vec<OverlapCluster> {
-    if overlaps.is_empty() {
-        return vec![];
-    }
-
-    let mut clusters: Vec<OverlapCluster> = Vec::new();
-    let mut assigned: HashSet<usize> = HashSet::new();
-
-    for (i, overlap) in overlaps.iter().enumerate() {
-        if assigned.contains(&i) {
-            continue;
-        }
-
-        let mut cluster_overlaps = vec![overlap.clone()];
-        let mut cluster_activities: HashSet<String> = HashSet::new();
-        cluster_activities.insert(overlap.activity_a.clone());
-        cluster_activities.insert(overlap.activity_b.clone());
-        assigned.insert(i);
-
-        let seed_points = resolve_points_a_from_map(overlap, track_map);
-
-        for (j, other) in overlaps.iter().enumerate() {
-            if assigned.contains(&j) {
-                continue;
-            }
-
-            let center_dist = haversine_distance(&overlap.center, &other.center);
-            if center_dist <= config.cluster_tolerance {
-                let other_points = resolve_points_a_from_map(other, track_map);
                 if overlaps_match(seed_points, other_points, config.proximity_threshold) {
                     cluster_overlaps.push(other.clone());
                     cluster_activities.insert(other.activity_a.clone());

@@ -1,162 +1,90 @@
-import type { GpsPoint, RouteSignature, MatchResult, RouteGroup, FrequentSection, SectionMatch } from './types';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let wasm: any = null;
-
-export async function initWasm() {
-  if (wasm) return;
-
-  // Fetch the JS glue as text, then import via blob URL to bypass Vite's
-  // restriction on importing JS from the public directory in dev mode.
-  const jsResponse = await fetch('/wasm/tracematch_wasm.js');
-  const jsText = await jsResponse.text();
-  const blob = new Blob([jsText], { type: 'application/javascript' });
-  const blobUrl = URL.createObjectURL(blob);
-  const mod = await import(/* @vite-ignore */ blobUrl);
-  URL.revokeObjectURL(blobUrl);
-
-  await mod.default('/wasm/tracematch_wasm_bg.wasm');
-  wasm = mod;
-}
-
-function w() {
-  if (!wasm) throw new Error('WASM not initialized — call initWasm() first');
-  return wasm;
-}
-
-export function createSignature(
-  activityId: string,
-  points: GpsPoint[],
-  config = '{}'
-): RouteSignature | null {
-  return w().createSignature(activityId, JSON.stringify(points), config) as RouteSignature | null;
-}
-
-export function compareRoutes(
-  sig1: RouteSignature,
-  sig2: RouteSignature,
-  config = '{}'
-): MatchResult | null {
-  return w().compareRoutes(JSON.stringify(sig1), JSON.stringify(sig2), config) as MatchResult | null;
-}
-
-export function groupRoutes(
-  signatures: RouteSignature[],
-  config = '{}'
-): RouteGroup[] {
-  return w().groupRoutes(JSON.stringify(signatures), config) as RouteGroup[];
-}
-
-export function detectSections(
-  tracks: [string, GpsPoint[]][],
-  sportTypes: Record<string, string>,
-  groups: RouteGroup[],
-  config = '{}'
-): FrequentSection[] {
-  return w().detectSections(
-    JSON.stringify(tracks),
-    JSON.stringify(sportTypes),
-    JSON.stringify(groups),
-    config
-  ) as FrequentSection[];
-}
-
-export function findSectionsInRoute(
-  route: GpsPoint[],
-  sections: FrequentSection[],
-  config = '{}'
-): SectionMatch[] {
-  return w().findSectionsInRoute(
-    JSON.stringify(route),
-    JSON.stringify(sections),
-    config
-  ) as SectionMatch[];
-}
+import type { GpsPoint, RouteSignature, RouteGroup, FrequentSection } from './types';
+import type { WorkerResponse } from './sectionWorker';
 
 // ---------------------------------------------------------------------------
-// Off-main-thread detection via Web Worker
+// Off-main-thread analysis via Web Worker
 // ---------------------------------------------------------------------------
 //
-// `detectSections` above runs synchronously and blocks the main thread for
-// the entire detection duration — at 400 tracks that's seconds to minutes
-// depending on geographic spread. `detectSectionsAsync` offloads the call
-// to a worker so the UI stays responsive.
-//
-// The worker re-loads WASM on first call; subsequent calls reuse the
-// existing module. There's intentionally no shared global state between
-// the worker and the main thread, so every invocation passes the full
-// input (tracks/groups/sportTypes) over postMessage. For ~400 tracks
-// that's a few MB — fast enough that the structured-clone copy is
-// negligible compared to the detection itself.
+// All WASM work runs inside the worker (see sectionWorker.ts). The worker
+// loads its own WASM instance, so the main thread never needs a wasm-bindgen
+// module loaded.
 
 let _worker: Worker | null = null;
 let _nextRequestId = 1;
-const _pending = new Map<
-  number,
-  { resolve: (sections: FrequentSection[]) => void; reject: (err: Error) => void }
->();
+
+type PendingAnalyse = {
+  resolve: (result: { signatures: RouteSignature[]; groups: RouteGroup[]; sections: FrequentSection[] }) => void;
+  reject: (err: Error) => void;
+  onProgress?: (phase: string, current: number, total: number) => void;
+};
+
+const _pendingAnalyse = new Map<number, PendingAnalyse>();
 
 function getWorker(): Worker {
   if (_worker) return _worker;
   _worker = new Worker(new URL('./sectionWorker.ts', import.meta.url), {
     type: 'module',
   });
-  _worker.onmessage = (event: MessageEvent) => {
-    const msg = event.data as
-      | { type: 'detect:ok'; requestId: number; sections: FrequentSection[] }
-      | { type: 'detect:err'; requestId: number; message: string };
-    const handler = _pending.get(msg.requestId);
-    if (!handler) return;
-    _pending.delete(msg.requestId);
-    if (msg.type === 'detect:ok') {
-      handler.resolve(msg.sections);
-    } else {
-      handler.reject(new Error(msg.message));
+  _worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    const msg = event.data;
+
+    if (msg.type === 'analyse:progress') {
+      const handler = _pendingAnalyse.get(msg.requestId);
+      handler?.onProgress?.(msg.phase, msg.current, msg.total);
+      return;
+    }
+
+    if (msg.type === 'analyse:ok') {
+      const handler = _pendingAnalyse.get(msg.requestId);
+      _pendingAnalyse.delete(msg.requestId);
+      handler?.resolve({ signatures: msg.signatures, groups: msg.groups, sections: msg.sections });
+      return;
+    }
+
+    if (msg.type === 'analyse:err') {
+      const handler = _pendingAnalyse.get(msg.requestId);
+      _pendingAnalyse.delete(msg.requestId);
+      handler?.reject(new Error(msg.message));
+      return;
     }
   };
   _worker.onerror = (event) => {
-    // Reject all pending requests if the worker dies — leaving them
-    // hanging would freeze the UI even though the worker existed
-    // specifically to keep the UI responsive.
-    const err = new Error(`Section worker error: ${event.message}`);
-    for (const handler of _pending.values()) {
-      handler.reject(err);
-    }
-    _pending.clear();
+    const err = new Error(`Worker error: ${event.message}`);
+    for (const handler of _pendingAnalyse.values()) handler.reject(err);
+    _pendingAnalyse.clear();
     _worker = null;
   };
   return _worker;
 }
 
-export function detectSectionsAsync(
-  tracks: [string, GpsPoint[]][],
-  sportTypes: Record<string, string>,
-  groups: RouteGroup[],
-  config = '{}',
-): Promise<FrequentSection[]> {
+export interface AnalysisTrace {
+  id: string;
+  points: GpsPoint[];
+  sportType: string;
+}
+
+export function runAnalysisAsync(
+  traces: AnalysisTrace[],
+  sectionConfig: string,
+  onProgress?: (phase: string, current: number, total: number) => void,
+): Promise<{ signatures: RouteSignature[]; groups: RouteGroup[]; sections: FrequentSection[] }> {
   return new Promise((resolve, reject) => {
     const worker = getWorker();
     const requestId = _nextRequestId++;
-    _pending.set(requestId, { resolve, reject });
+    _pendingAnalyse.set(requestId, { resolve, reject, onProgress });
     worker.postMessage({
-      type: 'detect',
+      type: 'analyse',
       requestId,
-      tracks,
-      sportTypes,
-      groups,
-      config,
+      traces,
+      sectionConfig,
     });
   });
 }
 
-/** Tear down the worker — useful for tests or on unmount. */
 export function terminateSectionWorker(): void {
   _worker?.terminate();
   _worker = null;
-  // Reject any in-flight requests so promises don't hang.
-  const err = new Error('Section worker terminated');
-  for (const handler of _pending.values()) {
-    handler.reject(err);
-  }
-  _pending.clear();
+  const err = new Error('Worker terminated');
+  for (const handler of _pendingAnalyse.values()) handler.reject(err);
+  _pendingAnalyse.clear();
 }

@@ -2,13 +2,8 @@
   import { onMount } from 'svelte';
   import { traceStore, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
-  import {
-    initWasm,
-    createSignature,
-    groupRoutes,
-    detectSections
-  } from '$lib/wasm/engine';
-  import type { RouteSignature, RouteGroup, FrequentSection, GpsPoint, SectionPortion } from '$lib/wasm/types';
+  import { runAnalysisAsync } from '$lib/wasm/engine';
+  import type { RouteGroup, FrequentSection, GpsPoint } from '$lib/wasm/types';
 
   // --- Sport color system ---
   const SPORT_COLORS: Record<string, string> = {
@@ -36,6 +31,8 @@
   let dragOver = $state(false);
   let mapDragOver = $state(false);
   let mapContainer: HTMLDivElement;
+  let renderProgress = $state<{ current: number; total: number } | null>(null);
+  let importProgress = $state<{ current: number; total: number } | null>(null);
 
   // Section detection parameters
   let proximityThreshold = $state(50);
@@ -258,8 +255,11 @@
   }
 
   // --- Map sync functions ---
-  function syncTracesToMap() {
+  let _renderVersion = 0;
+
+  async function syncTracesToMap() {
     if (!map || !L || !traceLayerGroup) return;
+    const thisRender = ++_renderVersion;
     const traces = traceStore.traces;
     const currentIds = new Set(traces.map((t) => t.id));
 
@@ -271,41 +271,53 @@
       }
     }
 
-    // Add polylines for new traces
-    let addedAny = false;
+    // Find traces that need rendering
+    const toAdd = traces.filter((t) => !tracePolylines.has(t.id));
+    if (toAdd.length === 0) return;
+
+    console.time('[tracematch] render:traces');
+    const total = toAdd.length;
+    if (total > 30) renderProgress = { current: 0, total };
+
     const allLatLngs: L.LatLng[] = [];
-    for (const trace of traces) {
-      if (tracePolylines.has(trace.id)) {
+    const batchSize = 30;
+
+    for (let i = 0; i < toAdd.length; i += batchSize) {
+      if (_renderVersion !== thisRender) return;
+      const end = Math.min(i + batchSize, toAdd.length);
+      for (let j = i; j < end; j++) {
+        const trace = toAdd[j];
+        const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+        if (latlngs.length === 0) continue;
+
+        const color = sportColor(trace.sportType);
+        const pl = L.polyline(latlngs, { color, weight: 2, opacity: 0.5 })
+          .bindPopup(
+            `<b>${trace.name}</b><br>` +
+              `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts` +
+              `<br>${trace.sportType || 'Unknown'}`
+          )
+          .addTo(traceLayerGroup!);
+        tracePolylines.set(trace.id, { polyline: pl, sportType: trace.sportType || 'Other' });
         if (isTraceVisible(trace)) {
-          const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
           allLatLngs.push(...latlngs);
         }
-        continue;
       }
-      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
-      if (latlngs.length === 0) continue;
 
-      const traceId = trace.id;
-      const color = sportColor(trace.sportType);
-      const pl = L.polyline(latlngs, { color, weight: 2, opacity: 0.5 })
-        .bindPopup(
-          `<b>${trace.name}</b><br>` +
-            `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts` +
-            `<br>${trace.sportType || 'Unknown'}`
-        )
-        .addTo(traceLayerGroup!);
-      tracePolylines.set(traceId, { polyline: pl, sportType: trace.sportType || 'Other' });
-      addedAny = true;
-      if (isTraceVisible(trace)) {
-        allLatLngs.push(...latlngs);
+      // Fit bounds after first batch for quick initial view
+      if (i === 0 && !hasFitOnce && allLatLngs.length > 0) {
+        hasFitOnce = true;
+        map!.fitBounds(L!.latLngBounds(allLatLngs), { padding: [40, 40] });
+      }
+
+      if (total > 30) renderProgress = { current: end, total };
+      if (i + batchSize < toAdd.length) {
+        await new Promise((r) => setTimeout(r, 0));
       }
     }
 
-    // Fit bounds only on first batch load
-    if (addedAny && !hasFitOnce && allLatLngs.length > 0) {
-      hasFitOnce = true;
-      map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-    }
+    console.timeEnd('[tracematch] render:traces');
+    renderProgress = null;
   }
 
   function syncRoutesToMap() {
@@ -402,13 +414,14 @@
 
   // --- Lifecycle ---
   onMount(async () => {
+    console.time('[tracematch] startup:total');
+    console.time('[tracematch] startup:idb-load');
     await traceStore.load();
-    try {
-      await initWasm();
-      wasmReady = true;
-    } catch (e) {
-      error = `Failed to load WASM: ${e}`;
-    }
+    console.timeEnd('[tracematch] startup:idb-load');
+    // WASM is loaded lazily inside the analysis worker on first run.
+    wasmReady = true;
+    console.timeEnd('[tracematch] startup:total');
+    console.log(`[tracematch] ${traceStore.traces.length} traces loaded, analysis: ${traceStore.analysis ? 'yes' : 'no'}`);
 
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     mq.addEventListener('change', () => { if (themeMode === 'system') resolvedDark = mq.matches; });
@@ -443,7 +456,7 @@
       routeLayerGroup = L.layerGroup();
       sectionLayerGroup = L.layerGroup();
 
-      syncTracesToMap();
+      void syncTracesToMap();
       updateLayerVisibility();
     });
   });
@@ -462,7 +475,7 @@
   $effect(() => {
     traceStore.traces;
     if (!map || !L) return;
-    syncTracesToMap();
+    void syncTracesToMap();
   });
 
   // React to analysis changes
@@ -500,33 +513,48 @@
   // --- File handling ---
   async function handleFiles(files: FileList | File[]) {
     error = null;
-    const batch: StoredTrace[] = [];
-    for (const file of files) {
-      if (!file.name.endsWith('.gpx')) {
-        error = `Skipped ${file.name} — only GPX files are supported currently`;
-        continue;
-      }
-      try {
-        const text = await file.text();
-        const parsed = parseGpx(text);
-        for (const trace of parsed) {
-          batch.push({
-            id: crypto.randomUUID(),
-            name: trace.name,
-            fileName: file.name,
-            points: trace.points,
-            distance: trace.distance,
-            sportType: trace.sportType,
-            addedAt: Date.now()
-          });
+    const fileArray = Array.from(files);
+    const batchSize = 20;
+    const total = fileArray.length;
+    if (total > 20) importProgress = { current: 0, total };
+    console.time('[tracematch] import:files');
+
+    for (let i = 0; i < fileArray.length; i += batchSize) {
+      const batch: StoredTrace[] = [];
+      const end = Math.min(i + batchSize, fileArray.length);
+      for (let j = i; j < end; j++) {
+        const file = fileArray[j];
+        if (!file.name.endsWith('.gpx')) {
+          error = `Skipped ${file.name} — only GPX files are supported currently`;
+          continue;
         }
-      } catch (e) {
-        error = `Failed to parse ${file.name}: ${e}`;
+        try {
+          const text = await file.text();
+          const parsed = parseGpx(text);
+          for (const trace of parsed) {
+            batch.push({
+              id: crypto.randomUUID(),
+              name: trace.name,
+              fileName: file.name,
+              points: trace.points,
+              distance: trace.distance,
+              sportType: trace.sportType,
+              addedAt: Date.now()
+            });
+          }
+        } catch (e) {
+          error = `Failed to parse ${file.name}: ${e}`;
+        }
       }
+      if (batch.length > 0) {
+        await traceStore.addTraces(batch);
+      }
+      if (total > 20) importProgress = { current: end, total };
+      await new Promise((r) => setTimeout(r, 0));
     }
-    if (batch.length > 0) {
-      await traceStore.addTraces(batch);
-    }
+
+    console.timeEnd('[tracematch] import:files');
+    importProgress = null;
   }
 
   function handleDrop(e: DragEvent) {
@@ -551,66 +579,51 @@
     analysing = true;
     error = null;
     sectionError = null;
-    analysisProgress = { phase: 'Creating signatures', current: 0, total: traceStore.traces.length };
+    analysisProgress = { phase: 'Preparing', current: 0, total: traceStore.traces.length };
 
     try {
-      const signatures: RouteSignature[] = [];
-      const tracks: [string, GpsPoint[]][] = [];
-      const sportTypes: Record<string, string> = {};
-      const traces = traceStore.traces;
-      const batchSize = 50;
+      console.time('[tracematch] analysis:total');
+      const sectionConfig = JSON.stringify({
+        proximityThreshold,
+        minSectionLength,
+        maxSectionLength: 5000,
+        minActivities,
+        clusterTolerance: 80,
+        samplePoints: 50,
+        detectionMode: 'discovery',
+        includePotentials: true,
+        scalePresets: [
+          { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
+          { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
+          { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
+        ],
+        preserveHierarchy: true
+      });
 
-      for (let i = 0; i < traces.length; i += batchSize) {
-        const end = Math.min(i + batchSize, traces.length);
-        for (let j = i; j < end; j++) {
-          const trace = traces[j];
-          const sig = createSignature(trace.id, trace.points);
-          if (sig) {
-            signatures.push(sig);
-            tracks.push([trace.id, trace.points]);
-            sportTypes[trace.id] = trace.sportType ?? 'Ride';
-          }
-        }
-        analysisProgress = { phase: 'Creating signatures', current: end, total: traces.length };
-        await new Promise((r) => setTimeout(r, 0));
-      }
+      const traces = traceStore.traces.map((t) => ({
+        id: t.id,
+        points: t.points.map((p) => ({ latitude: p.latitude, longitude: p.longitude, elevation: p.elevation })),
+        sportType: t.sportType ?? 'Ride'
+      }));
 
-      analysisProgress = { phase: 'Grouping routes', current: 0, total: 1 };
-      await new Promise((r) => setTimeout(r, 0));
-      const groups = groupRoutes(signatures);
+      const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
+        analysisProgress = { phase, current, total };
+      });
 
-      let sections: FrequentSection[] = [];
-      if (tracks.length >= 3) {
-        analysisProgress = { phase: 'Detecting sections', current: 0, total: 1 };
-        await new Promise((r) => setTimeout(r, 0));
-        try {
-          const sectionConfig = JSON.stringify({
-            proximityThreshold,
-            minSectionLength,
-            maxSectionLength: 5000,
-            minActivities,
-            clusterTolerance: 80,
-            samplePoints: 50,
-            detectionMode: 'discovery',
-            includePotentials: true,
-            scalePresets: [
-              { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
-              { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
-              { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
-            ],
-            preserveHierarchy: true
-          });
-          sections = detectSections(tracks, sportTypes, groups, sectionConfig);
-        } catch (e) {
-          sectionError = `Section detection failed: ${e}`;
-        }
+      console.timeEnd('[tracematch] analysis:total');
+      console.log(
+        `[tracematch] Analysis: ${result.signatures.length} sigs, ${result.groups.length} groups, ${result.sections.length} sections`
+      );
+
+      if (result.sections.length === 0 && traceStore.traces.length >= 3) {
+        sectionError = 'No sections detected with current settings.';
       }
 
       analysisProgress = { phase: 'Saving results', current: 0, total: 1 };
       await traceStore.saveAnalysis({
-        signatures,
-        groups,
-        sections,
+        signatures: result.signatures,
+        groups: result.groups,
+        sections: result.sections,
         analyzedAt: Date.now()
       });
     } catch (e) {
@@ -980,11 +993,36 @@
 
       {#if mapDragOver}
         <div class="map-drop-overlay">Drop GPX files here</div>
-      {/if}
-      {#if !wasmReady && !error && !mapDragOver}
+      {:else if traceStore.loading && traceStore.loadProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Loading traces {traceStore.loadProgress.current}/{traceStore.loadProgress.total}
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {traceStore.loadProgress.current / traceStore.loadProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if importProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Importing {importProgress.current}/{importProgress.total} files
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {importProgress.current / importProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if renderProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Rendering {renderProgress.current}/{renderProgress.total} traces
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {renderProgress.current / renderProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if !wasmReady && !error}
         <div class="map-overlay">Loading WASM engine...</div>
-      {/if}
-      {#if traceStore.traces.length === 0 && !mapDragOver}
+      {:else if traceStore.traces.length === 0}
         <div class="map-overlay">Drop GPX files anywhere or use the sidebar</div>
       {/if}
     </div>
@@ -1519,6 +1557,29 @@
     pointer-events: none;
     z-index: 1000;
     box-shadow: var(--shadow-lg);
+  }
+
+  .overlay-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    min-width: 180px;
+  }
+
+  .overlay-bar {
+    width: 100%;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .overlay-fill {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 2px;
+    transition: width 0.15s ease-out;
   }
 
   .map-drop-overlay {
