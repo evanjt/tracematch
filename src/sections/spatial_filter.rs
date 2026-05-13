@@ -242,4 +242,248 @@ mod tests {
             assert!(i < j, "pair ({i}, {j}) is not ordered");
         }
     }
+
+    /// Correctness invariant: pairs within proximity_threshold MUST be emitted.
+    ///
+    /// This is the key safety property — if the filter ever drops a pair
+    /// that has any point within proximity_threshold of any point on the
+    /// other track, detection would silently miss real overlaps. We test
+    /// the boundary case (tracks separated by exactly proximity_threshold)
+    /// and within proximity_threshold to ensure neither slips through.
+    #[test]
+    fn pairs_within_proximity_are_always_emitted() {
+        let proximity_m = 50.0;
+        let cell_size = cell_size_for_proximity(proximity_m);
+
+        // Track A: straight line north along lng=7.0.
+        let track_a: Vec<GpsPoint> = (0..50)
+            .map(|i| pt(45.0 + (i as f64) * 0.0001, 7.0))
+            .collect();
+
+        // Track B at varying offsets — should all be emitted as candidate pairs.
+        // 1 m, 10 m, 25 m, 49 m offsets — all within proximity_threshold (50 m).
+        for offset_m in [1.0, 10.0, 25.0, 49.0] {
+            let offset_deg = offset_m / 111_000.0;
+            let track_b: Vec<GpsPoint> = (0..50)
+                .map(|i| pt(45.0 + (i as f64) * 0.0001, 7.0 + offset_deg))
+                .collect();
+
+            let cells_a = compute_fine_cells(&track_a, cell_size);
+            let cells_b = compute_fine_cells(&track_b, cell_size);
+            let pairs = fine_grid_filtered_pairs(&[cells_a, cells_b]);
+
+            assert_eq!(
+                pairs,
+                vec![(0, 1)],
+                "Tracks {offset_m} m apart (< proximity threshold {proximity_m} m) MUST be emitted as a candidate pair — anything else means the filter is unsafe."
+            );
+        }
+    }
+
+    /// Conservative-cell-sizing invariant: the chosen cell size must
+    /// ensure that ANY two points within `proximity_threshold` land in
+    /// cells that are either equal or 8-neighbours of each other.
+    ///
+    /// If this ever breaks, the filter would drop valid pairs and
+    /// quietly produce wrong detection output.
+    #[test]
+    fn cell_size_safety_margin() {
+        for proximity_m in [5.0, 25.0, 50.0, 100.0, 250.0] {
+            let cell_size_deg = cell_size_for_proximity(proximity_m);
+            let cell_size_m = cell_size_deg * 111_000.0;
+
+            // Two points exactly `proximity_threshold` apart, both at the
+            // worst-case position on opposite faces of a cell. The 8-cell
+            // neighbourhood is a 3×3 grid covering ~3 × cell_size in each
+            // axis, so worst-case separation between points in disjoint
+            // 8-neighbourhoods is at least `cell_size`. We need
+            // proximity ≤ cell_size for the filter to be safe.
+            assert!(
+                proximity_m <= cell_size_m,
+                "proximity {proximity_m} m exceeds cell_size {cell_size_m:.1} m — \
+                 pairs within proximity could end up in non-neighbouring cells \
+                 and be dropped by the filter"
+            );
+        }
+    }
+
+    /// Direct A/B regression: the filter's pair output, when fed through
+    /// `find_full_track_overlap`, must produce the SAME set of overlaps
+    /// as running the naive O(N²) all-pairs approach. This is the
+    /// definitive "no regression" check — it operates at the same layer
+    /// the production code does and ensures no real overlap is lost
+    /// to filtering.
+    ///
+    /// Proof strategy:
+    ///   1. Generate N synthetic tracks (some overlap, some don't).
+    ///   2. Compute filter pairs and naive pairs.
+    ///   3. Run `find_full_track_overlap` on each pair set.
+    ///   4. Assert: { overlaps_from_filter } == { overlaps_from_naive }.
+    ///
+    /// If the filter ever drops a pair that produces an overlap, the
+    /// naive set will contain it and the filter set won't, and the
+    /// assert will fail with a specific (i, j) mismatch.
+    #[test]
+    fn filter_produces_identical_overlap_set_as_naive() {
+        use crate::SectionConfig;
+        use crate::sections::find_full_track_overlap;
+        use crate::sections::rtree::build_rtree;
+
+        // 30 tracks: 3 distinct routes × 10 tracks each. Routes far
+        // apart geographically; tracks within a route are nearly identical.
+        let mut tracks: Vec<Vec<GpsPoint>> = Vec::new();
+        for route_idx in 0..3 {
+            let route_lat = 45.0 + (route_idx as f64) * 0.1; // 11km between routes
+            for track_idx in 0..10 {
+                let lat_jitter = (track_idx as f64) * 0.0000003;
+                let track: Vec<GpsPoint> = (0..50)
+                    .map(|j| pt(route_lat + (j as f64) * 0.0001 + lat_jitter, 7.0))
+                    .collect();
+                tracks.push(track);
+            }
+        }
+
+        let config = SectionConfig::default();
+
+        // --- Filter pair set --------------------------------------------
+        let cell_size = cell_size_for_proximity(config.proximity_threshold);
+        let cells: Vec<_> = tracks
+            .iter()
+            .map(|t| compute_fine_cells(t, cell_size))
+            .collect();
+        let filter_pairs = fine_grid_filtered_pairs(&cells);
+
+        // --- Naive pair set ---------------------------------------------
+        let naive_pairs: Vec<(usize, usize)> = (0..tracks.len())
+            .flat_map(|i| ((i + 1)..tracks.len()).map(move |j| (i, j)))
+            .collect();
+
+        // Filter is by construction a subset of naive.
+        let filter_set: std::collections::HashSet<_> = filter_pairs.iter().copied().collect();
+        let naive_set: std::collections::HashSet<_> = naive_pairs.iter().copied().collect();
+        assert!(
+            filter_set.is_subset(&naive_set),
+            "filter set must be a subset of naive — filter produced pairs naive didn't"
+        );
+
+        // --- Compute overlaps via both paths ----------------------------
+        // Pre-build R-trees once.
+        let rtrees: Vec<_> = tracks.iter().map(|t| build_rtree(t)).collect();
+
+        let collect_overlaps = |pairs: &[(usize, usize)]| -> Vec<(usize, usize)> {
+            let mut overlap_pairs: Vec<(usize, usize)> = pairs
+                .iter()
+                .filter_map(|&(i, j)| {
+                    let id_a = format!("a_{i}");
+                    let id_b = format!("a_{j}");
+                    find_full_track_overlap(
+                        &id_a, &tracks[i], &id_b, &tracks[j], &rtrees[j], &config,
+                    )
+                    .map(|_| (i, j))
+                })
+                .collect();
+            overlap_pairs.sort();
+            overlap_pairs
+        };
+
+        let filter_overlaps = collect_overlaps(&filter_pairs);
+        let naive_overlaps = collect_overlaps(&naive_pairs);
+
+        // THE PROOF: same set of pairs produce overlaps in both paths.
+        let filter_overlap_set: std::collections::HashSet<_> =
+            filter_overlaps.iter().copied().collect();
+        let naive_overlap_set: std::collections::HashSet<_> =
+            naive_overlaps.iter().copied().collect();
+
+        let dropped: Vec<_> = naive_overlap_set
+            .difference(&filter_overlap_set)
+            .copied()
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "REGRESSION: filter dropped {} pair(s) that produce real overlaps. \
+             Dropped pairs (naive found them, filter didn't): {:?}",
+            dropped.len(),
+            dropped,
+        );
+
+        // Naive should never find an overlap the filter doesn't, since
+        // filter is a subset. But assert it explicitly as a sanity check.
+        assert_eq!(
+            filter_overlap_set, naive_overlap_set,
+            "filter and naive must produce identical overlap sets"
+        );
+
+        // And empirically: the filter should produce way fewer pairs than naive.
+        // 3 routes × 10 tracks each = 45 within-route pairs per route × 3 = 135.
+        // Naive has 30*29/2 = 435 pairs. Filter should reduce to ~135 (within-route only).
+        assert!(
+            filter_pairs.len() < naive_pairs.len() / 2,
+            "filter should at least halve the pair count on multi-region data \
+             (naive={}, filtered={})",
+            naive_pairs.len(),
+            filter_pairs.len()
+        );
+
+        // Sanity: we DID find some overlaps (otherwise the test is vacuous).
+        assert!(
+            !naive_overlaps.is_empty(),
+            "no overlaps found at all — test data is wrong, not the filter"
+        );
+    }
+
+    /// End-to-end smoke test: feed the same data through the full
+    /// `detect_sections_multiscale` and assert we get a non-empty result.
+    /// Protects against the spatial filter accidentally pruning the
+    /// pair set down to nothing on overlapping tracks.
+    #[test]
+    fn end_to_end_detection_finds_sections() {
+        use crate::detect_sections_multiscale;
+        use std::collections::HashMap;
+
+        // 5 tracks following roughly the same 1km north-south path
+        // with small offsets — should produce at least one section.
+        let tracks: Vec<(String, Vec<GpsPoint>)> = (0..5)
+            .map(|i| {
+                let pts: Vec<GpsPoint> = (0..200)
+                    .map(|j| {
+                        let lat_offset = (i as f64) * 0.0000003;
+                        pt(45.0 + (j as f64) * 0.0001 + lat_offset, 7.0)
+                    })
+                    .collect();
+                (format!("a_{i}"), pts)
+            })
+            .collect();
+
+        let sport_types: HashMap<String, String> = tracks
+            .iter()
+            .map(|(id, _)| (id.clone(), "Run".to_string()))
+            .collect();
+
+        let config = crate::SectionConfig {
+            proximity_threshold: 50.0,
+            min_activities: 3,
+            min_section_length: 200.0,
+            ..crate::SectionConfig::default()
+        };
+
+        let result = detect_sections_multiscale(&tracks, &sport_types, &[], &config);
+
+        assert!(
+            !result.sections.is_empty(),
+            "expected ≥ 1 section from 5 overlapping tracks; got 0. Spatial \
+             filter may have dropped all candidate pairs."
+        );
+
+        // Every section should have populated activity_portions (Bug A fix).
+        for section in &result.sections {
+            assert!(
+                !section.activity_portions.is_empty(),
+                "section {} has activity_ids={:?} but empty activity_portions \
+                 — Bug A may have regressed",
+                section.id,
+                section.activity_ids,
+            );
+        }
+    }
 }

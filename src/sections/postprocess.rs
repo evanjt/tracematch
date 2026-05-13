@@ -2012,4 +2012,111 @@ mod tests {
             }
         }
     }
+
+    /// Build a minimal FrequentSection for filter-behaviour tests.
+    /// `polyline_pts` controls whether the polyline gate is met
+    /// (filter requires ≥ 8 points).
+    fn stub_section_for_filter(
+        id: &str,
+        distance_m: f64,
+        visits: u32,
+        polyline_pts: usize,
+    ) -> FrequentSection {
+        FrequentSection {
+            id: id.to_string(),
+            name: None,
+            sport_type: "Run".to_string(),
+            polyline: (0..polyline_pts)
+                .map(|i| GpsPoint::new(45.0 + (i as f64) * 0.0001, 7.0))
+                .collect(),
+            representative_activity_id: String::new(),
+            activity_ids: (0..visits).map(|i| format!("a_{i}")).collect(),
+            activity_portions: Vec::new(),
+            route_ids: vec![],
+            visit_count: visits,
+            distance_meters: distance_m,
+            activity_traces: HashMap::new(),
+            confidence: 0.5,
+            observation_count: visits,
+            average_spread: 1.0,
+            point_density: vec![],
+            scale: None,
+            is_user_defined: false,
+            stability: 0.0,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        }
+    }
+
+    /// Filter must DROP a 150 m section with only 2 visits — base requires 6.
+    #[test]
+    fn quality_filter_drops_short_low_visit() {
+        let s = stub_section_for_filter("low", 150.0, 2, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert!(
+            kept.is_empty(),
+            "expected 150 m / 2-visit section to be dropped"
+        );
+    }
+
+    /// Filter must KEEP a 1 km section with 2 visits — base requires 2 for ≥ 800 m.
+    #[test]
+    fn quality_filter_keeps_long_two_visit() {
+        let s = stub_section_for_filter("long2", 1000.0, 2, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert_eq!(kept.len(), 1, "expected 1 km / 2-visit section to survive");
+    }
+
+    /// Filter must KEEP a short section with enough visits — 150m needs 6.
+    #[test]
+    fn quality_filter_keeps_short_high_visit() {
+        let s = stub_section_for_filter("short_many", 150.0, 6, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// Filter must DROP a section with too few polyline points.
+    #[test]
+    fn quality_filter_drops_underpopulated_polyline() {
+        let s = stub_section_for_filter("sparse", 1000.0, 10, 5); // only 5 points
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert!(
+            kept.is_empty(),
+            "expected section with < 8 polyline points to be dropped"
+        );
+    }
+
+    /// Dataset-size bonus: a 1 km / 2-visit section survives at N=50 but
+    /// is filtered at N=300 (>200 → +1 bonus → requires 3 visits).
+    /// Protects against future regressions of the softened bonus tier.
+    #[test]
+    fn quality_filter_dataset_size_bonus_kicks_in_above_200() {
+        let s_small = stub_section_for_filter("k50", 1000.0, 2, 20);
+        let kept_small = filter_low_quality_sections(vec![s_small], 50);
+        assert_eq!(kept_small.len(), 1, "should survive at N=50");
+
+        let s_large = stub_section_for_filter("k300", 1000.0, 2, 20);
+        let kept_large = filter_low_quality_sections(vec![s_large], 300);
+        assert!(
+            kept_large.is_empty(),
+            "expected dataset-size bonus to drop 2-visit section at N=300"
+        );
+    }
+
+    /// Bug B regression: the prior bonus tier was (0 / +1 / +2). The +2
+    /// tier at N>200 was filtering valid sections. Verify the softened
+    /// tier (0 / +1) doesn't reintroduce the over-filtering.
+    #[test]
+    fn quality_filter_bonus_does_not_overfilter_at_large_n() {
+        // 1 km section with 3 visits at N=500: base=2, bonus=1, requires 3 → keeps.
+        let s = stub_section_for_filter("survivor", 1000.0, 3, 20);
+        let kept = filter_low_quality_sections(vec![s], 500);
+        assert_eq!(
+            kept.len(),
+            1,
+            "1 km / 3-visit section at N=500 should survive softened bonus"
+        );
+    }
 }

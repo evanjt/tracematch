@@ -33,7 +33,7 @@ mod portions;
 mod postprocess;
 pub mod progress;
 mod rtree;
-mod spatial_filter;
+pub mod spatial_filter;
 mod traces;
 
 use crate::geo_utils::{bounds_overlap, compute_bounds};
