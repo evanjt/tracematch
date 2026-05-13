@@ -141,7 +141,13 @@ pub fn fine_grid_filtered_pairs(track_cells: &[HashSet<FineGridCell>]) -> Vec<(u
         }
     }
 
-    candidate_pairs.into_iter().collect()
+    // Sort for deterministic output: the HashSet iteration order is
+    // randomised per process, and downstream section detection
+    // (clustering, consensus) is sensitive to pair order via parallel
+    // collect order and float-add associativity.
+    let mut out: Vec<(usize, usize)> = candidate_pairs.into_iter().collect();
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]
@@ -377,7 +383,12 @@ mod tests {
                     let id_a = format!("a_{i}");
                     let id_b = format!("a_{j}");
                     find_full_track_overlap(
-                        &id_a, &tracks[i], &id_b, &tracks[j], &rtrees[j], &config,
+                        &id_a,
+                        &tracks[i],
+                        &id_b,
+                        &tracks[j],
+                        &rtrees[j],
+                        &config,
                     )
                     .map(|_| (i, j))
                 })

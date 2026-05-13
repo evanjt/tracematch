@@ -9,7 +9,10 @@ use crate::geo_utils::haversine_distance;
 use crate::grouping_filter::{
     RouteEndpointCells, cell_size_for_endpoint_threshold, endpoint_grid_filtered_pairs,
 };
-use crate::matching::{calculate_checkpoint_match, compare_routes};
+use crate::matching::{
+    PreparedRoute, calculate_checkpoint_match, compare_prepared_routes, compare_routes,
+    prepare_route,
+};
 use crate::union_find::UnionFind;
 use crate::{
     ActivityMatchInfo, Bounds, GpsPoint, GroupingResult, MatchConfig, MatchResult, RouteGroup,
@@ -174,6 +177,12 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
         .map(|s| (s.activity_id.as_str(), s))
         .collect();
 
+    // Precompute resample + R-tree per signature once. Without this the
+    // hot loop rebuilds the same R-trees on every pair comparison — at
+    // 91k pairs that's 182k R-tree builds and Vec allocations, which is
+    // catastrophic in WASM.
+    let prepared: Vec<PreparedRoute> = signatures.iter().map(|s| prepare_route(s, config)).collect();
+
     let mut uf = UnionFind::with_capacity(signatures.len());
     for sig in signatures {
         uf.make_set(sig.activity_id.clone());
@@ -188,7 +197,8 @@ pub fn group_signatures(signatures: &[RouteSignature], config: &MatchConfig) -> 
         if !endpoints_could_group(sig1, sig2, config) {
             continue;
         }
-        if let Some(match_result) = compare_routes(sig1, sig2, config)
+        if let Some(match_result) =
+            compare_prepared_routes(sig1, &prepared[i], sig2, &prepared[j], config)
             && should_group_routes(sig1, sig2, &match_result, config)
         {
             uf.union(&sig1.activity_id, &sig2.activity_id);
@@ -257,6 +267,13 @@ pub fn group_signatures_parallel(
         .collect();
     let candidate_pairs = endpoint_grid_filtered_pairs(&endpoints);
 
+    // Precompute resample + R-tree per signature (parallel). Avoids
+    // rebuilding R-trees inside every pair comparison.
+    let prepared: Vec<PreparedRoute> = signatures
+        .par_iter()
+        .map(|s| prepare_route(s, config))
+        .collect();
+
     // Find matches in parallel over the pruned pair set.
     let matches: Vec<(String, String)> = candidate_pairs
         .par_iter()
@@ -271,7 +288,8 @@ pub fn group_signatures_parallel(
                 return None;
             }
 
-            let match_result = compare_routes(sig1, sig2, config)?;
+            let match_result =
+                compare_prepared_routes(sig1, &prepared[i], sig2, &prepared[j], config)?;
             if !should_group_routes(sig1, sig2, &match_result, config) {
                 return None;
             }

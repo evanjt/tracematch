@@ -1,7 +1,7 @@
 //! Activity portion computation for pace comparison.
 
 use super::overlap::OverlapCluster;
-use super::rtree::{IndexedPoint, build_rtree};
+use super::rtree::{build_rtree, IndexedPoint};
 use super::{SectionConfig, SectionPortion};
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
@@ -18,7 +18,11 @@ pub fn compute_activity_portions(
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
-    let activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
+    // Sort so iteration order is stable across runs (HashSet iteration
+    // is randomized, which propagated into section detection output
+    // non-determinism).
+    let mut activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
+    activity_ids.sort();
 
     let compute_for_activity = |activity_id: &&String| -> Vec<SectionPortion> {
         let mut portions = Vec::new();
@@ -352,7 +356,6 @@ fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> 
     let mut best_val = smoothed[0];
     let mut best_pos = 0usize;
 
-    #[allow(clippy::needless_range_loop)]
     for i in 1..smoothed.len() {
         if searching_for_peak {
             // Rising — track the running maximum
@@ -388,7 +391,11 @@ fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> 
 
 /// Find lap boundaries for a loop section based on cumulative arc distance.
 /// Returns positions within the smoothed array where new laps start.
-fn find_loop_boundaries(smoothed: &[usize], reference: &[GpsPoint], ref_length: f64) -> Vec<usize> {
+fn find_loop_boundaries(
+    smoothed: &[usize],
+    reference: &[GpsPoint],
+    ref_length: f64,
+) -> Vec<usize> {
     if smoothed.len() < 5 || reference.len() < 3 {
         return Vec::new();
     }
@@ -459,7 +466,8 @@ mod tests {
             for i in 0..points_per_pass {
                 let frac = i as f64 / (points_per_pass - 1) as f64;
                 let ref_frac = if forward { frac } else { 1.0 - frac };
-                let ref_idx = (ref_frac * (reference.len() - 1) as f64).round() as usize;
+                let ref_idx =
+                    (ref_frac * (reference.len() - 1) as f64).round() as usize;
                 let ref_point = &reference[ref_idx.min(reference.len() - 1)];
                 track.push(GpsPoint::new(
                     ref_point.latitude + 0.000005 * (pass as f64), // tiny offset
@@ -478,7 +486,8 @@ mod tests {
         let center_lng = 7.0;
         let mut points: Vec<GpsPoint> = (0..num_points)
             .map(|i| {
-                let angle = 2.0 * std::f64::consts::PI * (i as f64) / (num_points as f64);
+                let angle =
+                    2.0 * std::f64::consts::PI * (i as f64) / (num_points as f64);
                 GpsPoint::new(
                     center_lat + radius_deg * angle.cos(),
                     center_lng + radius_deg * angle.sin(),
@@ -545,7 +554,8 @@ mod tests {
             results.len()
         );
         let forward_count = results.iter().filter(|r| r.2 == Direction::Same).count();
-        let reverse_count = results.iter().filter(|r| r.2 == Direction::Reverse).count();
+        let reverse_count =
+            results.iter().filter(|r| r.2 == Direction::Reverse).count();
         assert_eq!(forward_count, 3, "Expected 3 forward passes");
         assert_eq!(reverse_count, 2, "Expected 2 reverse passes");
     }
@@ -625,12 +635,7 @@ mod tests {
 
         let turns = find_linear_turning_points(&smoothed, 50);
 
-        assert_eq!(
-            turns.len(),
-            1,
-            "Expected 1 turning point, got {}",
-            turns.len()
-        );
+        assert_eq!(turns.len(), 1, "Expected 1 turning point, got {}", turns.len());
         // Turning point should be near index 49 (the peak)
         assert!(
             turns[0] >= 45 && turns[0] <= 55,

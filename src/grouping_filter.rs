@@ -149,7 +149,12 @@ pub fn endpoint_grid_filtered_pairs(endpoints: &[RouteEndpointCells]) -> Vec<(us
         // for-loop is a no-op duplicate. The HashSet handles it.
     }
 
-    candidate_pairs.into_iter().collect()
+    // Sort for deterministic output: the HashSet iteration order is
+    // randomised per process. Stable pair order makes downstream
+    // grouping output reproducible across runs.
+    let mut out: Vec<(usize, usize)> = candidate_pairs.into_iter().collect();
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]
@@ -204,11 +209,7 @@ mod tests {
         let r0 = RouteEndpointCells::new(&p1, &p2, cell_size);
         let r1 = RouteEndpointCells::new(&p2, &p1, cell_size);
         let pairs = endpoint_grid_filtered_pairs(&[r0, r1]);
-        assert_eq!(
-            pairs,
-            vec![(0, 1)],
-            "reverse-direction pair must be emitted"
-        );
+        assert_eq!(pairs, vec![(0, 1)], "reverse-direction pair must be emitted");
     }
 
     #[test]
@@ -301,9 +302,9 @@ mod tests {
     /// accept, this test fails with the specific (i, j) that was lost.
     #[test]
     fn filter_produces_identical_groups_as_naive() {
-        use crate::grouping::should_group_routes;
         use crate::matching::compare_routes;
         use crate::{MatchConfig, RouteSignature};
+        use crate::grouping::should_group_routes;
 
         // Build 30 synthetic signatures: 3 distinct "real" routes × 10
         // similar variants (slight start/end jitter within threshold)
@@ -406,4 +407,5 @@ mod tests {
             "test produced zero grouped pairs — test data is wrong, not the filter"
         );
     }
+
 }

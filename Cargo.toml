@@ -29,6 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rayon = { version = "1.10", optional = true }
 rand = { version = "0.8", optional = true }
+web-time = "1.1"
 
 [dev-dependencies]
 serde_json = "1.0"
@@ -72,7 +73,7 @@ required-features = ["synthetic"]
 [profile.release]
 lto = true
 codegen-units = 1
-opt-level = 3
+opt-level = "s"
 strip = false
 
 [profile.release-mobile]
@@ -91,3 +92,7 @@ path = "examples/route_grouping.rs"
 name = "scaling_report"
 path = "examples/scaling_report.rs"
 required-features = ["synthetic"]
+
+[[example]]
+name = "sion_corpus_report"
+path = "examples/sion_corpus_report.rs"

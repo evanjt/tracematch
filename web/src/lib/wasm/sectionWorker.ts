@@ -5,41 +5,47 @@
  * detection) so the main thread stays responsive throughout. Each step
  * posts progress updates back to the main thread.
  *
- * The worker re-initialises WASM independently of the main thread —
- * each worker has its own WebAssembly.Module instance.
+ * The worker imports the wasm-bindgen JS glue directly from
+ * `./pkg/tracematch_wasm.js`. `wasm-bindgen-rayon` needs `import.meta.url`
+ * to resolve to a real path so it can spawn its rayon worker pool —
+ * the previous blob-URL trick broke that. The pkg directory is
+ * gitignored and populated at container start (see docker-compose.yml).
  */
 
 import type { FrequentSection, GpsPoint, RouteGroup, RouteSignature } from './types';
+// @ts-expect-error — generated at build time, may not exist when this file is type-checked in CI
+import init, {
+  createSignature as wasmCreateSignature,
+  groupRoutes as wasmGroupRoutes,
+  detectSections as wasmDetectSections,
+  // initThreadPool is only present when the parallel feature is enabled.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  initThreadPool,
+} from './pkg/tracematch_wasm.js';
 
-type WasmModule = {
-  default: (input: string) => Promise<unknown>;
-  createSignature: (
-    activityId: string,
-    pointsJson: string,
-    configJson: string,
-  ) => RouteSignature | null;
-  groupRoutes: (signaturesJson: string, configJson: string) => RouteGroup[];
-  detectSections: (
-    tracksJson: string,
-    sportTypesJson: string,
-    groupsJson: string,
-    configJson: string,
-  ) => FrequentSection[];
-};
+let wasmReady: Promise<void> | null = null;
 
-let wasm: WasmModule | null = null;
-
-async function loadWasm(): Promise<WasmModule> {
-  if (wasm) return wasm;
-  const jsResponse = await fetch(new URL('/wasm/tracematch_wasm.js', self.location.href));
-  const jsText = await jsResponse.text();
-  const blob = new Blob([jsText], { type: 'application/javascript' });
-  const blobUrl = URL.createObjectURL(blob);
-  const mod = (await import(/* @vite-ignore */ blobUrl)) as WasmModule;
-  URL.revokeObjectURL(blobUrl);
-  await mod.default(new URL('/wasm/tracematch_wasm_bg.wasm', self.location.href).toString());
-  wasm = mod;
-  return mod;
+async function ensureWasm(): Promise<void> {
+  if (wasmReady) return wasmReady;
+  wasmReady = (async () => {
+    await init();
+    // Spin up the rayon thread pool if available. Falls back silently
+    // when the WASM was built without the `parallel` feature (or when
+    // SharedArrayBuffer is unavailable because COOP/COEP headers are
+    // missing on the host).
+    if (typeof initThreadPool === 'function') {
+      try {
+        const threads = Math.max(1, (self as unknown as { navigator?: { hardwareConcurrency?: number } }).navigator?.hardwareConcurrency ?? 4);
+        await initThreadPool(threads);
+        console.log(`[worker] rayon thread pool initialised with ${threads} threads`);
+      } catch (err) {
+        console.warn('[worker] initThreadPool failed — falling back to single-threaded WASM', err);
+      }
+    } else {
+      console.log('[worker] WASM built without parallel feature — single-threaded execution');
+    }
+  })();
+  return wasmReady;
 }
 
 // --- Message types ---
@@ -64,8 +70,6 @@ export type WorkerResponse =
     }
   | { type: 'analyse:err'; requestId: number; message: string };
 
-// --- Handlers ---
-
 function progress(requestId: number, phase: string, current: number, total: number) {
   self.postMessage({ type: 'analyse:progress', requestId, phase, current, total } satisfies WorkerResponse);
 }
@@ -73,7 +77,7 @@ function progress(requestId: number, phase: string, current: number, total: numb
 async function handleAnalyse(req: AnalyseRequest) {
   try {
     console.time('[worker] wasm-init');
-    const mod = await loadWasm();
+    await ensureWasm();
     console.timeEnd('[worker] wasm-init');
     const traces = req.traces;
 
@@ -88,7 +92,7 @@ async function handleAnalyse(req: AnalyseRequest) {
       const end = Math.min(i + batchSize, traces.length);
       for (let j = i; j < end; j++) {
         const t = traces[j];
-        const sig = mod.createSignature(t.id, JSON.stringify(t.points), '{}');
+        const sig = wasmCreateSignature(t.id, JSON.stringify(t.points), '{}');
         if (sig) {
           signatures.push(sig);
           tracks.push([t.id, t.points]);
@@ -108,7 +112,7 @@ async function handleAnalyse(req: AnalyseRequest) {
     console.timeEnd('[worker] grouping:serialize');
     console.log(`[worker] signatures JSON: ${(sigJson.length / 1024 / 1024).toFixed(1)} MB`);
     console.time('[worker] grouping:wasm');
-    const groups = mod.groupRoutes(sigJson, '{}');
+    const groups = wasmGroupRoutes(sigJson, '{}');
     console.timeEnd('[worker] grouping:wasm');
     console.timeEnd('[worker] grouping');
     console.log(`[worker] ${groups.length} groups`);
@@ -126,7 +130,7 @@ async function handleAnalyse(req: AnalyseRequest) {
       console.timeEnd('[worker] sections:serialize');
       console.log(`[worker] tracks JSON: ${(tracksJson.length / 1024 / 1024).toFixed(1)} MB`);
       console.time('[worker] sections:wasm');
-      sections = mod.detectSections(tracksJson, sportTypesJson, groupsJson, req.sectionConfig);
+      sections = wasmDetectSections(tracksJson, sportTypesJson, groupsJson, req.sectionConfig);
       console.timeEnd('[worker] sections:wasm');
       console.timeEnd('[worker] sections');
       console.log(`[worker] ${sections.length} sections detected`);
