@@ -45,6 +45,9 @@
   // Maps every phase string (including transitions and the init phase) to
   // the step index it belongs to. Step index = 0 for everything before
   // grouping; transitions hop to the index of the upcoming real step.
+  // The "Finding dense regions" / "Assembling sections" labels come from
+  // the density-grid section detection in Rust (re-labelled in
+  // sectionWorker.ts via PHASE_LABELS).
   const PHASE_TO_STEP: Record<string, number> = {
     'Preparing': 0,
     'Initializing WASM engine': 0,
@@ -54,8 +57,8 @@
     'Comparing route pairs': 1,
     'Serializing tracks for section detection': 2,
     'Preparing section detection': 2,
-    'Building spatial indices': 2,
-    'Finding section overlaps': 3,
+    'Finding dense regions': 2,
+    'Assembling sections': 3,
     'Post-processing sections': 4,
     'Finalizing results': 5,
     'Saving results': 5
@@ -904,7 +907,7 @@
               {/if}
             </div>
             <div class="progress-bar progress-bar-step">
-              <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+              <div class="progress-fill" style="width: {analysisProgress.total > 1 ? Math.min(analysisProgress.current / analysisProgress.total * 100, 100) : 50}%"></div>
             </div>
             <div class="progress-overall-row">
               <span>Overall</span>
@@ -992,7 +995,7 @@
                 {/if}
               </div>
               <div class="progress-bar progress-bar-step">
-                <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+                <div class="progress-fill" style="width: {analysisProgress.total > 1 ? Math.min(analysisProgress.current / analysisProgress.total * 100, 100) : 50}%"></div>
               </div>
               <div class="progress-overall-row">
                 <span>Overall</span>

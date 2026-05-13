@@ -24,9 +24,8 @@ use std::time::Instant;
 use rstar::{PointDistance, RTree};
 use tracematch::geo_utils::haversine_distance;
 use tracematch::sections::{
-    FullTrackOverlap, IndexedPoint, OverlapCluster, build_rtree,
-    filter_low_quality_sections, merge_nearby_sections, process_cluster,
-    remove_overlapping_sections,
+    FullTrackOverlap, IndexedPoint, OverlapCluster, build_rtree, filter_low_quality_sections,
+    merge_nearby_sections, process_cluster, remove_overlapping_sections,
 };
 use tracematch::{
     FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, UnionFind,
@@ -582,13 +581,17 @@ fn run_hybrid_pipeline(
     let mut sections: Vec<FrequentSection> = clusters
         .into_par_iter()
         .enumerate()
-        .filter_map(|(idx, c)| process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None))
+        .filter_map(|(idx, c)| {
+            process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None)
+        })
         .collect();
     #[cfg(not(feature = "parallel"))]
     let mut sections: Vec<FrequentSection> = clusters
         .into_iter()
         .enumerate()
-        .filter_map(|(idx, c)| process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None))
+        .filter_map(|(idx, c)| {
+            process_cluster(idx, c, &sport, &track_map, activity_to_route, config, None)
+        })
         .collect();
 
     // 3. Postprocess: same three public steps as detect_sections_multiscale
@@ -651,10 +654,8 @@ fn bidirectional_match(
     if a.is_empty() || b.is_empty() {
         return (0, 0);
     }
-    let a_trees: Vec<RTree<IndexedPoint>> =
-        a.iter().map(|s| build_rtree(&s.polyline)).collect();
-    let b_trees: Vec<RTree<IndexedPoint>> =
-        b.iter().map(|s| build_rtree(&s.polyline)).collect();
+    let a_trees: Vec<RTree<IndexedPoint>> = a.iter().map(|s| build_rtree(&s.polyline)).collect();
+    let b_trees: Vec<RTree<IndexedPoint>> = b.iter().map(|s| build_rtree(&s.polyline)).collect();
 
     let mut ab = 0;
     for (ai, sa) in a.iter().enumerate() {
@@ -882,7 +883,10 @@ fn main() {
         "## Density-grid stage 1 (candidate detection)\n  Candidates:          {}\n  Largest candidate:   {} contributors, {:.0} m\n  Time:                {}\n",
         candidates.len(),
         candidates.first().map(|s| s.visit_count()).unwrap_or(0),
-        candidates.first().map(|s| s.max_distance_m()).unwrap_or(0.0),
+        candidates
+            .first()
+            .map(|s| s.max_distance_m())
+            .unwrap_or(0.0),
         fmt_ms(dur_dg.as_millis())
     );
 
@@ -996,20 +1000,44 @@ fn main() {
     // ---- GeoJSON export for visualisation ----
     println!("\n## GeoJSON output (drag into geojson.io or QGIS)\n");
     let min_acts = section_config.min_activities as usize;
-    match write_cells_geojson("density_cells.geojson", &cell_to_tracks, &grid, min_acts, true) {
-        Ok(n) => println!("  density_cells.geojson         {} hot cells (≥{} tracks each)", n, min_acts),
+    match write_cells_geojson(
+        "density_cells.geojson",
+        &cell_to_tracks,
+        &grid,
+        min_acts,
+        true,
+    ) {
+        Ok(n) => println!(
+            "  density_cells.geojson         {} hot cells (≥{} tracks each)",
+            n, min_acts
+        ),
         Err(e) => eprintln!("  density_cells.geojson FAILED: {}", e),
     }
-    match write_cells_geojson("density_all_cells.geojson", &cell_to_tracks, &grid, min_acts, false) {
-        Ok(n) => println!("  density_all_cells.geojson     {} total cells (full heatmap)", n),
+    match write_cells_geojson(
+        "density_all_cells.geojson",
+        &cell_to_tracks,
+        &grid,
+        min_acts,
+        false,
+    ) {
+        Ok(n) => println!(
+            "  density_all_cells.geojson     {} total cells (full heatmap)",
+            n
+        ),
         Err(e) => eprintln!("  density_all_cells.geojson FAILED: {}", e),
     }
     match write_sections_geojson("density_hybrid_sections.geojson", &hybrid, "hybrid") {
-        Ok(n) => println!("  density_hybrid_sections.geojson  {} polylines (hybrid pipeline)", n),
+        Ok(n) => println!(
+            "  density_hybrid_sections.geojson  {} polylines (hybrid pipeline)",
+            n
+        ),
         Err(e) => eprintln!("  density_hybrid_sections.geojson FAILED: {}", e),
     }
     match write_sections_geojson("density_baseline_sections.geojson", &baseline, "baseline") {
-        Ok(n) => println!("  density_baseline_sections.geojson {} polylines (pairwise baseline)", n),
+        Ok(n) => println!(
+            "  density_baseline_sections.geojson {} polylines (pairwise baseline)",
+            n
+        ),
         Err(e) => eprintln!("  density_baseline_sections.geojson FAILED: {}", e),
     }
     let _ = dur_load + dur_sig;

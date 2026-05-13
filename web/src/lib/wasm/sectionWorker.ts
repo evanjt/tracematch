@@ -19,10 +19,16 @@ import init, {
 
 // Map raw phase strings from the Rust library to human-readable labels
 // for the progress overlay. Falls back to the raw string when unknown.
+//
+// The `building_rtrees` / `finding_overlaps` keys are retained from the
+// legacy pairwise pipeline so the Rust→JS protocol stays stable, but
+// section detection now uses density-grid clustering — the labels reflect
+// what the algorithm actually does (rasterise tracks into cells, then
+// assemble clusters into candidate sections).
 const PHASE_LABELS: Record<string, string> = {
   comparing_pairs: 'Comparing route pairs',
-  building_rtrees: 'Building spatial indices',
-  finding_overlaps: 'Finding section overlaps',
+  building_rtrees: 'Finding dense regions',
+  finding_overlaps: 'Assembling sections',
   postprocessing: 'Post-processing sections',
 };
 

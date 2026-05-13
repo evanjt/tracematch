@@ -1,17 +1,7 @@
 //! Route-section utilities: find/split sections within a single GPS route.
 //!
-//! Originally this module also housed `detect_sections_optimized`, a
-//! standalone multi-track detector based on a coarse 5 km grid and 100-point
-//! downsampling. That path was superseded by the multiscale +
-//! `spatial_filter::fine_grid_filtered_pairs` pipeline (in `sections/mod.rs`)
-//! which is faster on real data and produces the same (or better) sections.
-//!
-//! What remains here:
-//! - `downsample_track` — shared with the multiscale path.
-//! - `find_sections_in_route`, `find_all_section_spans_in_route` and friends —
-//!   used to project known sections onto a single new route.
-//! - `split_section_at_index`, `split_section_at_point`,
-//!   `recalculate_section_polyline` — section manipulation primitives.
+//! Used to project known sections onto a single new route, and to
+//! manipulate stored sections (split / recalculate polyline).
 
 use super::{FrequentSection, SectionConfig};
 use crate::GpsPoint;
@@ -20,34 +10,6 @@ use crate::geo_utils::haversine_distance;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// Downsample a track to approximately target_points
-pub(crate) fn downsample_track(track: &[GpsPoint], target_points: usize) -> Vec<GpsPoint> {
-    if track.len() <= target_points {
-        return track.to_vec();
-    }
-
-    let step = track.len() as f64 / target_points as f64;
-    let mut result = Vec::with_capacity(target_points + 2);
-
-    // Always include first point
-    result.push(track[0]);
-
-    // Sample intermediate points
-    for i in 1..target_points {
-        let idx = (i as f64 * step) as usize;
-        if idx < track.len() && idx != 0 {
-            result.push(track[idx]);
-        }
-    }
-
-    // Always include last point
-    if track.len() > 1 {
-        result.push(track[track.len() - 1]);
-    }
-
-    result
-}
 
 /// A section match found within a route
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,22 +437,4 @@ pub fn recalculate_section_polyline(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_downsample() {
-        let track: Vec<GpsPoint> = (0..1000)
-            .map(|i| GpsPoint::new(46.0 + i as f64 * 0.0001, 7.0 + i as f64 * 0.0001))
-            .collect();
-
-        let downsampled = downsample_track(&track, 50);
-        assert!(downsampled.len() <= 52); // 50 + first + last
-        assert!(downsampled.len() >= 50);
-
-        // First and last should be preserved
-        assert_eq!(downsampled[0].latitude, track[0].latitude);
-        assert_eq!(
-            downsampled.last().unwrap().latitude,
-            track.last().unwrap().latitude
-        );
-    }
 }

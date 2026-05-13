@@ -57,13 +57,13 @@ pub use matching::compare_routes;
 // Route grouping algorithms
 pub mod grouping;
 pub mod grouping_filter;
-#[cfg(feature = "parallel")]
-pub use grouping::{
-    group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
-};
 pub use grouping::{
     GROUPING_PHASE_COMPARING, group_signatures, group_signatures_with_matches,
     group_signatures_with_progress, should_group_routes,
+};
+#[cfg(feature = "parallel")]
+pub use grouping::{
+    group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
 };
 
 // Geographic utilities (distance, bounds, center calculations)
