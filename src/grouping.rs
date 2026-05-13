@@ -622,8 +622,12 @@ fn build_route_groups_with_existing_reps(
                 .cloned()
                 .unwrap_or_else(|| activity_ids.first().cloned().unwrap_or_default());
 
-            // Default sport type - caller should override with actual value
-            let sport_type = "Ride".to_string();
+            // Sentinel: route grouping doesn't know the sport. The caller
+            // (engine, persistence, FFI) overrides with the authoritative
+            // value from the activities map. We use "Unknown" rather than
+            // a real sport so a missed override surfaces as obviously
+            // wrong instead of silently masquerading as Ride/Run/etc.
+            let sport_type = "Unknown".to_string();
 
             // Compute combined bounds from all signatures in group
             let bounds = compute_group_bounds(&activity_ids, sig_map);

@@ -225,7 +225,9 @@ const MIN_HEADING_SPLIT_LENGTH: f64 = 300.0;
 /// Minimum section length (meters) to consider for splitting.
 /// Sections shorter than this are kept whole to avoid over-fragmentation.
 /// Inspired by MDL principle: only split if it improves the description.
-const MIN_SECTION_FOR_SPLITTING: f64 = 500.0;
+/// Raised to 1000m so heading/gradient splits only fire on long sections
+/// where the split materially reflects different physical regions.
+const MIN_SECTION_FOR_SPLITTING: f64 = 1000.0;
 
 /// Process a single section for heading-based splitting.
 fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
@@ -672,9 +674,10 @@ pub fn merge_nearby_sections(
 
     let mut keep: Vec<bool> = vec![true; sections.len()];
 
-    // Use a very generous threshold for merging nearby sections
-    // Wide roads can be 30m+, GPS error can add 20m, so use 2x the base threshold
-    let merge_threshold = config.proximity_threshold * 2.0;
+    // Use a generous threshold for merging nearby sections. Default
+    // 4× proximity (200m at the default 50m proximity) — recombines
+    // adjacent fragments along the same physical path.
+    let merge_threshold = config.proximity_threshold * config.merge_distance_multiplier;
 
     // Tier 2.3: prune the O(S²) candidate space with a centroid R-tree.
     // For each section, only consider partners whose centroid is within

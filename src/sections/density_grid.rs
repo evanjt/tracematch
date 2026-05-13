@@ -38,12 +38,6 @@ use crate::union_find::UnionFind;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-/// Two adjacent hot cells merge into the same section iff their track
-/// sets overlap by ≥ this Jaccard fraction. Tuned empirically against
-/// the Sion 426-GPX corpus: 0.8 produces sections of reasonable length
-/// (300-500 m typically) without over-merging entire shared routes.
-const JACCARD_THRESHOLD: f64 = 0.8;
-
 /// Cell grid converting lat/lng ↔ integer cell indices.
 ///
 /// Latitude → meters is roughly constant at 111 km/°. Longitude →
@@ -196,7 +190,7 @@ fn extract_cluster(
     grid: &CellGrid,
     config: &SectionConfig,
 ) -> Option<OverlapCluster> {
-    let min_acts = config.min_activities as usize;
+    let min_acts = config.min_routes as usize;
 
     let mut contributing: HashSet<u32> = HashSet::new();
     for c in component {
@@ -322,7 +316,7 @@ pub(super) fn detect_clusters_via_density(
 
     let cell_size_m = config.proximity_threshold / 2.0;
     let grid = CellGrid::new(cell_size_m, ref_lat);
-    let min_acts = config.min_activities as usize;
+    let min_acts = config.min_routes as usize;
 
     // Phase A: rasterise.
     #[cfg(feature = "parallel")]
@@ -372,7 +366,7 @@ pub(super) fn detect_clusters_via_density(
         if n_union == 0 {
             return false;
         }
-        (n_int as f64) / (n_union as f64) >= JACCARD_THRESHOLD
+        (n_int as f64) / (n_union as f64) >= config.jaccard_threshold
     };
 
     let mut uf: UnionFind<(i32, i32)> = UnionFind::with_capacity(hot_cells.len());
@@ -493,7 +487,7 @@ mod tests {
     #[test]
     fn parallel_tracks_form_one_cluster() {
         let mut config = SectionConfig::default();
-        config.min_activities = 2;
+        config.min_routes = 2;
         config.min_section_length = 50.0;
         config.proximity_threshold = 50.0;
 
@@ -516,7 +510,7 @@ mod tests {
     #[test]
     fn far_apart_tracks_produce_no_cluster() {
         let mut config = SectionConfig::default();
-        config.min_activities = 2;
+        config.min_routes = 2;
         config.min_section_length = 50.0;
 
         let track_a: Vec<GpsPoint> = (0..100)
