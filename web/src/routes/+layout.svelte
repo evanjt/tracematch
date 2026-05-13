@@ -25,6 +25,11 @@
     --radius-lg: 20px;
     --shadow: 0 1px 3px rgba(0,0,0,0.06);
     --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
+    --sport-ride: #3B82F6;
+    --sport-run: #10B981;
+    --sport-walk: #8B5CF6;
+    --sport-swim: #06B6D4;
+    --sport-other: #64748b;
   }
 
   :global(:root[data-theme="dark"]) {
