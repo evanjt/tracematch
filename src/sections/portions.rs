@@ -18,13 +18,47 @@ pub fn compute_activity_portions(
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
-    let activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
+    // Sort so iteration order is stable across runs (HashSet iteration
+    // is randomized, which propagated into section detection output
+    // non-determinism).
+    let mut activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
+    activity_ids.sort();
 
+    portions_for_sorted_ids(
+        &activity_ids,
+        representative_polyline,
+        all_tracks,
+        config.proximity_threshold,
+    )
+}
+
+/// Compute portions for a flat list of activity_ids against a reference polyline.
+///
+/// Used by corridor and flow_graph detection paths, which already know
+/// cluster membership from their own pipelines and don't need an
+/// `OverlapCluster`. Populates `activity_portions` so the section detail
+/// screen can show per-activity start/end indices and distances.
+pub fn compute_portions_for_activities(
+    activity_ids: &[String],
+    reference_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
+    threshold: f64,
+) -> Vec<SectionPortion> {
+    let mut sorted_ids: Vec<&String> = activity_ids.iter().collect();
+    sorted_ids.sort();
+    portions_for_sorted_ids(&sorted_ids, reference_polyline, all_tracks, threshold)
+}
+
+fn portions_for_sorted_ids(
+    sorted_ids: &[&String],
+    reference_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
+    threshold: f64,
+) -> Vec<SectionPortion> {
     let compute_for_activity = |activity_id: &&String| -> Vec<SectionPortion> {
         let mut portions = Vec::new();
         if let Some(track) = all_tracks.get(activity_id.as_str()) {
-            let all_traversals =
-                find_all_track_portions(track, representative_polyline, config.proximity_threshold);
+            let all_traversals = find_all_track_portions(track, reference_polyline, threshold);
 
             for (start_idx, end_idx, direction) in all_traversals {
                 let distance = calculate_route_distance(&track[start_idx..end_idx]);
@@ -43,7 +77,7 @@ pub fn compute_activity_portions(
 
     #[cfg(feature = "parallel")]
     {
-        activity_ids
+        sorted_ids
             .par_iter()
             .flat_map(compute_for_activity)
             .collect()
@@ -51,7 +85,7 @@ pub fn compute_activity_portions(
 
     #[cfg(not(feature = "parallel"))]
     {
-        activity_ids.iter().flat_map(compute_for_activity).collect()
+        sorted_ids.iter().flat_map(compute_for_activity).collect()
     }
 }
 
@@ -352,32 +386,31 @@ fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> 
     let mut best_val = smoothed[0];
     let mut best_pos = 0usize;
 
-    #[allow(clippy::needless_range_loop)]
-    for i in 1..smoothed.len() {
+    for (i, &val) in smoothed.iter().enumerate().skip(1) {
         if searching_for_peak {
             // Rising — track the running maximum
-            if smoothed[i] > best_val {
-                best_val = smoothed[i];
+            if val > best_val {
+                best_val = val;
                 best_pos = i;
             }
             // Fallen significantly from peak → direction reversed
-            if best_val > smoothed[i] && best_val - smoothed[i] >= min_change {
+            if best_val > val && best_val - val >= min_change {
                 turns.push(best_pos);
                 searching_for_peak = false;
-                best_val = smoothed[i];
+                best_val = val;
                 best_pos = i;
             }
         } else {
             // Falling — track the running minimum
-            if smoothed[i] < best_val {
-                best_val = smoothed[i];
+            if val < best_val {
+                best_val = val;
                 best_pos = i;
             }
             // Risen significantly from valley → direction reversed
-            if smoothed[i] > best_val && smoothed[i] - best_val >= min_change {
+            if val > best_val && val - best_val >= min_change {
                 turns.push(best_pos);
                 searching_for_peak = true;
-                best_val = smoothed[i];
+                best_val = val;
                 best_pos = i;
             }
         }

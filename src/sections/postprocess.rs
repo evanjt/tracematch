@@ -4,8 +4,9 @@
 //! - TRACLUS (Lee, Han, Whang 2007) — avoid over-segmentation principle
 //! - TS-MF (Xu et al. 2022) — two-phase split-then-merge pipeline
 
+use super::portions::find_all_track_portions;
 use super::rtree::{IndexedPoint, build_rtree};
-use super::{FrequentSection, SectionConfig};
+use super::{FrequentSection, SectionConfig, SectionPortion};
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
@@ -224,7 +225,9 @@ const MIN_HEADING_SPLIT_LENGTH: f64 = 300.0;
 /// Minimum section length (meters) to consider for splitting.
 /// Sections shorter than this are kept whole to avoid over-fragmentation.
 /// Inspired by MDL principle: only split if it improves the description.
-const MIN_SECTION_FOR_SPLITTING: f64 = 500.0;
+/// Raised to 1000m so heading/gradient splits only fire on long sections
+/// where the split materially reflects different physical regions.
+const MIN_SECTION_FOR_SPLITTING: f64 = 1000.0;
 
 /// Process a single section for heading-based splitting.
 fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
@@ -671,9 +674,10 @@ pub fn merge_nearby_sections(
 
     let mut keep: Vec<bool> = vec![true; sections.len()];
 
-    // Use a very generous threshold for merging nearby sections
-    // Wide roads can be 30m+, GPS error can add 20m, so use 2x the base threshold
-    let merge_threshold = config.proximity_threshold * 2.0;
+    // Use a generous threshold for merging nearby sections. Default
+    // 4× proximity (200m at the default 50m proximity) — recombines
+    // adjacent fragments along the same physical path.
+    let merge_threshold = config.proximity_threshold * config.merge_distance_multiplier;
 
     // Tier 2.3: prune the O(S²) candidate space with a centroid R-tree.
     // For each section, only consider partners whose centroid is within
@@ -790,358 +794,6 @@ pub fn merge_nearby_sections(
         .zip(keep)
         .filter_map(|(s, k)| if k { Some(s) } else { None })
         .collect()
-}
-
-// =============================================================================
-// Fragment Consolidation
-// =============================================================================
-
-/// Maximum section length (meters) to consider for fragment consolidation.
-/// Longer sections are kept as-is unless endpoints are very close.
-const MAX_FRAGMENT_LENGTH: f64 = 400.0;
-
-/// Tight threshold (meters) for joining ANY sections at endpoints.
-/// If endpoints are this close, sections should be connected regardless of length.
-const TIGHT_ENDPOINT_GAP: f64 = 50.0;
-
-/// Loose threshold (meters) for merging short fragments.
-const LOOSE_ENDPOINT_GAP: f64 = 100.0;
-
-/// Maximum combined length (meters) after merging two sections.
-const MAX_MERGED_LENGTH: f64 = 3000.0;
-
-/// Consolidate adjacent sections back into longer coherent routes.
-///
-/// Iterative approach (runs until no more merges possible):
-/// 1. **Tight join**: Connect ANY sections with endpoints < 50m apart
-/// 2. **Fragment merge**: Merge short fragments (< 400m) with endpoints < 100m apart
-///
-/// Inspired by TS-MF "mergence" phase.
-pub fn consolidate_fragments(
-    mut sections: Vec<FrequentSection>,
-    config: &SectionConfig,
-) -> Vec<FrequentSection> {
-    if sections.len() < 2 {
-        return sections;
-    }
-
-    // Iterate until no more merges are possible
-    // This handles chain merges (A→B→C) that single-pass would miss
-    const MAX_ITERATIONS: usize = 10;
-    for iteration in 0..MAX_ITERATIONS {
-        let before_count = sections.len();
-
-        // Pass 1: Tight endpoint joining (any length sections)
-        sections = join_at_endpoints(sections, config, TIGHT_ENDPOINT_GAP);
-
-        // Pass 2: Fragment merging (short sections only)
-        sections = merge_short_fragments(sections, config);
-
-        let after_count = sections.len();
-
-        if after_count == before_count {
-            info!(
-                "[Sections] Consolidation converged after {} iteration(s)",
-                iteration + 1
-            );
-            break;
-        }
-
-        info!(
-            "[Sections] Consolidation iteration {}: {} → {} sections",
-            iteration + 1,
-            before_count,
-            after_count
-        );
-    }
-
-    sections
-}
-
-/// Join sections where endpoints are very close (regardless of section length).
-/// This connects route segments that are clearly continuous.
-fn join_at_endpoints(
-    sections: Vec<FrequentSection>,
-    _config: &SectionConfig,
-    max_gap: f64,
-) -> Vec<FrequentSection> {
-    if sections.len() < 2 {
-        return sections;
-    }
-
-    // Group sections by sport type
-    let mut by_sport: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, section) in sections.iter().enumerate() {
-        by_sport
-            .entry(section.sport_type.clone())
-            .or_default()
-            .push(idx);
-    }
-
-    let mut merged: Vec<bool> = vec![false; sections.len()];
-    let mut result: Vec<FrequentSection> = Vec::new();
-
-    for indices in by_sport.values() {
-        for &i in indices {
-            if merged[i] {
-                continue;
-            }
-
-            let section_i = &sections[i];
-
-            // Find best join candidate (closest endpoint)
-            let mut best_match: Option<(usize, f64, bool)> = None; // (index, gap, i_end_to_j_start)
-
-            for &j in indices {
-                if i == j || merged[j] {
-                    continue;
-                }
-
-                let section_j = &sections[j];
-
-                // Check if combined length is reasonable
-                let combined_length = section_i.distance_meters + section_j.distance_meters;
-                if combined_length > MAX_MERGED_LENGTH {
-                    continue;
-                }
-
-                // Check endpoint distances
-                let i_start = &section_i.polyline[0];
-                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
-                let j_start = &section_j.polyline[0];
-                let j_end = &section_j.polyline[section_j.polyline.len() - 1];
-
-                // We want to join end-to-start (i_end -> j_start or j_end -> i_start)
-                let gap_i_end_j_start = haversine_distance(i_end, j_start);
-                let gap_j_end_i_start = haversine_distance(j_end, i_start);
-
-                let (min_gap, is_i_to_j) = if gap_i_end_j_start <= gap_j_end_i_start {
-                    (gap_i_end_j_start, true)
-                } else {
-                    (gap_j_end_i_start, false)
-                };
-
-                if min_gap <= max_gap && (best_match.is_none() || min_gap < best_match.unwrap().1) {
-                    best_match = Some((j, min_gap, is_i_to_j));
-                }
-            }
-
-            if let Some((j, gap, is_i_to_j)) = best_match {
-                merged[i] = true;
-                merged[j] = true;
-
-                let section_j = &sections[j];
-
-                // Merge polylines in correct order
-                let mut merged_polyline = if is_i_to_j {
-                    // i -> j order
-                    let mut p = section_i.polyline.clone();
-                    p.extend(section_j.polyline.clone());
-                    p
-                } else {
-                    // j -> i order
-                    let mut p = section_j.polyline.clone();
-                    p.extend(section_i.polyline.clone());
-                    p
-                };
-
-                // Simplify merged polyline if too dense
-                if merged_polyline.len() > 200 {
-                    merged_polyline = merged_polyline
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(idx, _)| idx % 2 == 0)
-                        .map(|(_, p)| p)
-                        .collect();
-                }
-
-                let merged_distance = calculate_route_distance(&merged_polyline);
-
-                let mut merged_section = section_i.clone();
-                merged_section.id = format!("{}_joined", section_i.id);
-                merged_section.polyline = merged_polyline;
-                merged_section.distance_meters = merged_distance;
-                // Merge activity_ids from both sections and deduplicate
-                merged_section
-                    .activity_ids
-                    .extend(section_j.activity_ids.iter().cloned());
-                merged_section.activity_ids.sort();
-                merged_section.activity_ids.dedup();
-                // visit_count should equal unique activities
-                merged_section.visit_count = merged_section.activity_ids.len() as u32;
-                merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
-                merged_section.activity_traces = HashMap::new();
-
-                info!(
-                    "[Sections] Joined {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
-                    section_i.id,
-                    section_j.id,
-                    merged_section.id,
-                    section_i.distance_meters,
-                    section_j.distance_meters,
-                    merged_distance,
-                    gap
-                );
-
-                result.push(merged_section);
-            }
-        }
-
-        // Add non-merged sections
-        for &i in indices {
-            if !merged[i] {
-                result.push(sections[i].clone());
-            }
-        }
-    }
-
-    result
-}
-
-/// Merge short fragments (< 400m) that are adjacent (< 100m gap).
-fn merge_short_fragments(
-    sections: Vec<FrequentSection>,
-    config: &SectionConfig,
-) -> Vec<FrequentSection> {
-    if sections.len() < 2 {
-        return sections;
-    }
-
-    // Group sections by sport type
-    let mut by_sport: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, section) in sections.iter().enumerate() {
-        by_sport
-            .entry(section.sport_type.clone())
-            .or_default()
-            .push(idx);
-    }
-
-    let mut merged: Vec<bool> = vec![false; sections.len()];
-    let mut result: Vec<FrequentSection> = Vec::new();
-
-    for indices in by_sport.values() {
-        for &i in indices {
-            if merged[i] {
-                continue;
-            }
-
-            let section_i = &sections[i];
-
-            // Only consider short fragments
-            if section_i.distance_meters > MAX_FRAGMENT_LENGTH {
-                continue;
-            }
-
-            // Find best merge candidate
-            let mut best_match: Option<(usize, f64)> = None;
-
-            for &j in indices {
-                if i == j || merged[j] {
-                    continue;
-                }
-
-                let section_j = &sections[j];
-
-                // Only merge with other short fragments
-                if section_j.distance_meters > MAX_FRAGMENT_LENGTH {
-                    continue;
-                }
-
-                // Check if combined length is reasonable
-                let combined_length = section_i.distance_meters + section_j.distance_meters;
-                if combined_length > MAX_MERGED_LENGTH {
-                    continue;
-                }
-
-                // Check if endpoints are close
-                let i_start = &section_i.polyline[0];
-                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
-                let j_start = &section_j.polyline[0];
-                let j_end = &section_j.polyline[section_j.polyline.len() - 1];
-
-                let min_gap = haversine_distance(i_start, j_start)
-                    .min(haversine_distance(i_start, j_end))
-                    .min(haversine_distance(i_end, j_start))
-                    .min(haversine_distance(i_end, j_end));
-
-                if min_gap <= LOOSE_ENDPOINT_GAP
-                    && (best_match.is_none() || min_gap < best_match.unwrap().1)
-                {
-                    best_match = Some((j, min_gap));
-                }
-            }
-
-            if let Some((j, gap)) = best_match {
-                merged[i] = true;
-                merged[j] = true;
-
-                let section_j = &sections[j];
-
-                // Determine merge order
-                let i_end = &section_i.polyline[section_i.polyline.len() - 1];
-                let j_start = &section_j.polyline[0];
-                let end_to_start_gap = haversine_distance(i_end, j_start);
-
-                let mut merged_polyline = if end_to_start_gap <= config.proximity_threshold * 2.0 {
-                    let mut p = section_i.polyline.clone();
-                    p.extend(section_j.polyline.clone());
-                    p
-                } else {
-                    let mut p = section_j.polyline.clone();
-                    p.extend(section_i.polyline.clone());
-                    p
-                };
-
-                if merged_polyline.len() > 200 {
-                    merged_polyline = merged_polyline
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(idx, _)| idx % 2 == 0)
-                        .map(|(_, p)| p)
-                        .collect();
-                }
-
-                let merged_distance = calculate_route_distance(&merged_polyline);
-
-                let mut merged_section = section_i.clone();
-                merged_section.id = format!("{}_merged", section_i.id);
-                merged_section.polyline = merged_polyline;
-                merged_section.distance_meters = merged_distance;
-                // Merge activity_ids from both sections and deduplicate
-                merged_section
-                    .activity_ids
-                    .extend(section_j.activity_ids.iter().cloned());
-                merged_section.activity_ids.sort();
-                merged_section.activity_ids.dedup();
-                // visit_count should equal unique activities
-                merged_section.visit_count = merged_section.activity_ids.len() as u32;
-                merged_section.confidence = (section_i.confidence + section_j.confidence) / 2.0;
-                merged_section.activity_traces = HashMap::new();
-
-                info!(
-                    "[Sections] Merged fragments {} + {} -> {} ({:.0}m + {:.0}m = {:.0}m, gap {:.0}m)",
-                    section_i.id,
-                    section_j.id,
-                    merged_section.id,
-                    section_i.distance_meters,
-                    section_j.distance_meters,
-                    merged_distance,
-                    gap
-                );
-
-                result.push(merged_section);
-            }
-        }
-
-        // Add non-merged sections
-        for &i in indices {
-            if !merged[i] {
-                result.push(sections[i].clone());
-            }
-        }
-    }
-
-    result
 }
 
 // =============================================================================
@@ -1362,9 +1014,18 @@ struct SplitCandidate {
 /// Returns split candidates if the section should be divided.
 fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
     let density = &section.point_density;
+    let polyline_len = section.polyline.len();
 
     if density.len() < MIN_SPLIT_POINTS * 2 {
         return vec![]; // Too short to split meaningfully
+    }
+
+    // Defence in depth: post-processing splits/merges can leave
+    // `point_density` and `polyline` out of sync. Cap the loop bound to
+    // whichever is shorter so we never index past `polyline`.
+    let usable_len = density.len().min(polyline_len);
+    if usable_len < MIN_SPLIT_POINTS * 2 {
+        return vec![];
     }
 
     // Compute endpoint density (average of first/last 10% of points)
@@ -1386,11 +1047,11 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
     }
 
     // Sliding window to find high-density regions
-    let window_size = (density.len() / 5).max(MIN_SPLIT_POINTS);
+    let window_size = (usable_len / 5).max(MIN_SPLIT_POINTS);
     let mut candidates = Vec::new();
 
     let mut i = window_size;
-    while i < density.len() - window_size {
+    while i < usable_len - window_size {
         // Compute density in current window
         let window_density: f64 = density[i - window_size / 2..i + window_size / 2]
             .iter()
@@ -1414,8 +1075,9 @@ fn find_split_candidates(section: &FrequentSection) -> Vec<SplitCandidate> {
                 start_idx -= 1;
             }
 
-            // Expand end forward while density remains high
-            while end_idx < density.len() - 1 {
+            // Expand end forward while density remains high.
+            // Bound by usable_len so we never expand past polyline.len().
+            while end_idx < usable_len - 1 {
                 let local_density = density[end_idx + 1] as f64;
                 if local_density < endpoint_density * 1.5 {
                     break;
@@ -1526,6 +1188,29 @@ fn split_section_by_density(
         // Only create the split section if it has enough activities
         let split_activity_count = split_activity_ids.len();
         if split_activity_count >= config.min_activities as usize {
+            // Compute activity_portions for the split section. Without these,
+            // save_sections() inserts zero rows into section_activities for
+            // this section — the section exists in the DB but appears as
+            // "0 sections attached" in the UI. This was the smoking-gun bug.
+            let split_activity_portions: Vec<SectionPortion> = split_activity_ids
+                .iter()
+                .flat_map(|activity_id| {
+                    let Some(track) = track_map.get(activity_id.as_str()) else {
+                        return Vec::new();
+                    };
+                    find_all_track_portions(track, &split_polyline, config.proximity_threshold)
+                        .into_iter()
+                        .map(|(start_idx, end_idx, direction)| SectionPortion {
+                            activity_id: activity_id.clone(),
+                            start_index: start_idx as u32,
+                            end_index: end_idx as u32,
+                            distance_meters: calculate_route_distance(&track[start_idx..end_idx]),
+                            direction,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
             let split_section = FrequentSection {
                 id: format!("{}_split{}", section.id, split_idx),
                 name: None,
@@ -1533,7 +1218,7 @@ fn split_section_by_density(
                 polyline: split_polyline,
                 representative_activity_id: section.representative_activity_id.clone(),
                 activity_ids: split_activity_ids,
-                activity_portions: Vec::new(), // Will be recomputed later if needed
+                activity_portions: split_activity_portions,
                 route_ids: section.route_ids.clone(),
                 // visit_count should equal unique activities
                 visit_count: split_activity_count as u32,
@@ -1597,173 +1282,6 @@ pub fn split_high_variance_sections(
 }
 
 // =============================================================================
-// Mutually Exclusive Sections - Cut overlapping portions
-// =============================================================================
-
-/// Make sections mutually exclusive by cutting overlapping portions.
-/// Uses a "claim territory" approach: higher-priority sections claim their
-/// territory first, and later sections are trimmed to exclude claimed areas.
-///
-/// **Loop sections are preserved intact** - they're not trimmed even if they
-/// overlap with other sections. This allows complete circuits to be preserved
-/// (e.g., a lake loop and an outer ring that share one edge).
-///
-/// Priority is determined by: confidence * log(visit_count) * loop_boost
-pub fn make_sections_exclusive(
-    mut sections: Vec<FrequentSection>,
-    config: &SectionConfig,
-) -> Vec<FrequentSection> {
-    if sections.len() < 2 {
-        return sections;
-    }
-
-    // Loop detection threshold: 2x proximity to allow for GPS drift at closure
-    let loop_threshold = config.proximity_threshold * 2.0;
-
-    // Sort by priority: loops get a boost, then by confidence and visits
-    sections.sort_by(|a, b| {
-        let loop_a = is_loop_section(a, loop_threshold);
-        let loop_b = is_loop_section(b, loop_threshold);
-
-        // Loops get 1.5x priority boost since they're complete circuits
-        let boost_a = if loop_a { 1.5 } else { 1.0 };
-        let boost_b = if loop_b { 1.5 } else { 1.0 };
-
-        let priority_a = a.confidence * (a.visit_count as f64).ln().max(1.0) * boost_a;
-        let priority_b = b.confidence * (b.visit_count as f64).ln().max(1.0) * boost_b;
-        priority_b
-            .partial_cmp(&priority_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut result: Vec<FrequentSection> = Vec::new();
-    let mut claimed_trees: Vec<RTree<IndexedPoint>> = Vec::new();
-    let mut loop_count = 0;
-
-    for section in sections {
-        let is_loop = is_loop_section(&section, loop_threshold);
-
-        if is_loop {
-            // LOOPS: Preserve intact without trimming
-            // They may overlap with other loops/sections - that's OK
-            info!(
-                "[Sections] Preserving loop section {} ({:.0}m, {} visits)",
-                section.id, section.distance_meters, section.visit_count
-            );
-            claimed_trees.push(build_rtree(&section.polyline));
-            result.push(section);
-            loop_count += 1;
-        } else {
-            // NON-LOOPS: Trim to exclude claimed territory
-            let trimmed = trim_to_unclaimed(&section, &claimed_trees, config);
-
-            if let Some(trimmed_section) = trimmed {
-                // Only keep if long enough
-                if trimmed_section.distance_meters >= config.min_section_length {
-                    // Add this section's territory to claimed areas
-                    claimed_trees.push(build_rtree(&trimmed_section.polyline));
-                    result.push(trimmed_section);
-                }
-            }
-        }
-    }
-
-    info!(
-        "[Sections] After making exclusive: {} sections ({} loops preserved)",
-        result.len(),
-        loop_count
-    );
-
-    result
-}
-
-/// Trim a section to exclude areas already claimed by other sections.
-/// Returns None if the entire section is claimed.
-fn trim_to_unclaimed(
-    section: &FrequentSection,
-    claimed_trees: &[RTree<IndexedPoint>],
-    config: &SectionConfig,
-) -> Option<FrequentSection> {
-    if claimed_trees.is_empty() {
-        return Some(section.clone());
-    }
-
-    let threshold_deg = config.proximity_threshold / 111_000.0;
-    let threshold_deg_sq = threshold_deg * threshold_deg;
-
-    // Find which points are NOT claimed
-    let mut unclaimed_mask: Vec<bool> = vec![true; section.polyline.len()];
-
-    for (point_idx, point) in section.polyline.iter().enumerate() {
-        let query = [point.latitude, point.longitude];
-
-        for tree in claimed_trees {
-            if let Some(nearest) = tree.nearest_neighbor(&query)
-                && nearest.distance_2(&query) <= threshold_deg_sq
-            {
-                unclaimed_mask[point_idx] = false;
-                break;
-            }
-        }
-    }
-
-    // Find the longest contiguous unclaimed segment
-    let mut best_start = 0;
-    let mut best_len = 0;
-    let mut current_start = 0;
-    let mut current_len = 0;
-    let mut in_unclaimed = false;
-
-    for (i, &is_unclaimed) in unclaimed_mask.iter().enumerate() {
-        if is_unclaimed {
-            if !in_unclaimed {
-                current_start = i;
-                current_len = 0;
-                in_unclaimed = true;
-            }
-            current_len += 1;
-        } else {
-            if in_unclaimed && current_len > best_len {
-                best_start = current_start;
-                best_len = current_len;
-            }
-            in_unclaimed = false;
-        }
-    }
-    // Check final segment
-    if in_unclaimed && current_len > best_len {
-        best_start = current_start;
-        best_len = current_len;
-    }
-
-    // Need at least a few points
-    if best_len < 3 {
-        return None;
-    }
-
-    // Extract the unclaimed portion
-    let trimmed_polyline: Vec<GpsPoint> =
-        section.polyline[best_start..(best_start + best_len)].to_vec();
-    let trimmed_distance = calculate_route_distance(&trimmed_polyline);
-
-    if trimmed_distance < config.min_section_length {
-        return None;
-    }
-
-    // Create trimmed section
-    let mut trimmed = section.clone();
-    trimmed.polyline = trimmed_polyline;
-    trimmed.distance_meters = trimmed_distance;
-
-    // Update point density if available
-    if !section.point_density.is_empty() && best_start + best_len <= section.point_density.len() {
-        trimmed.point_density = section.point_density[best_start..(best_start + best_len)].to_vec();
-    }
-
-    Some(trimmed)
-}
-
-// =============================================================================
 // Quality Filtering: Length-Weighted Visit Threshold
 // =============================================================================
 //
@@ -1772,13 +1290,17 @@ fn trim_to_unclaimed(
 // probably noise—but short sections visited many times are meaningful patterns.
 
 /// Minimum visits required based on section length and dataset size.
-/// Shorter sections need more visits. Larger datasets use higher thresholds
-/// to avoid drowning in noise.
+/// Shorter sections need more visits. Larger datasets use slightly higher
+/// thresholds to avoid drowning in noise — but the bonus is intentionally
+/// modest so a user with 500 activities doesn't have all their valid
+/// sections filtered away.
 fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+    // Softened from the 43a39da bonus of (0 / +1 / +2): the +2 tier was
+    // filtering out genuine sections for users with many activities. The
+    // base thresholds (2-6) already encode noise rejection per length tier.
     let bonus: u32 = match total_activities {
-        0..=50 => 0,
-        51..=200 => 1,
-        _ => 2,
+        0..=200 => 0,
+        _ => 1,
     };
 
     let base = match distance_meters {
@@ -1826,4 +1348,269 @@ pub fn filter_low_quality_sections(
     );
 
     filtered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Direction;
+
+    /// Build a 1km north-south reference polyline at 45°N. 200 points.
+    fn make_reference_polyline(num_points: usize) -> Vec<GpsPoint> {
+        // 0.009 degrees latitude ≈ 1km
+        let length_degrees = 0.009;
+        (0..num_points)
+            .map(|i| {
+                GpsPoint::new(
+                    45.0 + (i as f64 / (num_points - 1) as f64) * length_degrees,
+                    7.0,
+                )
+            })
+            .collect()
+    }
+
+    /// Density profile: low at endpoints, high in the middle. This forces
+    /// `find_split_candidates` to identify the middle as a high-traffic
+    /// portion. Endpoint density ~2, middle density ~10 → ratio of 5×.
+    fn make_high_variance_density(num_points: usize) -> Vec<u32> {
+        let mid = num_points / 2;
+        let band = num_points / 4;
+        (0..num_points)
+            .map(|i| if i.abs_diff(mid) < band { 10 } else { 2 })
+            .collect()
+    }
+
+    /// Walk every point of the reference plus tiny jitter so the synthesized
+    /// track lies within proximity_threshold for every point.
+    fn make_full_traversal(reference: &[GpsPoint]) -> Vec<GpsPoint> {
+        reference
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                GpsPoint::new(p.latitude + 0.000005 * (i as f64 % 3.0 - 1.0), p.longitude)
+            })
+            .collect()
+    }
+
+    /// Regression test for the smoking-gun bug: `split_section_by_density`
+    /// used to construct split sections with `activity_portions: Vec::new()`.
+    /// `save_sections()` iterates over `activity_portions` to insert junction
+    /// rows, so empty portions meant zero rows in `section_activities` →
+    /// "0 sections attached" in the UI.
+    ///
+    /// This test forces the split path with a high-variance density profile
+    /// and asserts the resulting split sections have non-empty portions
+    /// matching the activity IDs.
+    #[test]
+    fn split_high_variance_sections_populates_activity_portions() {
+        const NUM_POINTS: usize = 200;
+        const NUM_ACTIVITIES: usize = 5;
+
+        let reference = make_reference_polyline(NUM_POINTS);
+        let density = make_high_variance_density(NUM_POINTS);
+
+        // Synthesize N activity tracks that all traverse the reference.
+        let activity_id_strings: Vec<String> = (0..NUM_ACTIVITIES)
+            .map(|i| format!("activity_{i}"))
+            .collect();
+        let tracks: Vec<Vec<GpsPoint>> = (0..NUM_ACTIVITIES)
+            .map(|_| make_full_traversal(&reference))
+            .collect();
+
+        let mut track_map: HashMap<&str, &[GpsPoint]> = HashMap::new();
+        for (id, track) in activity_id_strings.iter().zip(tracks.iter()) {
+            track_map.insert(id.as_str(), track.as_slice());
+        }
+
+        // Build a parent section with high density variance in its middle.
+        let parent = FrequentSection {
+            id: "test_parent".to_string(),
+            name: None,
+            sport_type: "Run".to_string(),
+            polyline: reference.clone(),
+            representative_activity_id: activity_id_strings[0].clone(),
+            activity_ids: activity_id_strings.clone(),
+            activity_portions: Vec::new(),
+            route_ids: vec![],
+            visit_count: NUM_ACTIVITIES as u32,
+            distance_meters: calculate_route_distance(&reference),
+            activity_traces: HashMap::new(),
+            confidence: 0.9,
+            observation_count: NUM_ACTIVITIES as u32,
+            average_spread: 5.0,
+            point_density: density,
+            scale: None,
+            is_user_defined: false,
+            stability: 0.8,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        };
+
+        let config = SectionConfig {
+            proximity_threshold: 50.0,
+            min_activities: 3,
+            ..SectionConfig::default()
+        };
+
+        let split_result = split_high_variance_sections(vec![parent], &track_map, &config);
+
+        // Expect at least one split section was created (plus the original).
+        let split_sections: Vec<&FrequentSection> = split_result
+            .iter()
+            .filter(|s| s.id.contains("_split"))
+            .collect();
+
+        assert!(
+            !split_sections.is_empty(),
+            "split_high_variance_sections did not create any splits — \
+             check that the synthetic density profile still triggers \
+             SPLIT_DENSITY_RATIO ({SPLIT_DENSITY_RATIO})"
+        );
+
+        // The bug being regressed: every split section must have non-empty
+        // activity_portions matching its activity_ids.
+        for split in &split_sections {
+            assert!(
+                !split.activity_ids.is_empty(),
+                "split section {} has empty activity_ids",
+                split.id
+            );
+            assert!(
+                !split.activity_portions.is_empty(),
+                "split section {} has empty activity_portions \
+                 (the smoking-gun bug)",
+                split.id
+            );
+
+            // Every portion must reference one of the section's activities.
+            for portion in &split.activity_portions {
+                assert!(
+                    split.activity_ids.contains(&portion.activity_id),
+                    "split section {} has portion for unknown activity {}",
+                    split.id,
+                    portion.activity_id
+                );
+                assert!(
+                    portion.end_index > portion.start_index,
+                    "portion has invalid range {}..{}",
+                    portion.start_index,
+                    portion.end_index
+                );
+                // Direction must be either Same or Reverse — never garbage.
+                assert!(matches!(
+                    portion.direction,
+                    Direction::Same | Direction::Reverse
+                ));
+            }
+        }
+    }
+
+    /// Build a minimal FrequentSection for filter-behaviour tests.
+    /// `polyline_pts` controls whether the polyline gate is met
+    /// (filter requires ≥ 8 points).
+    fn stub_section_for_filter(
+        id: &str,
+        distance_m: f64,
+        visits: u32,
+        polyline_pts: usize,
+    ) -> FrequentSection {
+        FrequentSection {
+            id: id.to_string(),
+            name: None,
+            sport_type: "Run".to_string(),
+            polyline: (0..polyline_pts)
+                .map(|i| GpsPoint::new(45.0 + (i as f64) * 0.0001, 7.0))
+                .collect(),
+            representative_activity_id: String::new(),
+            activity_ids: (0..visits).map(|i| format!("a_{i}")).collect(),
+            activity_portions: Vec::new(),
+            route_ids: vec![],
+            visit_count: visits,
+            distance_meters: distance_m,
+            activity_traces: HashMap::new(),
+            confidence: 0.5,
+            observation_count: visits,
+            average_spread: 1.0,
+            point_density: vec![],
+            scale: None,
+            is_user_defined: false,
+            stability: 0.0,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        }
+    }
+
+    /// Filter must DROP a 150 m section with only 2 visits — base requires 6.
+    #[test]
+    fn quality_filter_drops_short_low_visit() {
+        let s = stub_section_for_filter("low", 150.0, 2, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert!(
+            kept.is_empty(),
+            "expected 150 m / 2-visit section to be dropped"
+        );
+    }
+
+    /// Filter must KEEP a 1 km section with 2 visits — base requires 2 for ≥ 800 m.
+    #[test]
+    fn quality_filter_keeps_long_two_visit() {
+        let s = stub_section_for_filter("long2", 1000.0, 2, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert_eq!(kept.len(), 1, "expected 1 km / 2-visit section to survive");
+    }
+
+    /// Filter must KEEP a short section with enough visits — 150m needs 6.
+    #[test]
+    fn quality_filter_keeps_short_high_visit() {
+        let s = stub_section_for_filter("short_many", 150.0, 6, 20);
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// Filter must DROP a section with too few polyline points.
+    #[test]
+    fn quality_filter_drops_underpopulated_polyline() {
+        let s = stub_section_for_filter("sparse", 1000.0, 10, 5); // only 5 points
+        let kept = filter_low_quality_sections(vec![s], 50);
+        assert!(
+            kept.is_empty(),
+            "expected section with < 8 polyline points to be dropped"
+        );
+    }
+
+    /// Dataset-size bonus: a 1 km / 2-visit section survives at N=50 but
+    /// is filtered at N=300 (>200 → +1 bonus → requires 3 visits).
+    /// Protects against future regressions of the softened bonus tier.
+    #[test]
+    fn quality_filter_dataset_size_bonus_kicks_in_above_200() {
+        let s_small = stub_section_for_filter("k50", 1000.0, 2, 20);
+        let kept_small = filter_low_quality_sections(vec![s_small], 50);
+        assert_eq!(kept_small.len(), 1, "should survive at N=50");
+
+        let s_large = stub_section_for_filter("k300", 1000.0, 2, 20);
+        let kept_large = filter_low_quality_sections(vec![s_large], 300);
+        assert!(
+            kept_large.is_empty(),
+            "expected dataset-size bonus to drop 2-visit section at N=300"
+        );
+    }
+
+    /// Bug B regression: the prior bonus tier was (0 / +1 / +2). The +2
+    /// tier at N>200 was filtering valid sections. Verify the softened
+    /// tier (0 / +1) doesn't reintroduce the over-filtering.
+    #[test]
+    fn quality_filter_bonus_does_not_overfilter_at_large_n() {
+        // 1 km section with 3 visits at N=500: base=2, bonus=1, requires 3 → keeps.
+        let s = stub_section_for_filter("survivor", 1000.0, 3, 20);
+        let kept = filter_low_quality_sections(vec![s], 500);
+        assert_eq!(
+            kept.len(),
+            1,
+            "1 km / 3-visit section at N=500 should survive softened bonus"
+        );
+    }
 }

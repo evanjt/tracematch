@@ -1,177 +1,179 @@
 # tracematch
 
-High-performance GPS route matching library.
+GPS route matching, grouping, and section detection for fitness activity data.
 
-## Features
+Given a collection of GPS tracks (running, cycling, etc.), tracematch can compare routes for similarity, cluster activities by route, and detect frequently-traveled sections across your activity history. Written in Rust. Runs on mobile via UniFFI, in the browser via WASM, or standalone.
 
-- **Route Matching** - AMD-based polyline similarity with bidirectional detection
-- **Route Grouping** - Cluster activities by route using Union-Find
-- **Section Detection** - Multi-scale detection of frequently-traveled sections
-- **Spatial Indexing** - R-tree for O(log n) viewport queries
-- **Parallel Processing** - Optional rayon-based parallelism
+## Section detection
 
-## Performance
+Three methods for finding recurring sections in GPS traces. All produce `Vec<FrequentSection>` with polylines from actual GPS tracks.
 
-Fast enough for real-time use on mobile devices. Benchmarked on real GPS traces (140-490 points per track):
+### Corridor (default)
 
-| Operation          | Time     | What it means                        |
-| ------------------ | -------- | ------------------------------------ |
-| Create signature   | 10-16 µs | Process a 200-point track in 0.016ms |
-| Compare two routes | 20-28 µs | Check similarity in 0.028ms          |
-| Group 20 routes    | 750 µs   | Cluster all routes in under 1ms      |
+Finds corridors where many activities converge. Works directly on raw GPS traces without route grouping. Best coverage for most use cases.
 
-**Why it's fast:**
+1. Rasterise all tracks into grid cells, count unique tracks per cell
+2. Threshold to "hot" cells (cells visited by N or more unique activities)
+3. Jaccard-gated union-find: adjacent hot cells merge only if their track sets overlap sufficiently. This prevents over-merging at intersections where runners diverge.
+4. For each connected component, find each track's longest contiguous run through it
+5. Select the median-distance track as the representative polyline
+6. Postprocess: merge nearby sections, remove overlapping
 
-- **R-tree spatial indexing** - O(log n) nearest-neighbor queries instead of O(n) linear scan
-- **Early exit** - Dissimilar routes (different regions) detected in ~3 nanoseconds
-- **Rayon parallelism** - Optional multi-core processing for large datasets
-- **Zero-copy design** - Minimal allocations in hot paths
+### Density grid
 
-Run benchmarks: `cargo bench --bench route_matching`
+Detects sections where distinct route groups overlap. Requires pre-computed route grouping. Best for finding shared stretches between different routes.
 
-## Installation
+1. Rasterise route representatives into cells (one rep per route group)
+2. Build inverted index mapping cells to route IDs
+3. 4-connected union-find with Jaccard gate on route sets
+4. Extract per-track portions from each connected component
+5. Select medoid trace, compute consensus polyline via weighted averaging
+6. Postprocess: fold splitting, heading and gradient splits, merge, dedup
 
-```sh
-cargo add tracematch
+### Flow graph
+
+Models GPS data as directed traffic flow to identify road junctions. Sections are edges between divergence points. Network-topology approach.
+
+1. Rasterise tracks, record cell-to-cell transitions with directional flow
+2. Identify junctions: cells where 3+ exit directions each carry 15%+ of traffic
+3. Merge nearby junctions within 2 cells
+4. Trace edges between junctions via BFS along highest-traffic cells
+5. Merge pass-through junctions where stub edges are shorter than 5 cells
+6. Select median-distance track for each edge as the section polyline
+
+### Choosing a method
+
+```rust
+use tracematch::{SectionConfig, DetectionMethod};
+
+let config = SectionConfig {
+    detection_method: DetectionMethod::Corridor, // default
+    proximity_threshold: 150.0,
+    min_section_length: 200.0,
+    ..SectionConfig::default()
+};
+
+let sections = tracematch::detect_sections(&tracks, &sport_types, &groups, &config);
 ```
 
-## How It Works
+Individual methods are also available directly: `detect_sections_corridor()`, `detect_sections_flow_graph()`, `detect_sections_multiscale()`.
 
-**Route Matching** compares two GPS tracks by measuring how far apart they are. For each point on route A, find the nearest point on route B and measure that distance. Average all these distances to get the AMD (Average Minimum Distance). Lower AMD means more similar routes. The comparison runs both directions (A→B and B→A) to detect if one route is a subset of another.
+## Route matching
 
-**Route Grouping** clusters multiple activities by similarity. Each activity starts in its own group. When two routes match, their groups merge using Union-Find (a fast algorithm for tracking connected components). The result: activities on the same route end up in the same group.
-
-**Section Detection** finds frequently-traveled portions of tracks across many activities using spatial indexing (R-tree) and consensus algorithms.
-
-## Usage
-
-### Route matching
+Compares two GPS tracks by Average Minimum Distance (AMD). For each point on route A, find the nearest point on route B and average the distances. Runs both directions to detect subsets.
 
 ```rust
 use tracematch::{GpsPoint, RouteSignature, MatchConfig, compare_routes};
 
-let london = vec![
+let track = vec![
     GpsPoint::new(51.5074, -0.1278),
     GpsPoint::new(51.5080, -0.1290),
     GpsPoint::new(51.5090, -0.1300),
 ];
-let nyc = vec![
-    GpsPoint::new(40.7128, -74.0060),
-    GpsPoint::new(40.7138, -74.0070),
-    GpsPoint::new(40.7148, -74.0080),
-];
 
 let config = MatchConfig::default();
-let sig1 = RouteSignature::from_points("london-1", &london, &config).unwrap();
-let sig2 = RouteSignature::from_points("london-2", &london, &config).unwrap();
-let sig3 = RouteSignature::from_points("nyc", &nyc, &config).unwrap();
+let sig1 = RouteSignature::from_points("run-1", &track, &config).unwrap();
+let sig2 = RouteSignature::from_points("run-2", &track, &config).unwrap();
 
-compare_routes(&sig1, &sig2, &config);  // Some(100% match, same)
-compare_routes(&sig1, &sig3, &config);  // None (different routes)
+compare_routes(&sig1, &sig2, &config); // Some(100% match, same direction)
 ```
 
 ```sh
 cargo run --example route_matching
 ```
 
-```
-london-1 vs london-2:
-  100% match (same)
-london-1 vs nyc:
-  no match
-```
+## Route grouping
 
-### Route grouping
+Clusters activities by similarity using Union-Find. Each activity starts in its own group. When two routes match, their groups merge.
 
 ```rust
 use tracematch::{GpsPoint, RouteSignature, MatchConfig, group_signatures};
 
-// Two activities on the same route (London, ~1km)
-let london: Vec<GpsPoint> = (0..10)
+let track: Vec<GpsPoint> = (0..10)
     .map(|i| GpsPoint::new(51.5074 + i as f64 * 0.001, -0.1278))
-    .collect();
-
-// One activity on a different route (NYC, ~1km)
-let nyc: Vec<GpsPoint> = (0..10)
-    .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
     .collect();
 
 let config = MatchConfig::default();
 let sigs = vec![
-    RouteSignature::from_points("monday", &london, &config).unwrap(),
-    RouteSignature::from_points("wednesday", &london, &config).unwrap(),
-    RouteSignature::from_points("friday", &nyc, &config).unwrap(),
+    RouteSignature::from_points("monday", &track, &config).unwrap(),
+    RouteSignature::from_points("wednesday", &track, &config).unwrap(),
 ];
 
-for group in group_signatures(&sigs, &config) {
-    println!("{}: {:?}", group.group_id, group.activity_ids);
-}
-// Output:
-// monday: ["monday", "wednesday"]
-// friday: ["friday"]
+let groups = group_signatures(&sigs, &config);
+// One group: ["monday", "wednesday"]
 ```
 
 ```sh
 cargo run --example route_grouping
 ```
 
-### Configuration
+## Corpus report
 
-All fields have sensible defaults. Adjust thresholds based on GPS accuracy and use case.
+Compare all three detection methods on your own GPS data. Place GPX files in a directory and run:
 
-```rust
-use tracematch::MatchConfig;
+```sh
+cargo run --release --example corpus_report --features synthetic -- ./my_runs
+```
 
-let config = MatchConfig {
-    // Matching thresholds
-    perfect_threshold: 15.0,       // AMD ≤ 15m → 100% match
-    zero_threshold: 100.0,         // AMD ≥ 100m → 0% match
-    min_match_percentage: 50.0,    // Below this, compare_routes returns None
+Example output from a 426-track running corpus:
 
-    // Route filtering
-    min_route_distance: 500.0,     // Ignore routes shorter than 500m
-    max_distance_diff_ratio: 0.30, // Routes must be within 30% length of each other
-    endpoint_threshold: 300.0,     // Start/end points must be within 300m
+```
+  ┌──────────────────────┬────────────┬────────────┬────────────┐
+  │                      │  Density   │   Flow     │  Corridor  │
+  ├──────────────────────┼────────────┼────────────┼────────────┤
+  │ Sections             │          6 │          4 │         32 │
+  │ Time                 │      52 ms │     130 ms │     178 ms │
+  │ Total visits         │        412 │        606 │        821 │
+  │ Median visits        │         63 │        123 │          6 │
+  │ Median distance (m)  │        890 │        526 │       1059 │
+  │ Max distance (m)     │       2960 │        905 │      10206 │
+  └──────────────────────┴────────────┴────────────┴────────────┘
+```
 
-    // Resampling (normalizes point density before comparison)
-    resample_spacing_meters: 50.0, // One point every 50m
-    min_resample_points: 20,       // At least 20 points
-    max_resample_points: 200,      // At most 200 points
+## Performance
 
-    // Simplification (Douglas-Peucker)
-    simplification_tolerance: 0.0001,
-    max_simplified_points: 100,
+Benchmarked on real GPS traces (140-490 points per track):
 
-    ..Default::default()
-};
+| Operation | Time |
+|-----------|------|
+| Create signature | 10-16 us |
+| Compare two routes | 20-28 us |
+| Group 20 routes | 750 us |
+| Corridor detection (426 tracks) | 178 ms |
+
+R-tree spatial indexing gives O(log n) nearest-neighbor queries. Rayon parallelism is optional via the `parallel` feature.
+
+Run benchmarks: `cargo bench --bench route_matching`
+
+## Install
+
+```sh
+cargo add tracematch
 ```
 
 ## References
 
 **Implemented algorithms:**
 
-- Beckmann, N., Kriegel, H.-P., Schneider, R., & Seeger, B. (1990). [The R\*-tree: An efficient and robust access method for points and rectangles](https://doi.org/10.1145/93597.98741). _Proceedings of the 1990 ACM SIGMOD International Conference on Management of Data_, 322–331.
-  - Spatial indexing via [rstar](https://crates.io/crates/rstar) crate
+- Beckmann, N., Kriegel, H.-P., Schneider, R., & Seeger, B. (1990). [The R\*-tree: An efficient and robust access method for points and rectangles](https://doi.org/10.1145/93597.98741). _SIGMOD_, 322-331.
 
-- Tarjan, R. E. (1975). [Efficiency of a good but not linear set union algorithm](https://doi.org/10.1145/321879.321884). _Journal of the ACM_, 22(2), 215–225.
-  - Route grouping with path compression and union by rank
+- Tarjan, R. E. (1975). [Efficiency of a good but not linear set union algorithm](https://doi.org/10.1145/321879.321884). _JACM_, 22(2), 215-225.
 
-- Douglas, D. H., & Peucker, T. K. (1973). [Algorithms for the reduction of the number of points required to represent a digitized line or its caricature](https://doi.org/10.3138/FM57-6770-U75U-7727). _Cartographica_, 10(2), 112–122.
-  - Polyline simplification via [geo](https://crates.io/crates/geo) crate
+- Douglas, D. H., & Peucker, T. K. (1973). [Algorithms for the reduction of the number of points required to represent a digitized line](https://doi.org/10.3138/FM57-6770-U75U-7727). _Cartographica_, 10(2), 112-122.
 
-- Kaufman, L., & Rousseeuw, P. J. (1987). Clustering by means of medoids. _Statistical Data Analysis Based on the L₁-Norm and Related Methods_, 405–416.
-  - Representative route selection (medoid concept; not full PAM)
+- Kaufman, L., & Rousseeuw, P. J. (1987). Clustering by means of medoids. _Statistical Data Analysis Based on the L1-Norm_, 405-416.
+
+- Zhang, T. Y. & Suen, C. Y. (1984). A fast parallel algorithm for thinning digital patterns. _Communications of the ACM_, 27(3), 236-239.
 
 **Conceptual inspiration:**
 
-- Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). _Proceedings of the 2007 ACM SIGMOD International Conference on Management of Data_, 593–604.
-  - MDL principle for avoiding over-segmentation
+- Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). _SIGMOD_, 593-604.
 
-- Xu, W., & Dong, S. (2022). [Application of artificial intelligence in an unsupervised algorithm for trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). _Wireless Communications and Mobile Computing_, 2022, 9540944.
-  - Two-phase segmentation-then-mergence pipeline
+- Xu, W., & Dong, S. (2022). [Unsupervised trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). _Wireless Comm. and Mobile Computing_, 2022.
 
 - Yang, J., Mariescu-Istodor, R., & Fränti, P. (2019). [Three rapid methods for averaging GPS segments](https://doi.org/10.3390/app9224899). _Applied Sciences_, 9(22), 4899.
-  - Consensus polyline computation concepts
+
+- Zygouras, N., et al. Discovering corridors from GPS trajectories.
 
 ## License
 

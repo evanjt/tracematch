@@ -13,11 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tracematch::sections::NoopProgress;
-use tracematch::sections::optimized::{compute_grid_cells, grid_filtered_pairs};
 use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
 use tracematch::{
     GpsPoint, SectionConfig, detect_sections_incremental, detect_sections_multiscale,
-    detect_sections_optimized,
 };
 
 // ============================================================================
@@ -96,30 +94,6 @@ pub fn run_scenario(name: &str, scenario: &SyntheticScenario) -> ScenarioResult 
     }
 }
 
-pub fn run_scenario_optimized(name: &str, scenario: &SyntheticScenario) -> ScenarioResult {
-    let dataset = scenario.generate();
-    let config = SectionConfig::default();
-    let estimated_memory_mb = dataset.metadata.estimated_memory_bytes as f64 / (1024.0 * 1024.0);
-
-    reset_peak_memory();
-    let start = Instant::now();
-    let result = detect_sections_optimized(&dataset.tracks, &dataset.sport_types, &config);
-    let elapsed = start.elapsed();
-    let peak_memory_mb = get_peak_memory_mb();
-
-    ScenarioResult {
-        name: name.to_string(),
-        activities: dataset.tracks.len(),
-        pairs: dataset.metadata.total_pairs,
-        total_points: dataset.metadata.total_points,
-        sections_found: result.len(),
-        overlaps_found: 0,
-        time_ms: elapsed.as_millis(),
-        estimated_memory_mb,
-        peak_memory_mb,
-    }
-}
-
 pub fn format_number(n: usize) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -155,25 +129,6 @@ pub fn bench_scaling_multiscale() {
             r.sections_found,
             r.time_ms,
             r.estimated_memory_mb,
-            r.peak_memory_mb,
-        );
-    }
-}
-
-pub fn bench_scaling_optimized() {
-    println!("## Scaling Curve — Optimized (10km corridor, 80% overlap)\n");
-    println!("| Activities | Points    | Sections | Time       | Peak Alloc |");
-    println!("|------------|-----------|----------|------------|------------|");
-
-    for count in [50, 100, 250, 500, 1000, 2000] {
-        let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
-        let r = run_scenario_optimized("scaling_opt", &scenario);
-        println!(
-            "| {:>10} | {:>9} | {:>8} | {:>8}ms | {:>7.1} MB |",
-            r.activities,
-            format_number(r.total_points),
-            r.sections_found,
-            r.time_ms,
             r.peak_memory_mb,
         );
     }
@@ -255,43 +210,6 @@ pub fn bench_predefined_scenarios() {
             name, r.activities, corridors, r.sections_found, r.time_ms, r.peak_memory_mb,
         );
     }
-}
-
-pub fn bench_grid_filtering() {
-    println!("## Grid Filtering Impact (pair reduction)\n");
-    println!("| Activities | Exhaustive | Grid-filt. | Reduction | Speedup |");
-    println!("|------------|------------|------------|-----------|---------|");
-
-    for count in [50, 100, 250, 500, 1000, 2000] {
-        let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
-        let dataset = scenario.generate();
-        let n = dataset.tracks.len();
-        let exhaustive = n * (n - 1) / 2;
-
-        let track_cells: Vec<_> = dataset
-            .tracks
-            .iter()
-            .map(|(_, pts)| compute_grid_cells(pts))
-            .collect();
-        let filtered = grid_filtered_pairs(&track_cells).len();
-        let reduction = (1.0 - filtered as f64 / exhaustive as f64) * 100.0;
-        let speedup = exhaustive as f64 / filtered.max(1) as f64;
-
-        println!(
-            "| {:>10} | {:>10} | {:>10} | {:>8.1}% | {:>5.1}x |",
-            count,
-            format_number(exhaustive),
-            format_number(filtered),
-            reduction,
-            speedup,
-        );
-    }
-
-    println!(
-        "\n_Note: Grid filtering eliminates cross-region pairs. Single-corridor synthetic data"
-    );
-    println!("shows 0% reduction (all activities nearby). Real-world data with activities across");
-    println!("multiple cities shows 60-90% reduction._");
 }
 
 pub fn bench_incremental() {
@@ -450,7 +368,7 @@ pub fn bench_predefined_scenarios_large() {
 
     for (name, scenario) in &scenarios {
         let corridors = scenario.corridors.len();
-        let r = run_scenario_optimized(name, scenario);
+        let r = run_scenario(name, scenario);
         println!(
             "| {:>19} | {:>10} | {:>9} | {:>8} | {:>8}ms | {:>7.1} MB |",
             name, r.activities, corridors, r.sections_found, r.time_ms, r.peak_memory_mb,
@@ -495,7 +413,7 @@ pub fn bench_mobile_estimates() {
     let mut desktop_times = Vec::new();
     for count in [500, 1000, 2000] {
         let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
-        let r = run_scenario_optimized("mobile_est", &scenario);
+        let r = run_scenario("mobile_est", &scenario);
         desktop_times.push(r.time_ms);
     }
 
