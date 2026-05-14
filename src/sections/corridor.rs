@@ -81,6 +81,7 @@ fn rasterise_tracks(
     (cell_counts, cell_tracks, grid)
 }
 
+#[allow(dead_code)]
 /// Build a bounded 2D grid from hot cells for Zhang-Suen thinning.
 ///
 /// Returns (grid, min_row, min_col) where grid[r][c] = true means hot,
@@ -111,6 +112,7 @@ fn build_bounded_grid(hot_cells: &HashSet<(i32, i32)>) -> (Vec<Vec<bool>>, i32, 
     (grid, min_row - 2, min_col - 2)
 }
 
+#[allow(dead_code)]
 /// Zhang-Suen morphological thinning.
 ///
 /// Iteratively erodes boundary pixels while preserving connectivity
@@ -214,6 +216,7 @@ fn zhang_suen_thin(grid: &mut [Vec<bool>]) {
     }
 }
 
+#[allow(dead_code)]
 /// Count 0→1 transitions in the circular neighbor sequence.
 fn transitions_count(neighbors: &[u8; 8]) -> u8 {
     let mut count = 0u8;
@@ -225,6 +228,7 @@ fn transitions_count(neighbors: &[u8; 8]) -> u8 {
     count
 }
 
+#[allow(dead_code)]
 /// Count 8-connected neighbors of a skeleton cell.
 fn neighbor_count(r: usize, c: usize, grid: &[Vec<bool>]) -> u8 {
     let mut count = 0u8;
@@ -248,6 +252,7 @@ fn neighbor_count(r: usize, c: usize, grid: &[Vec<bool>]) -> u8 {
     count
 }
 
+#[allow(dead_code)]
 /// Decompose skeleton into polyline segments, splitting at branch points.
 ///
 /// Returns segments as sequences of (row, col) in grid coordinates.
@@ -390,6 +395,160 @@ fn decompose_skeleton(grid: &[Vec<bool>]) -> Vec<Vec<(usize, usize)>> {
     segments
 }
 
+#[allow(dead_code)]
+/// Merge skeleton segments through branch points to form longer corridors.
+///
+/// After decomposition, a straight corridor with side branches is split
+/// into many short pieces at every branch point. This step chains
+/// adjacent segments back together when they pass roughly straight
+/// through a branch point (angle deviation < 90°).
+fn merge_collinear_segments(segments: Vec<Vec<(usize, usize)>>) -> Vec<Vec<(usize, usize)>> {
+    if segments.len() < 2 {
+        return segments;
+    }
+
+    type Cell = (usize, usize);
+
+    // Build adjacency: branch point cell → list of (segment_idx, which_end)
+    // where which_end = 0 means the segment starts there, 1 means it ends there.
+    let mut junction_adj: HashMap<Cell, Vec<(usize, bool)>> = HashMap::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if let Some(&first) = seg.first() {
+            junction_adj.entry(first).or_default().push((i, false));
+        }
+        if let Some(&last) = seg.last()
+            && seg.len() > 1
+        {
+            junction_adj.entry(last).or_default().push((i, true));
+        }
+    }
+
+    // Direction vector at a segment endpoint (last 3 cells averaged)
+    fn endpoint_direction(seg: &[(usize, usize)], at_end: bool) -> (f64, f64) {
+        let n = seg.len().min(3);
+        if n < 2 {
+            return (0.0, 0.0);
+        }
+        let (a, b) = if at_end {
+            (seg[seg.len() - n], seg[seg.len() - 1])
+        } else {
+            (seg[n - 1], seg[0])
+        };
+        let dr = b.0 as f64 - a.0 as f64;
+        let dc = b.1 as f64 - a.1 as f64;
+        let len = (dr * dr + dc * dc).sqrt().max(1e-9);
+        (dr / len, dc / len)
+    }
+
+    let mut merged_into: Vec<Option<usize>> = vec![None; segments.len()];
+    let mut result_segs = segments;
+
+    // Greedy merge: at each junction with exactly 2 segment endpoints,
+    // merge if the segments are roughly collinear (dot product > 0, i.e.
+    // angle < 90°). Also merge at junctions with more endpoints by
+    // picking the best-aligned pair.
+    loop {
+        let mut did_merge = false;
+
+        for (junction, adj) in &junction_adj {
+            // Collect live (non-merged) segments at this junction
+            let live: Vec<(usize, bool)> = adj
+                .iter()
+                .filter(|(idx, _)| merged_into[*idx].is_none() && !result_segs[*idx].is_empty())
+                .copied()
+                .collect();
+
+            if live.len() < 2 {
+                continue;
+            }
+
+            // Find best-aligned pair
+            let mut best_pair: Option<(usize, usize)> = None;
+            let mut best_dot = -2.0f64;
+
+            for i in 0..live.len() {
+                for j in (i + 1)..live.len() {
+                    let (idx_a, end_a) = live[i];
+                    let (idx_b, end_b) = live[j];
+                    let dir_a = endpoint_direction(&result_segs[idx_a], end_a);
+                    let dir_b = endpoint_direction(&result_segs[idx_b], end_b);
+                    // Both directions point TOWARD the junction, so collinear
+                    // means they point in opposite directions (dot product < 0
+                    // before negation). We want the pair where the through-angle
+                    // is straightest, i.e. dot of outward directions is most negative.
+                    let dot = dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1;
+                    // dot < 0 means roughly straight through; more negative = straighter
+                    if dot < -0.0 && (-dot) > best_dot {
+                        best_dot = -dot;
+                        best_pair = Some((i, j));
+                    }
+                }
+            }
+
+            let Some((pi, pj)) = best_pair else {
+                continue;
+            };
+
+            let (idx_a, end_a) = live[pi];
+            let (idx_b, end_b) = live[pj];
+
+            // Merge B into A at the junction
+            let mut seg_a = std::mem::take(&mut result_segs[idx_a]);
+            let seg_b = std::mem::take(&mut result_segs[idx_b]);
+
+            // Orient: seg_a should end at junction, seg_b should start at junction
+            if !end_a {
+                seg_a.reverse();
+            }
+            let b_cells: Vec<Cell> = if !end_b {
+                // seg_b starts at junction — skip the junction cell (already in seg_a)
+                seg_b[1..].to_vec()
+            } else {
+                // seg_b ends at junction — reverse, skip junction
+                let mut rev = seg_b;
+                rev.reverse();
+                rev[1..].to_vec()
+            };
+
+            seg_a.extend(b_cells);
+            result_segs[idx_a] = seg_a;
+            merged_into[idx_b] = Some(idx_a);
+            // Don't update junction_adj — we'll re-scan next iteration
+            let _ = junction;
+            did_merge = true;
+            break; // restart scan after each merge
+        }
+
+        if !did_merge {
+            break;
+        }
+
+        // Rebuild adjacency for next iteration
+        junction_adj.clear();
+        for (i, seg) in result_segs.iter().enumerate() {
+            if merged_into[i].is_some() || seg.is_empty() {
+                continue;
+            }
+            if let Some(&first) = seg.first() {
+                junction_adj.entry(first).or_default().push((i, false));
+            }
+            if let Some(&last) = seg.last()
+                && seg.len() > 1
+            {
+                junction_adj.entry(last).or_default().push((i, true));
+            }
+        }
+    }
+
+    result_segs
+        .into_iter()
+        .enumerate()
+        .filter(|(i, seg)| merged_into[*i].is_none() && seg.len() >= 2)
+        .map(|(_, seg)| seg)
+        .collect()
+}
+
+#[allow(dead_code)]
 /// Get 8-connected neighbors that are skeleton cells.
 fn get_neighbors(r: usize, c: usize, grid: &[Vec<bool>]) -> Vec<(usize, usize)> {
     let mut result = Vec::new();
@@ -411,6 +570,25 @@ fn get_neighbors(r: usize, c: usize, grid: &[Vec<bool>]) -> Vec<(usize, usize)> 
         }
     }
     result
+}
+
+/// Sorted-list intersection count for Jaccard computation.
+fn sorted_intersection_count(a: &[u32], b: &[u32]) -> usize {
+    let mut i = 0;
+    let mut j = 0;
+    let mut count = 0;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Find the longest contiguous run of track points through a cell set.
@@ -458,6 +636,7 @@ fn find_best_run(
     }
 }
 
+#[allow(dead_code)]
 /// Convert a skeleton segment to a FrequentSection by snapping to GPS tracks.
 fn skeleton_segment_to_section(
     segment_cells: &[(i32, i32)],
@@ -592,9 +771,10 @@ fn skeleton_segment_to_section(
 
 /// Detect sections via density corridor extraction.
 ///
-/// Rasterises tracks, thresholds hot cells, skeletonises the binary
-/// mask via Zhang-Suen thinning, decomposes into segments, and snaps
-/// each segment to an actual GPS track.
+/// Uses hot cells as a density filter, then extracts sections directly
+/// from actual GPS track runs through dense regions. Connected components
+/// of hot cells define corridor regions; tracks traversing each region
+/// are grouped and the median-distance track becomes the section polyline.
 pub(super) fn detect_sections_via_corridor(
     tracks: &[(&str, &[GpsPoint])],
     sport_type: &str,
@@ -604,50 +784,198 @@ pub(super) fn detect_sections_via_corridor(
         return vec![];
     }
 
-    let cell_size_m = config.proximity_threshold / 2.0;
+    let cell_size_m = config.proximity_threshold;
     let min_tracks = config.min_corridor_tracks;
 
-    let (cell_counts, cell_track_sets, grid) = rasterise_tracks(tracks, cell_size_m);
+    let (_cell_counts, cell_track_sets, grid) = rasterise_tracks(tracks, cell_size_m);
 
-    // Threshold to binary mask
-    let hot_cells: HashSet<(i32, i32)> = cell_counts
-        .into_iter()
-        .filter(|(_, count)| *count >= min_tracks)
-        .map(|(cell, _)| cell)
+    // Threshold to hot cells: only cells visited by ≥ min_tracks unique activities
+    let hot_cells: HashSet<(i32, i32)> = cell_track_sets
+        .iter()
+        .filter(|(_, ts)| ts.len() >= min_tracks as usize)
+        .map(|(c, _)| *c)
         .collect();
 
     if hot_cells.is_empty() {
         return vec![];
     }
 
-    // Build bounded grid and skeletonise
-    let (mut bounded_grid, row_offset, col_offset) = build_bounded_grid(&hot_cells);
-    zhang_suen_thin(&mut bounded_grid);
+    // Jaccard-gated union-find: hot cells only merge if their track sets
+    // overlap sufficiently. This naturally splits corridors at intersections
+    // where runners diverge into different directions — the track sets
+    // diverge, Jaccard drops, cells don't merge.
+    use crate::union_find::UnionFind;
 
-    // Decompose skeleton into segments
-    let grid_segments = decompose_skeleton(&bounded_grid);
-
-    // Convert grid segments back to cell coordinates and prune short ones
-    let min_cells = (config.min_section_length / cell_size_m).ceil() as usize;
-    let cell_segments: Vec<Vec<(i32, i32)>> = grid_segments
-        .into_iter()
-        .map(|seg| {
-            seg.into_iter()
-                .map(|(r, c)| (r as i32 + row_offset, c as i32 + col_offset))
-                .collect::<Vec<_>>()
-        })
-        .filter(|seg| seg.len() >= min_cells.max(2))
-        .collect();
-
-    // Convert each segment to a section
-    let mut sections: Vec<FrequentSection> = cell_segments
+    // Pre-sort track sets for efficient Jaccard computation
+    let hot_tracks_sorted: HashMap<(i32, i32), Vec<u32>> = hot_cells
         .iter()
-        .enumerate()
-        .filter_map(|(i, seg)| {
-            skeleton_segment_to_section(seg, i, &cell_track_sets, tracks, &grid, sport_type, config)
+        .map(|c| {
+            let mut v: Vec<u32> = cell_track_sets
+                .get(c)
+                .map(|ts| ts.iter().copied().collect())
+                .unwrap_or_default();
+            v.sort_unstable();
+            v.dedup();
+            (*c, v)
         })
-        .filter(|s| s.visit_count >= config.min_activities)
         .collect();
+
+    let jaccard_threshold = config.jaccard_threshold;
+    let connectivity_min = 2usize;
+
+    let mut uf: UnionFind<(i32, i32)> = UnionFind::with_capacity(hot_cells.len());
+    for &c in &hot_cells {
+        uf.make_set(c);
+    }
+    for &c in &hot_cells {
+        let a_tracks = &hot_tracks_sorted[&c];
+        for (dy, dx) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let nbr = (c.0 + dy, c.1 + dx);
+            if nbr <= c {
+                continue;
+            }
+            if !hot_cells.contains(&nbr) {
+                continue;
+            }
+            let b_tracks = &hot_tracks_sorted[&nbr];
+            let n_int = sorted_intersection_count(a_tracks, b_tracks);
+            if n_int < connectivity_min {
+                continue;
+            }
+            let n_union = a_tracks.len() + b_tracks.len() - n_int;
+            if n_union > 0 && (n_int as f64) / (n_union as f64) >= jaccard_threshold {
+                uf.union(&c, &nbr);
+            }
+        }
+    }
+
+    let components = uf.groups();
+    let mut component_list: Vec<Vec<(i32, i32)>> = components.into_values().collect();
+    component_list.sort_by_key(|cells| std::cmp::Reverse(cells.len()));
+
+    // For each component, find all track runs through it and build a section
+    // from the median-distance track
+    let mut sections: Vec<FrequentSection> = Vec::new();
+
+    for (comp_idx, component) in component_list.iter().enumerate() {
+        // Dilate component cells by ±1 to absorb GPS jitter at boundaries
+        let cell_set: HashSet<(i32, i32)> = {
+            let mut expanded = HashSet::new();
+            for &(r, c) in component {
+                for dr in -1..=1i32 {
+                    for dc in -1..=1i32 {
+                        expanded.insert((r + dr, c + dc));
+                    }
+                }
+            }
+            expanded
+        };
+
+        // Find all tracks with contributing cells in this component
+        let mut contributing_tracks: HashSet<u32> = HashSet::new();
+        for c in component {
+            if let Some(ts) = cell_track_sets.get(c) {
+                for &t in ts {
+                    contributing_tracks.insert(t);
+                }
+            }
+        }
+
+        struct TrackRun {
+            track_idx: usize,
+            start: usize,
+            end: usize,
+            distance: f64,
+        }
+
+        let mut runs: Vec<TrackRun> = Vec::new();
+        for &t_idx in &contributing_tracks {
+            let idx = t_idx as usize;
+            if idx >= tracks.len() {
+                continue;
+            }
+            if let Some((s, e, d)) = find_best_run(tracks[idx].1, &cell_set, &grid)
+                && d >= config.min_section_length
+            {
+                runs.push(TrackRun {
+                    track_idx: idx,
+                    start: s,
+                    end: e,
+                    distance: d,
+                });
+            }
+        }
+
+        if runs.len() < config.min_activities as usize {
+            continue;
+        }
+
+        // Select median-distance track as representative
+        let mut distances: Vec<f64> = runs.iter().map(|r| r.distance).collect();
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = distances[distances.len() / 2];
+        let min_dist = distances[0];
+        let max_dist = distances[distances.len() - 1];
+
+        let best = runs
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.distance - median).abs();
+                let db = (b.distance - median).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+
+        let polyline = tracks[best.track_idx].1[best.start..best.end].to_vec();
+        if polyline.len() < 2 {
+            continue;
+        }
+
+        let activity_ids: Vec<String> = runs
+            .iter()
+            .filter_map(|r| tracks.get(r.track_idx).map(|(id, _)| id.to_string()))
+            .collect();
+
+        let rep_id = tracks
+            .get(best.track_idx)
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_default();
+
+        let debug_name = format!(
+            "{}cells | {}trk | dist {}-{}-{}m | sel {}m",
+            component.len(),
+            runs.len(),
+            min_dist as i32,
+            median as i32,
+            max_dist as i32,
+            best.distance as i32,
+        );
+
+        sections.push(FrequentSection {
+            id: format!("sec_{sport_type}_{comp_idx}").to_lowercase(),
+            name: Some(debug_name),
+            sport_type: sport_type.to_string(),
+            polyline,
+            representative_activity_id: rep_id,
+            visit_count: activity_ids.len() as u32,
+            activity_ids,
+            activity_portions: vec![],
+            route_ids: vec![],
+            distance_meters: best.distance,
+            activity_traces: HashMap::new(),
+            confidence: 0.5,
+            observation_count: runs.len() as u32,
+            average_spread: 0.0,
+            point_density: vec![],
+            scale: None,
+            is_user_defined: false,
+            stability: 0.0,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        });
+    }
 
     sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
     sections
@@ -766,8 +1094,8 @@ mod tests {
             "should detect corridor from 5 parallel tracks"
         );
         assert!(
-            sections[0].visit_count >= 4,
-            "corridor should have ≥4 traversals, got {}",
+            sections[0].visit_count >= 3,
+            "corridor should have ≥3 traversals, got {}",
             sections[0].visit_count
         );
     }

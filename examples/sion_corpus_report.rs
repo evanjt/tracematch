@@ -294,7 +294,7 @@ fn main() {
     let mut corridor_sections =
         tracematch::detect_sections_corridor(&raw_tracks, &sport_types, &section_config);
     let dur_corr = t_corr.elapsed();
-    corridor_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+    corridor_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
 
     println!("  Sections:            {}", corridor_sections.len());
     println!("  Time:                {}", fmt_ms(dur_corr.as_millis()));
