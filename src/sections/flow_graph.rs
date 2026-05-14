@@ -55,7 +55,7 @@ fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> F
         if n == 0 { 0.0 } else { sum / n as f64 }
     };
 
-    let cell_size_m = config.proximity_threshold * 2.0;
+    let cell_size_m = config.proximity_threshold;
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
     let mut cell_visits: HashMap<(i32, i32), u32> = HashMap::new();
@@ -337,6 +337,83 @@ fn trace_edges(
     edges
 }
 
+/// Merge edges at pass-through junctions. If a junction connects exactly
+/// 2 surviving edges, the junction is irrelevant for sections (the third
+/// exit was too short) — merge the two edges into one longer section.
+fn merge_pass_through_edges(mut edges: Vec<GraphEdge>, nodes: &[GraphNode]) -> Vec<GraphEdge> {
+    if edges.len() < 2 {
+        return edges;
+    }
+
+    let node_cells: HashSet<(i32, i32)> = nodes.iter().map(|n| n.cell).collect();
+
+    loop {
+        // Build adjacency: junction cell → list of edge indices
+        let mut junction_edges: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, e) in edges.iter().enumerate() {
+            if let Some(&first) = e.cells.first()
+                && node_cells.contains(&first)
+            {
+                junction_edges.entry(first).or_default().push(i);
+            }
+            if let Some(&last) = e.cells.last()
+                && node_cells.contains(&last)
+            {
+                junction_edges.entry(last).or_default().push(i);
+            }
+        }
+
+        // Find a pass-through junction (exactly 2 edges)
+        let merge = junction_edges.iter().find_map(|(junction, edge_idxs)| {
+            if edge_idxs.len() == 2 {
+                Some((*junction, edge_idxs[0], edge_idxs[1]))
+            } else {
+                None
+            }
+        });
+
+        let Some((junction, idx_a, idx_b)) = merge else {
+            break;
+        };
+
+        // Merge edge B into edge A at the junction point
+        let (a, b) = if idx_a < idx_b {
+            let (left, right) = edges.split_at_mut(idx_b);
+            (&mut left[idx_a], &right[0])
+        } else {
+            let (left, right) = edges.split_at_mut(idx_a);
+            (&mut left[idx_b], &right[0])
+        };
+
+        // Orient: ensure a ends at junction and b starts at junction
+        if a.cells.last() != Some(&junction) {
+            a.cells.reverse();
+        }
+        let b_cells: Vec<(i32, i32)> = if b.cells.first() == Some(&junction) {
+            b.cells[1..].to_vec()
+        } else {
+            let mut rev = b.cells.clone();
+            rev.reverse();
+            if rev.first() == Some(&junction) {
+                rev[1..].to_vec()
+            } else {
+                rev
+            }
+        };
+
+        a.cells.extend(b_cells);
+        for id in &b.track_ids {
+            a.track_ids.insert(*id);
+        }
+
+        // Remove edge B
+        let remove_idx = idx_a.max(idx_b);
+        edges.remove(remove_idx);
+    }
+
+    edges
+}
+
 fn compute_path_length(cells: &[(i32, i32)], grid: &CellGrid) -> f64 {
     let mut total = 0.0;
     for w in cells.windows(2) {
@@ -516,7 +593,8 @@ pub(super) fn detect_sections_via_flow_graph(
         return vec![];
     }
 
-    let edges = trace_edges(&flow, &nodes, min_visits, config.min_section_length);
+    let raw_edges = trace_edges(&flow, &nodes, min_visits, config.min_section_length);
+    let edges = merge_pass_through_edges(raw_edges, &nodes);
 
     let mut sections: Vec<FrequentSection> = edges
         .iter()
