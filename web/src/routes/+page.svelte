@@ -71,11 +71,38 @@
   let importProgress = $state<{ current: number; total: number } | null>(null);
 
   // Section detection parameters
+  const PRESETS = {
+    relaxed: { proximityThreshold: 75, minSectionLength: 100, minActivities: 2, minRoutes: 2 },
+    balanced: { proximityThreshold: 50, minSectionLength: 200, minActivities: 3, minRoutes: 3 },
+    strict: { proximityThreshold: 35, minSectionLength: 500, minActivities: 5, minRoutes: 4 },
+  } as const;
+  type PresetKey = keyof typeof PRESETS;
+
   let proximityThreshold = $state(50);
   let minSectionLength = $state(200);
   let minActivities = $state(3);
   let minRoutes = $state(3);
+  let activePreset = $state<PresetKey | null>('balanced');
   let settingsCollapsed = $state(true);
+
+  function applyPreset(key: PresetKey) {
+    const p = PRESETS[key];
+    proximityThreshold = p.proximityThreshold;
+    minSectionLength = p.minSectionLength;
+    minActivities = p.minActivities;
+    minRoutes = p.minRoutes;
+    activePreset = key;
+  }
+
+  function onSliderChange() {
+    activePreset = (Object.entries(PRESETS) as [PresetKey, typeof PRESETS[PresetKey]][]).find(
+      ([, p]) =>
+        p.proximityThreshold === proximityThreshold &&
+        p.minSectionLength === minSectionLength &&
+        p.minActivities === minActivities &&
+        p.minRoutes === minRoutes
+    )?.[0] ?? null;
+  }
 
   // Layer visibility
   let showTraces = $state(true);
@@ -879,28 +906,37 @@
           </button>
           {#if !settingsCollapsed}
             <div class="settings-panel">
+              <div class="preset-chips">
+                {#each Object.keys(PRESETS) as key}
+                  <button
+                    class="preset-chip"
+                    class:active={activePreset === key}
+                    onclick={() => applyPreset(key as PresetKey)}
+                  >{key}</button>
+                {/each}
+              </div>
               <label class="slider-row">
                 <span class="slider-label">Proximity threshold</span>
                 <span class="slider-value">{proximityThreshold} m</span>
-                <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} />
+                <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} oninput={onSliderChange} />
                 <span class="slider-hint">Max distance between tracks to overlap</span>
               </label>
               <label class="slider-row">
                 <span class="slider-label">Min section length</span>
                 <span class="slider-value">{minSectionLength} m</span>
-                <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} />
+                <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} oninput={onSliderChange} />
                 <span class="slider-hint">Shortest section to detect</span>
               </label>
               <label class="slider-row">
                 <span class="slider-label">Min activities</span>
                 <span class="slider-value">{minActivities}</span>
-                <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
+                <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                 <span class="slider-hint">Activities needed to form a section</span>
               </label>
               <label class="slider-row">
                 <span class="slider-label">Min distinct routes</span>
                 <span class="slider-value">{minRoutes}</span>
-                <input type="range" min="2" max="6" step="1" bind:value={minRoutes} />
+                <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
                 <span class="slider-hint">How many different routes must overlap</span>
               </label>
             </div>
@@ -973,28 +1009,37 @@
             </button>
             {#if !settingsCollapsed}
               <div class="settings-panel">
+                <div class="preset-chips">
+                  {#each Object.keys(PRESETS) as key}
+                    <button
+                      class="preset-chip"
+                      class:active={activePreset === key}
+                      onclick={() => applyPreset(key as PresetKey)}
+                    >{key}</button>
+                  {/each}
+                </div>
                 <label class="slider-row">
                   <span class="slider-label">Proximity threshold</span>
                   <span class="slider-value">{proximityThreshold} m</span>
-                  <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} />
+                  <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} oninput={onSliderChange} />
                   <span class="slider-hint">Max distance between tracks to overlap</span>
                 </label>
                 <label class="slider-row">
                   <span class="slider-label">Min section length</span>
                   <span class="slider-value">{minSectionLength} m</span>
-                  <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} />
+                  <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} oninput={onSliderChange} />
                   <span class="slider-hint">Shortest section to detect</span>
                 </label>
                 <label class="slider-row">
                   <span class="slider-label">Min activities</span>
                   <span class="slider-value">{minActivities}</span>
-                  <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
+                  <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                   <span class="slider-hint">Activities needed to form a section</span>
                 </label>
                 <label class="slider-row">
                   <span class="slider-label">Min distinct routes</span>
                   <span class="slider-value">{minRoutes}</span>
-                  <input type="range" min="2" max="6" step="1" bind:value={minRoutes} />
+                  <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
                   <span class="slider-hint">How many different routes must overlap</span>
                 </label>
               </div>
@@ -1498,6 +1543,30 @@
     flex-direction: column;
     gap: 10px;
     margin-bottom: 8px;
+  }
+
+  .preset-chips {
+    display: flex;
+    gap: 6px;
+  }
+  .preset-chip {
+    flex: 1;
+    padding: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .preset-chip:hover { border-color: var(--primary); color: var(--text); }
+  .preset-chip.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
   }
 
   .slider-row {

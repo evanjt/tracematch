@@ -7,6 +7,10 @@ WORKDIR /build
 COPY . .
 RUN cd tracematch-wasm && wasm-pack build --target web --release
 
+# Stage 1b: Dev WASM watcher (reuses wasm-builder toolchain)
+FROM wasm-builder AS wasm-dev
+RUN cargo install cargo-watch
+
 # Stage 2: Build web frontend
 FROM node:22-slim AS web-builder
 
