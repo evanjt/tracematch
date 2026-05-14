@@ -94,8 +94,8 @@ path = "examples/scaling_report.rs"
 required-features = ["synthetic"]
 
 [[example]]
-name = "sion_corpus_report"
-path = "examples/sion_corpus_report.rs"
+name = "corpus_report"
+path = "examples/corpus_report.rs"
 
 [[example]]
 name = "density_grid_report"

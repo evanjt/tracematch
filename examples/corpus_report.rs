@@ -1,13 +1,8 @@
-//! End-to-end report on the sionrunning corpus.
+//! Corpus report: runs all three detection methods on a directory of GPX files.
 //!
-//! Loads every GPX in `sionrunning/`, runs route grouping + section
-//! detection through all three detection modes, and prints a comparison.
+//!     cargo run --release --example corpus_report --features synthetic -- ./my_runs
 //!
-//! Run from the tracematch repo root:
-//!     cargo run --release --example sion_corpus_report --features synthetic
-//!
-//! If the sionrunning/ directory is missing, the example exits with a
-//! clear message instead of failing.
+//! Pass a directory of GPX files as the first argument.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,16 +22,13 @@ fn section_stats(sections: &[FrequentSection]) -> (u32, u32, f64, f64) {
     if sections.is_empty() {
         return (0, 0, 0.0, 0.0);
     }
-    let max_visits = sections.iter().map(|s| s.visit_count).max().unwrap_or(0);
     let mut visits: Vec<u32> = sections.iter().map(|s| s.visit_count).collect();
     visits.sort();
     let median_visits = visits[visits.len() / 2];
+    let total_visits: u32 = visits.iter().sum();
     let mut dists: Vec<f64> = sections.iter().map(|s| s.distance_meters).collect();
     dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_dist = dists[dists.len() / 2];
-    let total_visits: u32 = visits.iter().sum();
-    let _ = max_visits;
-    let _ = total_visits;
     (
         median_visits,
         total_visits,
@@ -46,14 +38,17 @@ fn section_stats(sections: &[FrequentSection]) -> (u32, u32, f64, f64) {
 }
 
 fn main() {
-    let dir = Path::new("sionrunning");
+    let args: Vec<String> = std::env::args().collect();
+    let dir_path = args.get(1).map(|s| s.as_str()).unwrap_or("sionrunning");
+    let dir = Path::new(dir_path);
     if !dir.exists() {
+        eprintln!("Directory not found: {}", dir.display());
+        eprintln!();
+        eprintln!("Usage: corpus_report [DIRECTORY]");
+        eprintln!();
+        eprintln!("Place GPX files in a directory and pass the path:");
         eprintln!(
-            "sionrunning/ not found in cwd ({}). \n\
-             Run from the tracematch repo root.",
-            std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "?".into())
+            "  cargo run --release --example corpus_report --features synthetic -- ./my_runs"
         );
         return;
     }
@@ -145,7 +140,7 @@ fn main() {
 
     println!();
     println!("┌─────────────────────────────────────────────────────────┐");
-    println!("│                  Sion Corpus Report                     │");
+    println!("│                    Corpus Report                        │");
     println!("└─────────────────────────────────────────────────────────┘");
     println!();
     println!(

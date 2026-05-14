@@ -2,7 +2,7 @@
 //!
 //! Loads GPX files, times detection phases via the
 //! `DetectionProgressCallback` trait, formats durations. Used by
-//! `sion_corpus_report.rs` and `density_grid_report.rs`.
+//! `corpus_report.rs` and `density_grid_report.rs`.
 
 #![allow(dead_code)]
 
