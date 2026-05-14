@@ -489,7 +489,7 @@ fn edge_to_section(
     tracks: &[(&str, &[GpsPoint])],
     track_lookup: &HashMap<&str, &[GpsPoint]>,
     proximity_threshold: f64,
-    sport_type: &str,
+    sport_types: &HashMap<String, String>,
 ) -> Option<FrequentSection> {
     let cell_set: HashSet<(i32, i32)> = edge.cells.iter().copied().collect();
 
@@ -549,10 +549,12 @@ fn edge_to_section(
         proximity_threshold,
     );
 
+    let section_sport = super::dominant_sport(&activity_ids, sport_types);
+
     Some(FrequentSection {
-        id: format!("sec_{sport_type}_{edge_idx}").to_lowercase(),
+        id: format!("sec_{section_sport}_{edge_idx}").to_lowercase(),
         name: None,
-        sport_type: sport_type.to_string(),
+        sport_type: section_sport,
         polyline,
         representative_activity_id: rep_id,
         visit_count: activity_ids.len() as u32,
@@ -582,7 +584,7 @@ fn edge_to_section(
 /// them. Each edge becomes a section.
 pub(super) fn detect_sections_via_flow_graph(
     tracks: &[(&str, &[GpsPoint])],
-    sport_type: &str,
+    sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
     if tracks.len() < 2 {
@@ -616,7 +618,7 @@ pub(super) fn detect_sections_via_flow_graph(
                 tracks,
                 &track_lookup,
                 config.proximity_threshold,
-                sport_type,
+                sport_types,
             )
         })
         .filter(|s| s.visit_count >= config.min_activities)
