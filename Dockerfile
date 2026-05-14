@@ -1,15 +1,30 @@
+# syntax=docker/dockerfile:1
+
 # Stage 1: Build WASM
 FROM rust:1.95-bookworm AS wasm-builder
 
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
 WORKDIR /build
-COPY . .
-RUN cd tracematch-wasm && wasm-pack build --target web --release
+
+# Cache Cargo registry and git deps across builds
+COPY Cargo.toml Cargo.lock ./
+COPY tracematch-wasm/Cargo.toml tracematch-wasm/Cargo.toml
+RUN mkdir -p src && echo "" > src/lib.rs && mkdir -p tracematch-wasm/src && echo "fn main(){}" > tracematch-wasm/src/lib.rs \
+    && cargo fetch
+
+# Copy real source and build
+COPY src/ src/
+COPY tracematch-wasm/src/ tracematch-wasm/src/
+RUN --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    cd tracematch-wasm && wasm-pack build --target web --release \
+    && cp -r pkg /build/wasm-pkg
 
 # Stage 1b: Dev WASM watcher (reuses wasm-builder toolchain)
 FROM wasm-builder AS wasm-dev
-RUN cargo install cargo-watch
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install cargo-watch
 
 # Stage 2: Build web frontend
 FROM node:22-slim AS web-builder
@@ -19,7 +34,7 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 COPY web/ .
-COPY --from=wasm-builder /build/tracematch-wasm/pkg/ src/lib/wasm/pkg/
+COPY --from=wasm-builder /build/wasm-pkg/ src/lib/wasm/pkg/
 RUN npm run build
 
 # Stage 3: Serve
