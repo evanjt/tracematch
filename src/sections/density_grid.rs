@@ -1,33 +1,30 @@
 //! Density-grid section detection.
 //!
-//! Replaces the pairwise `find_full_track_overlap` + `cluster_overlaps`
-//! pipeline. Treats section detection as a density problem: rasterise
-//! each track's polyline into a fine cell grid, build an inverted index
-//! `cell → [track_ids]`, find cells visited by ≥ `min_activities` tracks,
-//! and connect them via Jaccard-gated union-find into candidate sections.
+//! Rasterise each track into a cell grid, build an inverted index
+//! `cell → [track_ids]`, keep cells visited by ≥ 2 tracks
+//! (connectivity floor), and connect them via containment-gated
+//! union-find into candidate sections.
 //!
-//! Output is `Vec<OverlapCluster>` shaped exactly like the legacy
-//! `cluster_overlaps()` output, so downstream `process_cluster`
-//! (medoid + consensus polyline + activity portions) runs unchanged.
+//! Output is `Vec<OverlapCluster>` consumed by downstream
+//! `process_cluster` (medoid + consensus polyline + activity portions).
 //!
 //! ## Algorithm
 //!
-//! 1. **Rasterise** each track to the set of cells its polyline touches
-//!    (Bresenham line through cells of size `proximity_threshold / 2`).
+//! 1. **Rasterise** each track to cells of size `proximity_threshold`.
 //! 2. **Invert** to `cell → [track_ids]`.
-//! 3. **Hot cells**: keep cells visited by ≥ `min_activities` tracks.
-//! 4. **Connect**: 4-adjacency union-find, gated by Jaccard similarity
-//!    of adjacent cells' track sets. Two cells merge iff their track
-//!    sets overlap by ≥ `JACCARD_THRESHOLD` (and share ≥ `min_activities`
-//!    tracks). At an intersection the track sets diverge, so the edge
-//!    isn't added and the section splits naturally.
-//! 5. **Extract** per-track portions: for each contributing track, find
-//!    the longest continuous run of points whose cells fall in the
-//!    component's cell-set. Discard portions shorter than
-//!    `min_section_length`.
+//! 3. **Hot cells**: keep cells with ≥ `connectivity_min` (= 2) tracks.
+//!    Bridge cells (fewer than `min_routes` tracks but ≥ 2) maintain
+//!    corridor connectivity where GPS jitter shifts a route rep into an
+//!    adjacent cell. Extraction still requires `min_routes` per cluster.
+//! 4. **Connect**: 4-adjacency union-find, gated by containment-of-minimum:
+//!    `|intersection| / min(|A|, |B|) ≥ jaccard_threshold`. Bridge cells
+//!    score high (2/2 = 1.0) next to larger hot cells, keeping corridors
+//!    connected at branch points.
+//! 5. **Extract** per-track portions: longest continuous run of points
+//!    whose cells fall in the component's cell-set. Discard portions
+//!    shorter than `min_section_length`.
 //! 6. **Synthesise** `OverlapCluster` per candidate with anchor-paired
-//!    `FullTrackOverlap` entries — preserves the wire format that
-//!    `select_medoid` / `process_cluster` consume.
+//!    `FullTrackOverlap` entries.
 
 use super::SectionConfig;
 use super::overlap::{FullTrackOverlap, OverlapCluster};
@@ -314,7 +311,7 @@ pub(super) fn detect_clusters_via_density(
         if n == 0 { 0.0 } else { sum / n as f64 }
     };
 
-    let cell_size_m = config.proximity_threshold / 2.0;
+    let cell_size_m = config.proximity_threshold;
     let grid = CellGrid::new(cell_size_m, ref_lat);
     let min_acts = config.min_routes as usize;
 
@@ -338,10 +335,14 @@ pub(super) fn detect_clusters_via_density(
         }
     }
 
-    // Phase C: hot cells + Jaccard-gated 4-connected union-find.
+    // Phase C: containment-gated 4-connected union-find.
+    // Connectivity uses a lower floor so GPS-jitter gaps (cells where
+    // one route's rep drifts into an adjacent cell) don't fragment
+    // continuous corridors. Extraction still requires min_routes.
+    let connectivity_min = 2.min(min_acts);
     let mut hot_cells: Vec<(i32, i32)> = cell_to_tracks
         .iter()
-        .filter(|(_, v)| v.len() >= min_acts)
+        .filter(|(_, v)| v.len() >= connectivity_min)
         .map(|(c, _)| *c)
         .collect();
     hot_cells.sort_unstable();
@@ -359,14 +360,14 @@ pub(super) fn detect_clusters_via_density(
 
     let edge_ok = |a: &[u32], b: &[u32]| -> bool {
         let n_int = intersection_size(a, b);
-        if n_int < min_acts {
+        if n_int < connectivity_min {
             return false;
         }
-        let n_union = a.len() + b.len() - n_int;
-        if n_union == 0 {
+        let n_min = a.len().min(b.len());
+        if n_min == 0 {
             return false;
         }
-        (n_int as f64) / (n_union as f64) >= config.jaccard_threshold
+        (n_int as f64) / (n_min as f64) >= config.jaccard_threshold
     };
 
     let mut uf: UnionFind<(i32, i32)> = UnionFind::with_capacity(hot_cells.len());
@@ -527,6 +528,56 @@ mod tests {
             clusters.is_empty(),
             "expected no clusters, got {}",
             clusters.len()
+        );
+    }
+
+    #[test]
+    fn branching_corridor_stays_connected() {
+        let mut config = SectionConfig::default();
+        config.min_routes = 3;
+        config.min_section_length = 50.0;
+        config.proximity_threshold = 50.0;
+
+        let n_shared = 200;
+        let n_extra = 200;
+
+        let track_a: Vec<GpsPoint> = (0..(n_shared + n_extra))
+            .map(|i| GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36))
+            .collect();
+        let track_b: Vec<GpsPoint> = (0..(n_shared + n_extra))
+            .map(|i| GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36002))
+            .collect();
+        let track_c: Vec<GpsPoint> = (0..(n_shared + n_extra))
+            .map(|i| {
+                if i < n_shared {
+                    GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36001)
+                } else {
+                    let j = (i - n_shared) as f64;
+                    GpsPoint::new(46.20 + (n_shared as f64) * 0.00005, 7.36001 + j * 0.00005)
+                }
+            })
+            .collect();
+
+        let sport_tracks: Vec<(&str, &[GpsPoint])> = vec![
+            ("a", track_a.as_slice()),
+            ("b", track_b.as_slice()),
+            ("c", track_c.as_slice()),
+        ];
+
+        let clusters = detect_clusters_via_density(&sport_tracks, &config);
+        assert!(
+            !clusters.is_empty(),
+            "expected at least one cluster from 3 converging tracks"
+        );
+        let max_acts = clusters
+            .iter()
+            .map(|c| c.activity_ids.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_acts >= 3,
+            "largest cluster should include all 3 tracks, got {}",
+            max_acts
         );
     }
 }

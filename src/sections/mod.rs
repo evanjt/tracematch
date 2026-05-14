@@ -263,9 +263,9 @@ pub struct SectionConfig {
     /// Preserve hierarchical sections (don't deduplicate short sections inside longer ones)
     pub preserve_hierarchy: bool,
     /// Density-grid section continuity. Two adjacent hot cells merge
-    /// into the same section iff their track sets overlap by ≥ this
-    /// Jaccard fraction. Lower (≈0.3) → longer continuous sections
-    /// (whole shared routes); higher (≈0.8) → more granular pieces
+    /// iff containment-of-minimum ≥ this threshold:
+    /// `|intersection| / min(|A|, |B|)`. Lower (≈0.3) → longer
+    /// continuous sections; higher (≈0.8) → more granular pieces
     /// that split at any track divergence. Default 0.5.
     #[serde(default = "default_jaccard_threshold")]
     pub jaccard_threshold: f64,
@@ -782,7 +782,7 @@ pub fn detect_sections_from_tracks(
             sport_type
         );
 
-        // Density-grid section detection over ROUTE representatives
+        // Containment-gated density grid over ROUTE representatives
         // (one rep per significant group). Sections emerge from the
         // overlap of distinct routes — not from one route being
         // repeated. See `density_grid.rs` for the algorithm.
@@ -1078,15 +1078,11 @@ pub fn detect_sections_multiscale_with_progress(
             continue;
         }
 
-        // Phase 1 + 2: density-grid section detection.
-        //
-        // Replaces the legacy pipeline (pairwise grid filter → R-tree build
-        // → `find_full_track_overlap` per pair → `cluster_overlaps` per
-        // preset) with a single density-grid pass that produces
-        // `OverlapCluster`s directly. Sections are defined as dense
-        // regions where ≥ min_activities tracks share continuous cells —
-        // a tighter semantic match for "where do many activities pass
-        // through together?" than pairwise overlap detection.
+        // Phase 1 + 2: containment-gated density grid with connectivity
+        // bridging. Route representatives are rasterised into cells of
+        // size proximity_threshold; bridge cells (≥ 2 tracks) maintain
+        // corridor connectivity where GPS jitter shifts a route rep.
+        // Extraction still requires min_routes contributing tracks.
         //
         // BuildingRtrees fires once for the density-grid pass (which has
         // no internal progress hooks). FindingOverlaps then ticks per
