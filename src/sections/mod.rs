@@ -120,6 +120,50 @@ impl std::str::FromStr for DetectionMode {
     }
 }
 
+/// Which algorithm to use for section detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum DetectionMethod {
+    /// Density clustering on raw GPS traces. Default. Best coverage.
+    #[default]
+    Corridor,
+    /// Route-overlap detection via rasterization + union-find.
+    /// Requires pre-computed route groups.
+    DensityGrid,
+    /// Junction detection from directed GPS flow.
+    /// Sections are edges between divergence points.
+    FlowGraph,
+}
+
+impl DetectionMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DetectionMethod::Corridor => "corridor",
+            DetectionMethod::DensityGrid => "density_grid",
+            DetectionMethod::FlowGraph => "flow_graph",
+        }
+    }
+}
+
+impl std::fmt::Display for DetectionMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DetectionMethod {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "corridor" => Ok(DetectionMethod::Corridor),
+            "density_grid" | "densitygrid" | "density" => Ok(DetectionMethod::DensityGrid),
+            "flow_graph" | "flowgraph" | "flow" => Ok(DetectionMethod::FlowGraph),
+            _ => Ok(DetectionMethod::Corridor),
+        }
+    }
+}
+
 /// Scale name for multi-scale section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -303,6 +347,9 @@ pub struct SectionConfig {
     /// skeletonization. Higher = fewer, more confident sections. Default 3.
     #[serde(default = "default_min_corridor_tracks")]
     pub min_corridor_tracks: u32,
+    /// Which detection algorithm to use. Default: Corridor.
+    #[serde(default)]
+    pub detection_method: DetectionMethod,
 }
 
 fn default_jaccard_threshold() -> f64 {
@@ -344,6 +391,7 @@ impl Default for SectionConfig {
             min_cell_visits: default_min_cell_visits(),
             divergence_threshold: default_divergence_threshold(),
             min_corridor_tracks: default_min_corridor_tracks(),
+            detection_method: DetectionMethod::default(),
         }
     }
 }
@@ -735,6 +783,25 @@ pub fn process_cluster(
         created_at: None,
         consensus_state: None,
     })
+}
+
+/// Detect sections using the configured method.
+///
+/// Dispatches to corridor, density grid, or flow graph based on
+/// `config.detection_method`. Corridor is the default.
+pub fn detect_sections(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    groups: &[RouteGroup],
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    match config.detection_method {
+        DetectionMethod::Corridor => detect_sections_corridor(tracks, sport_types, config),
+        DetectionMethod::FlowGraph => detect_sections_flow_graph(tracks, sport_types, config),
+        DetectionMethod::DensityGrid => {
+            detect_sections_multiscale(tracks, sport_types, groups, config).sections
+        }
+    }
 }
 
 /// Detect sections via density corridor extraction.

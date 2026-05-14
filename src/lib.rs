@@ -80,13 +80,14 @@ pub mod synthetic;
 #[cfg(feature = "synthetic")]
 pub mod scenarios;
 pub use sections::{
-    DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
-    MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
-    SectionPortion, SplitResult, detect_sections_corridor, detect_sections_flow_graph,
-    detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, find_all_track_portions, find_sections_in_route,
-    incremental::IncrementalResult, incremental::detect_sections_incremental,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    DetectionMethod, DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats,
+    FrequentSection, MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset,
+    SectionConfig, SectionMatch, SectionPortion, SplitResult, detect_sections,
+    detect_sections_corridor, detect_sections_flow_graph, detect_sections_from_tracks,
+    detect_sections_multiscale, detect_sections_multiscale_with_progress, find_all_track_portions,
+    find_sections_in_route, incremental::IncrementalResult,
+    incremental::detect_sections_incremental, recalculate_section_polyline, split_section_at_index,
+    split_section_at_point,
 };
 
 // ============================================================================
