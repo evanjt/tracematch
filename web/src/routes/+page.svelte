@@ -78,13 +78,40 @@
   } as const;
   type PresetKey = keyof typeof PRESETS;
 
-  let proximityThreshold = $state(50);
-  let minSectionLength = $state(200);
-  let minActivities = $state(3);
-  let minRoutes = $state(3);
-  let activePreset = $state<PresetKey | null>('balanced');
-  let sectionMode = $state<'density' | 'flow' | 'corridor'>('density');
+  const SETTINGS_KEY = 'tracematch-detection-settings';
+  type SavedSettings = {
+    proximityThreshold: number;
+    minSectionLength: number;
+    minActivities: number;
+    minRoutes: number;
+    sectionMode: 'density' | 'flow' | 'corridor';
+  };
+
+  function loadSettings(): Partial<SavedSettings> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+
+  const saved = loadSettings();
+  let proximityThreshold = $state(saved.proximityThreshold ?? 50);
+  let minSectionLength = $state(saved.minSectionLength ?? 200);
+  let minActivities = $state(saved.minActivities ?? 3);
+  let minRoutes = $state(saved.minRoutes ?? 3);
+  let activePreset = $state<PresetKey | null>(null);
+  let sectionMode = $state<'density' | 'flow' | 'corridor'>(saved.sectionMode ?? 'density');
   let settingsCollapsed = $state(true);
+
+  // Determine initial preset from loaded values
+  activePreset = (Object.entries(PRESETS) as [PresetKey, typeof PRESETS[PresetKey]][]).find(
+    ([, p]) =>
+      p.proximityThreshold === proximityThreshold &&
+      p.minSectionLength === minSectionLength &&
+      p.minActivities === minActivities &&
+      p.minRoutes === minRoutes
+  )?.[0] ?? null;
 
   function applyPreset(key: PresetKey) {
     const p = PRESETS[key];
@@ -104,6 +131,15 @@
         p.minRoutes === minRoutes
     )?.[0] ?? null;
   }
+
+  // Persist detection settings to localStorage
+  $effect(() => {
+    if (typeof localStorage === 'undefined') return;
+    const settings: SavedSettings = {
+      proximityThreshold, minSectionLength, minActivities, minRoutes, sectionMode,
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  });
 
   // Layer visibility
   let showTraces = $state(true);
