@@ -3,6 +3,7 @@
   import { traceStore, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
   import { runAnalysisAsync } from '$lib/wasm/engine';
+  import MethodIllustration from '$lib/components/MethodIllustration.svelte';
   import type { RouteGroup, FrequentSection, GpsPoint } from '$lib/wasm/types';
 
   // --- Sport color system ---
@@ -657,7 +658,7 @@
           if (!file.name.endsWith('.gpx')) {
             completed++;
             importProgress = { current: completed, total };
-            return { err: `Skipped ${file.name} — only GPX files are supported currently`, traces: [] };
+            return { err: `Skipped ${file.name}, only GPX files are supported`, traces: [] };
           }
           try {
             const text = await file.text();
@@ -780,7 +781,7 @@
 </script>
 
 <svelte:head>
-  <title>tracematch — GPS route analysis</title>
+  <title>tracematch - GPS route analysis</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -948,10 +949,20 @@
           {#if !settingsCollapsed}
             <div class="settings-panel">
               <div class="preset-chips">
+                <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
                 <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
                 <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
-                <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
               </div>
+              <p class="mode-description">
+                {#if sectionMode === 'corridor'}
+                  Finds corridors where many activities converge. Works on raw GPS traces, no route grouping needed. Best coverage.
+                {:else if sectionMode === 'density'}
+                  Detects sections where distinct route groups overlap. Requires multiple different routes to share a stretch.
+                {:else}
+                  Identifies road junctions from GPS flow and traces sections between divergence points.
+                {/if}
+              </p>
+              <MethodIllustration mode={sectionMode} />
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
                   <button
@@ -1120,8 +1131,8 @@
 
       <footer class="sidebar-footer">
         <p>
-          Powered by <a href="https://github.com/evanjt/tracematch" target="_blank">tracematch</a>
-          — all computation runs locally in your browser via WebAssembly. No data leaves your device.
+          Powered by <a href="https://github.com/evanjt/tracematch" target="_blank">tracematch</a>.
+          All computation runs locally in your browser via WebAssembly. No data leaves your device.
         </p>
       </footer>
     </div>
@@ -1637,6 +1648,12 @@
     font-size: 11px;
     color: var(--text-muted);
     opacity: 0.7;
+  }
+  .mode-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 4px 0 8px;
+    line-height: 1.4;
   }
 
   .btn-analyse {
