@@ -1,6 +1,17 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: Build WASM
+# ── Dev stage: tools only, no source ──────────────────────────────
+# Used by docker-compose wasm service. Source is bind-mounted at
+# runtime, so this image only rebuilds when tools change.
+FROM rust:1.95-bookworm AS wasm-dev
+
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install cargo-watch
+
+WORKDIR /build
+
+# ── Production WASM build ─────────────────────────────────────────
 FROM rust:1.95-bookworm AS wasm-builder
 
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -12,12 +23,7 @@ RUN --mount=type=cache,target=/build/target \
     cd tracematch-wasm && wasm-pack build --target web --release \
     && cp -r pkg /build/wasm-pkg
 
-# Stage 1b: Dev WASM watcher (reuses wasm-builder toolchain)
-FROM wasm-builder AS wasm-dev
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo install cargo-watch
-
-# Stage 2: Build web frontend
+# ── Production web frontend ──────────────────────────────────────
 FROM node:22-slim AS web-builder
 
 WORKDIR /build/web
@@ -28,7 +34,7 @@ COPY web/ .
 COPY --from=wasm-builder /build/wasm-pkg/ src/lib/wasm/pkg/
 RUN npm run build
 
-# Stage 3: Serve
+# ── Production serve ─────────────────────────────────────────────
 FROM nginx:alpine
 
 COPY --from=web-builder /build/web/build/ /usr/share/nginx/html/

@@ -15,8 +15,7 @@ services:
         '
       "
     volumes:
-      - ./src:/build/src
-      - ./tracematch-wasm/src:/build/tracematch-wasm/src
+      - .:/build
       - rust-target:/build/target
       - wasm-pkg:/output
 
