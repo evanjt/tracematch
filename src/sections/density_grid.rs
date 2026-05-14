@@ -16,10 +16,10 @@
 //!    Bridge cells (fewer than `min_routes` tracks but ≥ 2) maintain
 //!    corridor connectivity where GPS jitter shifts a route rep into an
 //!    adjacent cell. Extraction still requires `min_routes` per cluster.
-//! 4. **Connect**: 4-adjacency union-find, gated by containment-of-minimum:
-//!    `|intersection| / min(|A|, |B|) ≥ jaccard_threshold`. Bridge cells
-//!    score high (2/2 = 1.0) next to larger hot cells, keeping corridors
-//!    connected at branch points.
+//! 4. **Connect**: 4-adjacency union-find, Jaccard-gated:
+//!    `|intersection| / |union| ≥ jaccard_threshold`. Bridge cells fill
+//!    GPS-jitter gaps (2/3 = 0.67 passes the default 0.5 threshold)
+//!    while the Jaccard ratio prevents over-merging at intersections.
 //! 5. **Extract** per-track portions: longest continuous run of points
 //!    whose cells fall in the component's cell-set. Discard portions
 //!    shorter than `min_section_length`.
@@ -363,11 +363,11 @@ pub(super) fn detect_clusters_via_density(
         if n_int < connectivity_min {
             return false;
         }
-        let n_min = a.len().min(b.len());
-        if n_min == 0 {
+        let n_union = a.len() + b.len() - n_int;
+        if n_union == 0 {
             return false;
         }
-        (n_int as f64) / (n_min as f64) >= config.jaccard_threshold
+        (n_int as f64) / (n_union as f64) >= config.jaccard_threshold
     };
 
     let mut uf: UnionFind<(i32, i32)> = UnionFind::with_capacity(hot_cells.len());
