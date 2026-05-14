@@ -32,19 +32,25 @@
   // to simulate realistic traffic volume for all detection methods.
   type Trace = { pts: [number, number][]; route: number };
 
+  // 8 route groups with multiple overlap zones (west, center, east junctions).
+  // Density grid responds to minRoutes 2-4, corridor to all params,
+  // flow graph detects junctions at default/strict proximity.
   const BASE_TRACES: { pts: [number, number][]; route: number }[] = [
-    { pts: [[15,105],[55,90],[110,78],[165,72],[220,70],[275,72],[330,78],[385,88]], route: 0 },
-    { pts: [[16,106],[56,91],[111,79],[165,73],[185,52],[200,30],[210,15]], route: 1 },
-    { pts: [[200,190],[220,170],[245,145],[270,115],[285,90],[330,79],[385,89]], route: 2 },
-    { pts: [[165,73],[195,65],[225,63],[255,65],[275,73],[260,88],[225,92],[195,88],[165,73]], route: 3 },
-    { pts: [[16,106],[56,91],[110,79],[130,100],[145,130],[155,160],[160,190]], route: 4 },
+    { pts: [[15,100],[60,92],[120,85],[200,80],[280,85],[340,92],[385,100]], route: 0 },
+    { pts: [[15,101],[60,93],[120,86],[200,81],[215,55],[225,30],[230,10]], route: 1 },
+    { pts: [[15,99],[60,91],[120,84],[200,79],[215,105],[225,135],[230,165]], route: 2 },
+    { pts: [[250,190],[255,160],[260,130],[265,105],[280,86],[340,93],[385,101]], route: 3 },
+    { pts: [[170,82],[200,70],[230,68],[250,78],[240,95],[215,100],[190,95],[170,82]], route: 4 },
+    { pts: [[385,100],[340,92],[280,85],[200,80],[120,85],[60,92],[15,100]], route: 5 },
+    { pts: [[175,10],[180,30],[185,55],[195,75],[200,81],[280,86],[340,93],[385,101]], route: 6 },
+    { pts: [[140,84],[170,82],[200,80],[230,82],[260,85]], route: 7 },
   ];
 
-  // Generate 50 traces (10 copies per base with slight jitter)
+  // 48 traces (6 jittered copies per base)
   const traces: Trace[] = [];
-  for (let rep = 0; rep < 10; rep++) {
-    const jx = (rep - 5) * 0.8;
-    const jy = (rep - 5) * 0.4;
+  for (let rep = 0; rep < 6; rep++) {
+    const jx = (rep - 3) * 0.5;
+    const jy = (rep - 3) * 0.3;
     for (const base of BASE_TRACES) {
       traces.push({
         pts: base.pts.map(([x, y]) => [x + jx, y + jy] as [number, number]),
@@ -127,17 +133,18 @@
       if (mode === 'corridor') {
         sections = wasm.detectSectionsCorridor(tracksJson, sportTypesJson, buildConfig());
       } else if (mode === 'flow') {
-        // Flow graph needs fine cells to detect junctions on small datasets.
-        // Use proximity/3 as the effective proximity so cell_size stays small.
-        const flowProx = Math.max(25, Math.round(proximity / 3));
-        sections = wasm.detectSectionsFlowGraph(tracksJson, sportTypesJson, buildConfig({ proximity: flowProx }));
+        sections = wasm.detectSectionsFlowGraph(tracksJson, sportTypesJson, buildConfig());
       } else {
+        // Relaxed match config for short illustration traces
+        const relaxedMatchConfig = JSON.stringify({
+          minRouteDistance: 100, endpointThreshold: 500, maxDistanceDiffRatio: 0.8,
+        });
         const sigs: any[] = [];
         for (const [id, pts] of tracks) {
-          const sig = wasm.createSignature(id, JSON.stringify(pts), '{}');
+          const sig = wasm.createSignature(id, JSON.stringify(pts), relaxedMatchConfig);
           if (sig) sigs.push(sig);
         }
-        const groups = wasm.groupRoutes(JSON.stringify(sigs), '{}');
+        const groups = wasm.groupRoutes(JSON.stringify(sigs), relaxedMatchConfig);
         sections = wasm.detectSectionsWithProgress(
           tracksJson, sportTypesJson, JSON.stringify(groups), buildConfig(), () => {},
         );
@@ -155,7 +162,6 @@
   // Only show the 5 base traces (not the 50 jittered copies)
   const displayTraces = BASE_TRACES.map(t => t.pts.map(p => p.join(',')).join(' '));
 
-  // Scale bar: 400px = 3076m, so 100px ~ 769m ~ 750m
   const SCALE_BAR_PX = 100;
   const SCALE_BAR_M = 750;
 </script>
