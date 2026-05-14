@@ -293,6 +293,35 @@ pub fn detect_sections_flow_graph(
     Ok(val)
 }
 
+/// Detect sections via density corridor extraction.
+///
+/// Rasterises tracks, thresholds hot cells, skeletonises via Zhang-Suen
+/// thinning, and snaps each corridor centerline to an actual GPS track.
+#[wasm_bindgen(js_name = "detectSectionsCorridor")]
+pub fn detect_sections_corridor(
+    tracks_json: &str,
+    sport_types_json: &str,
+    config_json: &str,
+) -> Result<JsValue, JsError> {
+    let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
+        serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let sport_types: std::collections::HashMap<String, String> =
+        serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
+        tracematch::SectionConfig::default()
+    } else {
+        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
+    };
+
+    let sections = tracematch::detect_sections_corridor(&tracks, &sport_types, &config);
+
+    let val =
+        serde_wasm_bindgen::to_value(&sections).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(val)
+}
+
 /// Find known sections within a GPS route.
 ///
 /// Returns array of SectionMatch objects sorted by start_index.

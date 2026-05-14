@@ -16,6 +16,7 @@ import init, {
   groupRoutesWithProgress,
   detectSectionsWithProgress,
   detectSectionsFlowGraph,
+  detectSectionsCorridor,
 } from './pkg/tracematch_wasm.js';
 
 // Map raw phase strings from the Rust library to human-readable labels
@@ -52,7 +53,7 @@ export type AnalyseRequest = {
   requestId: number;
   traces: { id: string; points: GpsPoint[]; sportType: string }[];
   sectionConfig: string;
-  detectionMode?: 'density' | 'flow';
+  detectionMode?: 'density' | 'flow' | 'corridor';
 };
 
 export type WorkerResponse =
@@ -126,6 +127,8 @@ async function handleAnalyse(req: AnalyseRequest) {
 
       if (req.detectionMode === 'flow') {
         sections = detectSectionsFlowGraph(tracksJson, sportTypesJson, req.sectionConfig);
+      } else if (req.detectionMode === 'corridor') {
+        sections = detectSectionsCorridor(tracksJson, sportTypesJson, req.sectionConfig);
       } else {
         sections = detectSectionsWithProgress(
           tracksJson,

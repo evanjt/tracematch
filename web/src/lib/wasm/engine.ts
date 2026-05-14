@@ -67,7 +67,7 @@ export function runAnalysisAsync(
   traces: AnalysisTrace[],
   sectionConfig: string,
   onProgress?: (phase: string, current: number, total: number) => void,
-  detectionMode?: 'density' | 'flow',
+  detectionMode?: 'density' | 'flow' | 'corridor',
 ): Promise<{ signatures: RouteSignature[]; groups: RouteGroup[]; sections: FrequentSection[] }> {
   return new Promise((resolve, reject) => {
     const worker = getWorker();

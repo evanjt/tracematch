@@ -25,6 +25,7 @@
 //! - Section contracts if tracks consistently end before current bounds
 
 mod consensus;
+mod corridor;
 mod density_grid;
 mod flow_graph;
 pub mod incremental;
@@ -297,6 +298,11 @@ pub struct SectionConfig {
     /// "significant" for divergence-point detection. Default 0.15 (15%).
     #[serde(default = "default_divergence_threshold")]
     pub divergence_threshold: f64,
+    /// Minimum unique tracks per cell for corridor detection. Cells with
+    /// fewer unique visitors are not "hot" and won't participate in
+    /// skeletonization. Higher = fewer, more confident sections. Default 3.
+    #[serde(default = "default_min_corridor_tracks")]
+    pub min_corridor_tracks: u32,
 }
 
 fn default_jaccard_threshold() -> f64 {
@@ -313,6 +319,9 @@ fn default_min_cell_visits() -> u32 {
 }
 fn default_divergence_threshold() -> f64 {
     0.15
+}
+fn default_min_corridor_tracks() -> u32 {
+    3
 }
 
 impl Default for SectionConfig {
@@ -334,6 +343,7 @@ impl Default for SectionConfig {
             merge_distance_multiplier: default_merge_distance_multiplier(),
             min_cell_visits: default_min_cell_visits(),
             divergence_threshold: default_divergence_threshold(),
+            min_corridor_tracks: default_min_corridor_tracks(),
         }
     }
 }
@@ -725,6 +735,62 @@ pub fn process_cluster(
         created_at: None,
         consensus_state: None,
     })
+}
+
+/// Detect sections via density corridor extraction.
+///
+/// Rasterises all tracks, thresholds to hot cells, applies Zhang-Suen
+/// morphological thinning to extract corridor centerlines, and snaps
+/// each skeleton segment to an actual GPS track.
+pub fn detect_sections_corridor(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    info!(
+        "[Corridor] Detecting from {} tracks (min_corridor_tracks={}, proximity={})",
+        tracks.len(),
+        config.min_corridor_tracks,
+        config.proximity_threshold,
+    );
+
+    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
+    for (id, pts) in tracks {
+        let sport = sport_types
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+        tracks_by_sport
+            .entry(sport)
+            .or_default()
+            .push((id.as_str(), pts.as_slice()));
+    }
+
+    let mut all_sections = Vec::new();
+    for (sport, sport_tracks) in &tracks_by_sport {
+        if sport_tracks.len() < config.min_activities as usize {
+            continue;
+        }
+        info!(
+            "[Corridor] Processing {} {} tracks",
+            sport_tracks.len(),
+            sport
+        );
+        let sections = corridor::detect_sections_via_corridor(sport_tracks, sport, config);
+        info!("[Corridor] {} sections for {}", sections.len(), sport);
+        all_sections.extend(sections);
+    }
+
+    let before = all_sections.len();
+    all_sections = postprocess::merge_nearby_sections(all_sections, config);
+    all_sections = postprocess::remove_overlapping_sections(all_sections, config);
+    info!(
+        "[Corridor] {} sections after postprocess (was {})",
+        all_sections.len(),
+        before
+    );
+
+    all_sections
 }
 
 /// Detect sections via flow-graph analysis.

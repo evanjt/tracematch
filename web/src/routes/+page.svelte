@@ -83,7 +83,7 @@
   let minActivities = $state(3);
   let minRoutes = $state(3);
   let activePreset = $state<PresetKey | null>('balanced');
-  let sectionMode = $state<'density' | 'flow'>('density');
+  let sectionMode = $state<'density' | 'flow' | 'corridor'>('density');
   let settingsCollapsed = $state(true);
 
   function applyPreset(key: PresetKey) {
@@ -706,6 +706,7 @@
         minRoutes,
         minCellVisits: 50,
         divergenceThreshold: 0.15,
+        minCorridorTracks: minActivities,
       });
 
       const traces = traceStore.traces.map((t) => ({
@@ -913,6 +914,7 @@
               <div class="preset-chips">
                 <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
                 <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
+                <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
               </div>
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
