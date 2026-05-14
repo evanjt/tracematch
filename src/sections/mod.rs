@@ -60,7 +60,7 @@ pub use consensus::{
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
-pub(crate) use portions::compute_activity_portions;
+pub(crate) use portions::{compute_activity_portions, compute_portions_for_activities};
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub use postprocess::{
     filter_low_quality_sections, merge_nearby_sections, remove_overlapping_sections,

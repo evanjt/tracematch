@@ -487,6 +487,8 @@ fn edge_to_section(
     edge_idx: usize,
     flow: &FlowGraph,
     tracks: &[(&str, &[GpsPoint])],
+    track_lookup: &HashMap<&str, &[GpsPoint]>,
+    proximity_threshold: f64,
     sport_type: &str,
 ) -> Option<FrequentSection> {
     let cell_set: HashSet<(i32, i32)> = edge.cells.iter().copied().collect();
@@ -540,6 +542,13 @@ fn edge_to_section(
         .map(|(id, _)| id.to_string())
         .unwrap_or_default();
 
+    let activity_portions = super::compute_portions_for_activities(
+        &activity_ids,
+        &polyline,
+        track_lookup,
+        proximity_threshold,
+    );
+
     Some(FrequentSection {
         id: format!("sec_{sport_type}_{edge_idx}").to_lowercase(),
         name: None,
@@ -548,7 +557,7 @@ fn edge_to_section(
         representative_activity_id: rep_id,
         visit_count: activity_ids.len() as u32,
         activity_ids,
-        activity_portions: vec![],
+        activity_portions,
         route_ids: vec![],
         distance_meters: best.distance,
         activity_traces: HashMap::new(),
@@ -593,10 +602,23 @@ pub(super) fn detect_sections_via_flow_graph(
     let raw_edges = trace_edges(&flow, &nodes, min_visits, config.min_section_length);
     let edges = merge_pass_through_edges(raw_edges, &nodes);
 
+    let track_lookup: HashMap<&str, &[GpsPoint]> =
+        tracks.iter().map(|(id, pts)| (*id, *pts)).collect();
+
     let mut sections: Vec<FrequentSection> = edges
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| edge_to_section(e, i, &flow, tracks, sport_type))
+        .filter_map(|(i, e)| {
+            edge_to_section(
+                e,
+                i,
+                &flow,
+                tracks,
+                &track_lookup,
+                config.proximity_threshold,
+                sport_type,
+            )
+        })
         .filter(|s| s.visit_count >= config.min_activities)
         .collect();
 

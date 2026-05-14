@@ -731,6 +731,15 @@ fn skeleton_segment_to_section(
         .map(|(id, _)| id.to_string())
         .unwrap_or_default();
 
+    let track_lookup: HashMap<&str, &[GpsPoint]> =
+        tracks.iter().map(|(id, pts)| (*id, *pts)).collect();
+    let activity_portions = super::compute_portions_for_activities(
+        &activity_ids,
+        &polyline,
+        &track_lookup,
+        config.proximity_threshold,
+    );
+
     Some(FrequentSection {
         id: format!("sec_{sport_type}_{segment_idx}").to_lowercase(),
         name: None,
@@ -739,7 +748,7 @@ fn skeleton_segment_to_section(
         representative_activity_id: rep_id,
         visit_count: activity_ids.len() as u32,
         activity_ids,
-        activity_portions: vec![],
+        activity_portions,
         route_ids: vec![],
         distance_meters: best.distance,
         activity_traces: HashMap::new(),
@@ -841,6 +850,13 @@ pub(super) fn detect_sections_via_corridor(
     let mut component_list: Vec<Vec<(i32, i32)>> = components.into_values().collect();
     component_list.sort_by_key(|cells| std::cmp::Reverse(cells.len()));
 
+    // Track lookup map for activity_portions computation. Built once per call
+    // and reused across all components — section detail screens read
+    // `activity_portions` to render per-activity start/end indices, so leaving
+    // it empty here produces "no data" sections in the UI.
+    let track_lookup: HashMap<&str, &[GpsPoint]> =
+        tracks.iter().map(|(id, pts)| (*id, *pts)).collect();
+
     // For each component, find all track runs through it and build a section
     // from the median-distance track
     let mut sections: Vec<FrequentSection> = Vec::new();
@@ -927,6 +943,13 @@ pub(super) fn detect_sections_via_corridor(
             .map(|(id, _)| id.to_string())
             .unwrap_or_default();
 
+        let activity_portions = super::compute_portions_for_activities(
+            &activity_ids,
+            &polyline,
+            &track_lookup,
+            config.proximity_threshold,
+        );
+
         sections.push(FrequentSection {
             id: format!("sec_{sport_type}_{comp_idx}").to_lowercase(),
             name: None,
@@ -935,7 +958,7 @@ pub(super) fn detect_sections_via_corridor(
             representative_activity_id: rep_id,
             visit_count: activity_ids.len() as u32,
             activity_ids,
-            activity_portions: vec![],
+            activity_portions,
             route_ids: vec![],
             distance_meters: best.distance,
             activity_traces: HashMap::new(),
