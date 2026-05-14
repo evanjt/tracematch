@@ -21,6 +21,7 @@
 use super::density_grid::{CellGrid, bresenham_cells};
 use super::{FrequentSection, SectionConfig};
 use crate::GpsPoint;
+use crate::geo_utils::haversine_distance;
 use std::collections::{HashMap, HashSet};
 
 type CellPair = ((i32, i32), (i32, i32));
@@ -39,7 +40,6 @@ struct GraphNode {
 struct GraphEdge {
     cells: Vec<(i32, i32)>,
     track_ids: HashSet<u32>,
-    length_m: f64,
 }
 
 fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> FlowGraph {
@@ -204,7 +204,6 @@ fn trace_edges(
                                 edges.push(GraphEdge {
                                     cells: vec![node.cell, first_step],
                                     track_ids,
-                                    length_m: length,
                                 });
                             }
                         }
@@ -271,7 +270,6 @@ fn trace_edges(
                                 edges.push(GraphEdge {
                                     cells: path,
                                     track_ids,
-                                    length_m: length,
                                 });
                             }
                         }
@@ -299,22 +297,87 @@ fn compute_path_length(cells: &[(i32, i32)], grid: &CellGrid) -> f64 {
     total
 }
 
+fn snap_edge_to_track(
+    edge: &GraphEdge,
+    flow: &FlowGraph,
+    tracks: &[(&str, &[GpsPoint])],
+) -> (Vec<GpsPoint>, usize, f64) {
+    let cell_set: HashSet<(i32, i32)> = {
+        let mut s = HashSet::with_capacity(edge.cells.len() * 9);
+        for c in &edge.cells {
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    s.insert((c.0 + dy, c.1 + dx));
+                }
+            }
+        }
+        s
+    };
+
+    let mut best_track: usize = 0;
+    let mut best_pts: Vec<GpsPoint> = Vec::new();
+    let mut best_dist: f64 = 0.0;
+
+    for &t_idx in &edge.track_ids {
+        let idx = t_idx as usize;
+        if idx >= tracks.len() {
+            continue;
+        }
+        let pts = tracks[idx].1;
+
+        let mut run_start: Option<usize> = None;
+        let mut run_dist = 0.0f64;
+        let mut cur_best_start = 0usize;
+        let mut cur_best_end = 0usize;
+        let mut cur_best_dist = 0.0f64;
+
+        for (i, p) in pts.iter().enumerate() {
+            let c = flow.grid.cell_of(p.latitude, p.longitude);
+            if cell_set.contains(&c) {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                    run_dist = 0.0;
+                } else if i > 0 {
+                    run_dist += haversine_distance(&pts[i - 1], p);
+                }
+            } else if let Some(s) = run_start {
+                if run_dist > cur_best_dist {
+                    cur_best_start = s;
+                    cur_best_end = i;
+                    cur_best_dist = run_dist;
+                }
+                run_start = None;
+            }
+        }
+        if let Some(s) = run_start
+            && run_dist > cur_best_dist
+        {
+            cur_best_start = s;
+            cur_best_end = pts.len();
+            cur_best_dist = run_dist;
+        }
+
+        if cur_best_dist > best_dist {
+            best_dist = cur_best_dist;
+            best_track = idx;
+            best_pts = pts[cur_best_start..cur_best_end].to_vec();
+        }
+    }
+
+    (best_pts, best_track, best_dist)
+}
+
 fn edge_to_section(
     edge: &GraphEdge,
     edge_idx: usize,
     flow: &FlowGraph,
     tracks: &[(&str, &[GpsPoint])],
     sport_type: &str,
-) -> FrequentSection {
-    let polyline: Vec<GpsPoint> = edge
-        .cells
-        .iter()
-        .map(|c| {
-            let lat = (c.0 as f64 + 0.5) * flow.grid.cell_size_m / flow.grid.lat_to_m;
-            let lng = (c.1 as f64 + 0.5) * flow.grid.cell_size_m / flow.grid.lng_to_m;
-            GpsPoint::new(lat, lng)
-        })
-        .collect();
+) -> Option<FrequentSection> {
+    let (polyline, rep_idx, distance) = snap_edge_to_track(edge, flow, tracks);
+    if polyline.len() < 2 {
+        return None;
+    }
 
     let activity_ids: Vec<String> = edge
         .track_ids
@@ -322,9 +385,12 @@ fn edge_to_section(
         .filter_map(|&t_idx| tracks.get(t_idx as usize).map(|(id, _)| id.to_string()))
         .collect();
 
-    let rep_id = activity_ids.first().cloned().unwrap_or_default();
+    let rep_id = tracks
+        .get(rep_idx)
+        .map(|(id, _)| id.to_string())
+        .unwrap_or_default();
 
-    FrequentSection {
+    Some(FrequentSection {
         id: format!("sec_{sport_type}_{edge_idx}").to_lowercase(),
         name: None,
         sport_type: sport_type.to_string(),
@@ -334,7 +400,7 @@ fn edge_to_section(
         activity_ids,
         activity_portions: vec![],
         route_ids: vec![],
-        distance_meters: edge.length_m,
+        distance_meters: distance,
         activity_traces: HashMap::new(),
         confidence: 0.5,
         observation_count: edge.track_ids.len() as u32,
@@ -347,7 +413,7 @@ fn edge_to_section(
         updated_at: None,
         created_at: None,
         consensus_state: None,
-    }
+    })
 }
 
 /// Detect sections via flow-graph analysis.
@@ -379,7 +445,7 @@ pub(super) fn detect_sections_via_flow_graph(
     let mut sections: Vec<FrequentSection> = edges
         .iter()
         .enumerate()
-        .map(|(i, e)| edge_to_section(e, i, &flow, tracks, sport_type))
+        .filter_map(|(i, e)| edge_to_section(e, i, &flow, tracks, sport_type))
         .filter(|s| s.visit_count >= config.min_activities)
         .collect();
 

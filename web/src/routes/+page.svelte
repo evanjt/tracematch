@@ -704,7 +704,7 @@
         ],
         preserveHierarchy: true,
         minRoutes,
-        minCellVisits: 5,
+        minCellVisits: 30,
         divergenceThreshold: 0.15,
       });
 
