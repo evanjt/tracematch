@@ -263,4 +263,27 @@ fn main() {
         section_config.min_section_length,
         section_config.min_activities
     );
+
+    // --- 6. Flow graph comparison ----------------------------------
+    println!();
+    println!("## Flow graph detection");
+    let t_flow = Instant::now();
+    let mut flow_sections =
+        tracematch::detect_sections_flow_graph(&raw_tracks, &sport_types, &section_config);
+    let dur_flow = t_flow.elapsed();
+    flow_sections.sort_by(|a, b| b.visit_count.cmp(&a.visit_count));
+
+    println!("  Sections:            {}", flow_sections.len());
+    println!("  Time:                {}", fmt_ms(dur_flow.as_millis()));
+    println!();
+    println!("  Top 5 sections by visits:");
+    for s in flow_sections.iter().take(5) {
+        println!(
+            "    {:>4}  {:>6.0} m  {}  {}",
+            s.visit_count,
+            s.distance_meters,
+            s.id,
+            s.name.as_deref().unwrap_or("")
+        );
+    }
 }
