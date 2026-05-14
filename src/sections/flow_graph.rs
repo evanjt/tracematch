@@ -55,7 +55,7 @@ fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> F
         if n == 0 { 0.0 } else { sum / n as f64 }
     };
 
-    let cell_size_m = config.proximity_threshold;
+    let cell_size_m = config.proximity_threshold * 2.0;
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
     let mut cell_visits: HashMap<(i32, i32), u32> = HashMap::new();
@@ -108,10 +108,12 @@ fn find_nodes(flow: &FlowGraph, min_visits: u32, divergence_threshold: f64) -> V
         .map(|(c, _)| *c)
         .collect();
 
-    let mut nodes = Vec::new();
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
 
     for &cell in &road_cells {
-        let mut exit_counts: HashMap<(i32, i32), u32> = HashMap::new();
+        // Group 8-connected exits into 4 cardinal quadrants (N/S/E/W).
+        // Diagonals go to the axis with larger delta.
+        let mut dir_traffic: [u32; 4] = [0; 4]; // N, S, W, E
         for (dy, dx) in [
             (-1, 0),
             (1, 0),
@@ -127,28 +129,63 @@ fn find_nodes(flow: &FlowGraph, min_visits: u32, divergence_threshold: f64) -> V
                 continue;
             }
             let count = flow.transitions.get(&(cell, nbr)).copied().unwrap_or(0);
-            if count > 0 {
-                exit_counts.insert(nbr, count);
-            }
+            let q = if dy.abs() >= dx.abs() {
+                if dy < 0 { 0 } else { 1 }
+            } else if dx < 0 {
+                2
+            } else {
+                3
+            };
+            dir_traffic[q] += count;
         }
 
-        let total_exits: u32 = exit_counts.values().sum();
-        if total_exits == 0 {
-            nodes.push(GraphNode { cell });
+        let total: u32 = dir_traffic.iter().sum();
+        if total == 0 {
             continue;
         }
 
-        let significant_exits: usize = exit_counts
-            .values()
-            .filter(|&&c| (c as f64) >= (total_exits as f64) * divergence_threshold)
+        let significant_dirs = dir_traffic
+            .iter()
+            .filter(|&&c| (c as f64) >= (total as f64) * divergence_threshold)
             .count();
 
-        if significant_exits >= 3 {
-            nodes.push(GraphNode { cell });
+        if significant_dirs >= 3 {
+            candidates.push(cell);
         }
     }
 
-    nodes
+    // Merge nearby junctions: if two candidates are within 2 cells,
+    // keep the one with more traffic.
+    let mut merged: Vec<bool> = vec![false; candidates.len()];
+    for i in 0..candidates.len() {
+        if merged[i] {
+            continue;
+        }
+        for j in (i + 1)..candidates.len() {
+            if merged[j] {
+                continue;
+            }
+            let (a, b) = (candidates[i], candidates[j]);
+            let dist = ((a.0 - b.0).abs()).max((a.1 - b.1).abs());
+            if dist <= 2 {
+                let va = flow.cell_visits.get(&a).copied().unwrap_or(0);
+                let vb = flow.cell_visits.get(&b).copied().unwrap_or(0);
+                if va >= vb {
+                    merged[j] = true;
+                } else {
+                    merged[i] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .zip(merged)
+        .filter(|(_, m)| !m)
+        .map(|(cell, _)| GraphNode { cell })
+        .collect()
 }
 
 fn trace_edges(
@@ -469,25 +506,46 @@ mod tests {
         };
 
         let n = 100;
+        let mid = n / 2;
+        let mid_lat = 46.20 + (mid as f64) * 0.00005;
+        let mid_lng = 7.36001;
+
+        // Track A: south to north
         let track_a: Vec<GpsPoint> = (0..n)
             .map(|i| GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36))
             .collect();
+        // Track B: shares first half with A, then goes east
         let track_b: Vec<GpsPoint> = (0..n)
             .map(|i| {
-                if i < n / 2 {
-                    GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36001)
+                if i < mid {
+                    GpsPoint::new(46.20 + (i as f64) * 0.00005, mid_lng)
                 } else {
-                    let j = (i - n / 2) as f64;
-                    GpsPoint::new(46.20 + (n as f64 / 2.0) * 0.00005, 7.36001 + j * 0.00005)
+                    GpsPoint::new(mid_lat, mid_lng + (i - mid) as f64 * 0.00005)
+                }
+            })
+            .collect();
+        // Track C: shares first half, then goes west
+        let track_c: Vec<GpsPoint> = (0..n)
+            .map(|i| {
+                if i < mid {
+                    GpsPoint::new(46.20 + (i as f64) * 0.00005, mid_lng + 0.00001)
+                } else {
+                    GpsPoint::new(mid_lat, mid_lng - (i - mid) as f64 * 0.00005)
                 }
             })
             .collect();
 
-        let sport_tracks: Vec<(&str, &[GpsPoint])> =
-            vec![("a", track_a.as_slice()), ("b", track_b.as_slice())];
+        let sport_tracks: Vec<(&str, &[GpsPoint])> = vec![
+            ("a", track_a.as_slice()),
+            ("b", track_b.as_slice()),
+            ("c", track_c.as_slice()),
+        ];
 
         let flow = build_flow_graph(&sport_tracks, &config);
         let nodes = find_nodes(&flow, 2, 0.15);
-        assert!(!nodes.is_empty(), "expected junction where tracks diverge");
+        assert!(
+            !nodes.is_empty(),
+            "expected junction where 3 tracks diverge"
+        );
     }
 }

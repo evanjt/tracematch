@@ -309,7 +309,7 @@ fn default_merge_distance_multiplier() -> f64 {
     4.0
 }
 fn default_min_cell_visits() -> u32 {
-    30
+    50
 }
 fn default_divergence_threshold() -> f64 {
     0.15
