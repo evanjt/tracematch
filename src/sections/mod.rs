@@ -122,7 +122,7 @@ impl std::str::FromStr for DetectionMode {
 
 /// Which algorithm to use for section detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum DetectionMethod {
     /// Density clustering on raw GPS traces. Default. Best coverage.
