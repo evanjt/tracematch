@@ -11,62 +11,78 @@
     minRoutes?: number;
   } = $props();
 
-  // 15 traces on a 400x200 canvas. Organized into 4 route groups.
-  // Main east-west corridor, a north branch, a south branch, and a loop.
   type Trace = { pts: [number, number][]; route: number };
 
+  // 14 traces on a 400x200 canvas, organized into 4 route groups.
+  // Traces within the same area are kept within ~8px of each other
+  // so they share grid cells at typical cell sizes (15-25px).
   const traces: Trace[] = [
-    // Route group 0: main east-west corridor (5 traces, slight variation)
-    { pts: [[20,110],[60,95],[110,80],[160,72],[210,70],[260,72],[310,78],[370,90]], route: 0 },
-    { pts: [[25,115],[65,98],[115,82],[165,75],[215,72],[265,75],[315,80],[375,88]], route: 0 },
-    { pts: [[18,108],[55,92],[105,78],[155,70],[205,68],[255,70],[305,76],[365,85]], route: 0 },
-    { pts: [[22,112],[62,96],[112,81],[162,74],[212,71],[262,74],[312,79],[372,92]], route: 0 },
-    { pts: [[20,106],[58,90],[108,76],[158,68],[208,66],[258,68],[308,74],[368,82]], route: 0 },
+    // Route 0: main east-west corridor (5 traces, tight spread)
+    { pts: [[15,105],[55,90],[110,78],[165,72],[220,70],[275,72],[330,78],[385,88]], route: 0 },
+    { pts: [[18,107],[58,92],[113,80],[168,74],[223,72],[278,74],[333,80],[388,90]], route: 0 },
+    { pts: [[12,103],[52,88],[107,76],[162,70],[217,68],[272,70],[327,76],[382,86]], route: 0 },
+    { pts: [[16,109],[56,94],[111,82],[166,76],[221,74],[276,76],[331,82],[386,92]], route: 0 },
+    { pts: [[14,101],[54,86],[109,74],[164,68],[219,66],[274,68],[329,74],[384,84]], route: 0 },
 
-    // Route group 1: shares west half, branches north (3 traces)
-    { pts: [[22,112],[60,96],[110,80],[155,72],[180,55],[200,35],[215,20]], route: 1 },
-    { pts: [[18,108],[58,94],[108,78],[152,70],[175,52],[195,32],[210,18]], route: 1 },
-    { pts: [[25,114],[63,98],[113,82],[158,74],[182,58],[202,38],[218,22]], route: 1 },
+    // Route 1: shares west half with route 0, branches north at x~165
+    { pts: [[16,106],[56,91],[111,79],[165,73],[185,52],[200,30],[210,15]], route: 1 },
+    { pts: [[13,104],[53,89],[108,77],[162,71],[182,50],[197,28],[207,13]], route: 1 },
+    { pts: [[19,108],[59,93],[114,81],[168,75],[188,54],[203,32],[213,17]], route: 1 },
 
-    // Route group 2: shares east half, comes from south (3 traces)
-    { pts: [[180,185],[200,165],[225,140],[255,110],[275,90],[310,78],[370,88]], route: 2 },
-    { pts: [[185,188],[205,168],[228,142],[258,112],[278,92],[312,80],[372,90]], route: 2 },
-    { pts: [[175,182],[195,162],[222,138],[252,108],[272,88],[308,76],[368,86]], route: 2 },
+    // Route 2: comes from south, joins route 0 at x~275
+    { pts: [[200,190],[220,170],[245,145],[270,115],[285,90],[330,79],[385,89]], route: 2 },
+    { pts: [[203,192],[223,172],[248,147],[273,117],[288,92],[333,81],[388,91]], route: 2 },
 
-    // Route group 3: short local loop in center (3 traces)
-    { pts: [[140,110],[160,95],[190,90],[210,95],[220,110],[200,125],[170,125],[140,110]], route: 3 },
-    { pts: [[142,112],[162,97],[192,92],[212,97],[222,112],[202,127],[172,127],[142,112]], route: 3 },
-    { pts: [[138,108],[158,93],[188,88],[208,93],[218,108],[198,123],[168,123],[138,108]], route: 3 },
+    // Route 3: local loop overlapping route 0 in center (x~165-275)
+    { pts: [[165,73],[195,65],[225,63],[255,65],[275,73],[260,88],[225,92],[195,88],[165,73]], route: 3 },
+    { pts: [[168,75],[198,67],[228,65],[258,67],[278,75],[263,90],[228,94],[198,90],[168,75]], route: 3 },
+    { pts: [[162,71],[192,63],[222,61],[252,63],[272,71],[257,86],[222,90],[192,86],[162,71]], route: 3 },
   ];
 
-  // Scale proximity from meters (real-world) to illustration grid cells.
-  // The illustration is 400px wide representing roughly 3km of terrain.
-  // So 1px ~ 7.5m. Cell size = proximity / 7.5.
+  // 1px ~ 7.5m. Cell size = proximity / 7.5.
   const SCALE = 7.5;
 
   function rasterise(pts: [number, number][], cellSize: number): Set<string> {
     const cells = new Set<string>();
-    for (const [x, y] of pts) {
-      const cx = Math.floor(x / cellSize);
-      const cy = Math.floor(y / cellSize);
-      cells.add(`${cx},${cy}`);
-    }
-    // Fill gaps between consecutive points
-    for (let i = 0; i < pts.length - 1; i++) {
-      const [x0, y0] = pts[i];
-      const [x1, y1] = pts[i + 1];
-      const steps = Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) / (cellSize * 0.5));
-      for (let s = 0; s <= steps; s++) {
-        const t = s / Math.max(steps, 1);
-        const cx = Math.floor((x0 + (x1 - x0) * t) / cellSize);
-        const cy = Math.floor((y0 + (y1 - y0) * t) / cellSize);
-        cells.add(`${cx},${cy}`);
+    for (let i = 0; i < pts.length; i++) {
+      const [x, y] = pts[i];
+      cells.add(`${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`);
+      if (i < pts.length - 1) {
+        const [x1, y1] = pts[i + 1];
+        const dist = Math.max(Math.abs(x1 - x), Math.abs(y1 - y));
+        const steps = Math.ceil(dist / (cellSize * 0.4));
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          const ix = Math.floor((x + (x1 - x) * t) / cellSize);
+          const iy = Math.floor((y + (y1 - y) * t) / cellSize);
+          cells.add(`${ix},${iy}`);
+        }
       }
     }
     return cells;
   }
 
-  // Compute corridor highlights: hot cells where >= minTracks traces overlap
+  function traceSegments(
+    hotCells: Set<string>,
+    cellSize: number,
+  ): string[] {
+    const segments: string[] = [];
+    for (const t of traces) {
+      let run: [number, number][] = [];
+      for (const [x, y] of t.pts) {
+        const key = `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
+        if (hotCells.has(key)) {
+          run.push([x, y]);
+        } else {
+          if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
+          run = [];
+        }
+      }
+      if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
+    }
+    return segments;
+  }
+
   function computeCorridor(cellSize: number, threshold: number): string[] {
     const cellCounts = new Map<string, Set<number>>();
     traces.forEach((t, i) => {
@@ -75,32 +91,13 @@
         cellCounts.get(key)!.add(i);
       }
     });
-
-    const hotCells = new Set<string>();
+    const hot = new Set<string>();
     for (const [key, ids] of cellCounts) {
-      if (ids.size >= threshold) hotCells.add(key);
+      if (ids.size >= threshold) hot.add(key);
     }
-
-    // For each trace, find segments that pass through hot cells
-    const segments: string[] = [];
-    for (const t of traces) {
-      let run: [number, number][] = [];
-      for (const [x, y] of t.pts) {
-        const cx = Math.floor(x / cellSize);
-        const cy = Math.floor(y / cellSize);
-        if (hotCells.has(`${cx},${cy}`)) {
-          run.push([x, y]);
-        } else {
-          if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-          run = [];
-        }
-      }
-      if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-    }
-    return segments;
+    return traceSegments(hot, cellSize);
   }
 
-  // Compute density grid highlights: hot cells where >= minRoutes route groups overlap
   function computeDensity(cellSize: number, threshold: number): string[] {
     const cellRoutes = new Map<string, Set<number>>();
     for (const t of traces) {
@@ -109,32 +106,15 @@
         cellRoutes.get(key)!.add(t.route);
       }
     }
-
-    const hotCells = new Set<string>();
+    const hot = new Set<string>();
     for (const [key, routes] of cellRoutes) {
-      if (routes.size >= threshold) hotCells.add(key);
+      if (routes.size >= threshold) hot.add(key);
     }
-
-    const segments: string[] = [];
-    for (const t of traces) {
-      let run: [number, number][] = [];
-      for (const [x, y] of t.pts) {
-        const cx = Math.floor(x / cellSize);
-        const cy = Math.floor(y / cellSize);
-        if (hotCells.has(`${cx},${cy}`)) {
-          run.push([x, y]);
-        } else {
-          if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-          run = [];
-        }
-      }
-      if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-    }
-    return segments;
+    return traceSegments(hot, cellSize);
   }
 
-  // Compute flow graph highlights: find junction cells and short edges between them
   function computeFlow(cellSize: number, threshold: number): string[] {
+    // Count traces per cell
     const cellCounts = new Map<string, Set<number>>();
     traces.forEach((t, i) => {
       for (const key of rasterise(t.pts, cellSize)) {
@@ -143,7 +123,7 @@
       }
     });
 
-    // Track transitions between cells per trace
+    // Track transitions
     const exits = new Map<string, Map<string, Set<number>>>();
     traces.forEach((t, ti) => {
       const cells: string[] = [];
@@ -159,7 +139,7 @@
       }
     });
 
-    // Junctions: cells with 3+ distinct exit directions with >= 2 traces each
+    // Junctions: cells with 3+ exit directions each having 2+ traces
     const junctions = new Set<string>();
     for (const [cell, exitMap] of exits) {
       const count = cellCounts.get(cell)?.size ?? 0;
@@ -168,10 +148,10 @@
       for (const ids of exitMap.values()) {
         if (ids.size >= 2) sigDirs++;
       }
-      if (sigDirs >= 3) junctions.add(cell);
+      if (sigDirs >= 2) junctions.add(cell);
     }
 
-    // For each trace, find short segments between junctions
+    // Trace edges between junctions
     const segments: string[] = [];
     for (const t of traces) {
       const cells: { key: string; pt: [number, number] }[] = [];
@@ -185,7 +165,7 @@
       let inEdge = false;
       for (const { key, pt } of cells) {
         if (junctions.has(key)) {
-          if (inEdge && run.length >= 2) {
+          if (inEdge && run.length >= 1) {
             run.push(pt);
             segments.push(run.map(p => p.join(',')).join(' '));
           }
