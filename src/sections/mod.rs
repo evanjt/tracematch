@@ -652,6 +652,29 @@ fn expand_cluster_to_activities(
     cluster
 }
 
+/// Pick the most-common sport among the given activities.
+///
+/// Sections can contain activities from multiple sports (e.g., a road
+/// traversed by both cyclists and runners). The section's `sport_type`
+/// field carries the dominant one for display; the UI reads
+/// `activity_ids` to render per-sport filter chips.
+pub(super) fn dominant_sport(
+    activity_ids: &[String],
+    sport_types: &HashMap<String, String>,
+) -> String {
+    let mut counts: HashMap<&str, u32> = HashMap::new();
+    for id in activity_ids {
+        if let Some(s) = sport_types.get(id) {
+            *counts.entry(s.as_str()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
 pub fn process_cluster(
     idx: usize,
     cluster: OverlapCluster,
@@ -821,32 +844,20 @@ pub fn detect_sections_corridor(
         config.proximity_threshold,
     );
 
-    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
-    for (id, pts) in tracks {
-        let sport = sport_types
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        tracks_by_sport
-            .entry(sport)
-            .or_default()
-            .push((id.as_str(), pts.as_slice()));
+    if tracks.len() < config.min_activities as usize {
+        return vec![];
     }
 
-    let mut all_sections = Vec::new();
-    for (sport, sport_tracks) in &tracks_by_sport {
-        if sport_tracks.len() < config.min_activities as usize {
-            continue;
-        }
-        info!(
-            "[Corridor] Processing {} {} tracks",
-            sport_tracks.len(),
-            sport
-        );
-        let sections = corridor::detect_sections_via_corridor(sport_tracks, sport, config);
-        info!("[Corridor] {} sections for {}", sections.len(), sport);
-        all_sections.extend(sections);
-    }
+    // Process all sports together. A section's `sport_type` is set to the
+    // dominant sport among its activities at emission time; the UI reads
+    // `activity_ids` to render per-sport filter chips for cross-sport sections.
+    let all_tracks: Vec<(&str, &[GpsPoint])> = tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+
+    let mut all_sections = corridor::detect_sections_via_corridor(&all_tracks, sport_types, config);
+    info!("[Corridor] {} sections detected", all_sections.len());
 
     let before = all_sections.len();
     all_sections = postprocess::merge_nearby_sections(all_sections, config);
@@ -877,32 +888,18 @@ pub fn detect_sections_flow_graph(
         config.divergence_threshold,
     );
 
-    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
-    for (id, pts) in tracks {
-        let sport = sport_types
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        tracks_by_sport
-            .entry(sport)
-            .or_default()
-            .push((id.as_str(), pts.as_slice()));
+    if tracks.len() < config.min_activities as usize {
+        return vec![];
     }
 
-    let mut all_sections = Vec::new();
-    for (sport, sport_tracks) in &tracks_by_sport {
-        if sport_tracks.len() < config.min_activities as usize {
-            continue;
-        }
-        info!(
-            "[FlowGraph] Processing {} {} tracks",
-            sport_tracks.len(),
-            sport
-        );
-        let sections = flow_graph::detect_sections_via_flow_graph(sport_tracks, sport, config);
-        info!("[FlowGraph] {} sections for {}", sections.len(), sport);
-        all_sections.extend(sections);
-    }
+    let all_tracks: Vec<(&str, &[GpsPoint])> = tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+
+    let mut all_sections =
+        flow_graph::detect_sections_via_flow_graph(&all_tracks, sport_types, config);
+    info!("[FlowGraph] {} sections detected", all_sections.len());
 
     let before = all_sections.len();
     all_sections = postprocess::merge_nearby_sections(all_sections, config);
@@ -960,195 +957,162 @@ pub fn detect_sections_from_tracks(
         .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
 
-    // Group tracks by sport type
-    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
-    for (activity_id, points) in tracks {
-        let sport = sport_types
-            .get(activity_id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        tracks_by_sport
-            .entry(sport)
-            .or_default()
-            .push((activity_id.as_str(), points.as_slice()));
+    // Process all sports together. Each cluster's dominant sport is
+    // computed from its activity_ids after detection; the UI then renders
+    // per-sport filter chips when activity_ids spans multiple sports.
+    let route_reps: Vec<(&str, &[GpsPoint])> = significant_groups
+        .iter()
+        .filter_map(|g| {
+            let rep_pts = track_map.get(g.representative_id.as_str())?;
+            Some((g.representative_id.as_str(), *rep_pts))
+        })
+        .collect();
+    if route_reps.len() < config.min_routes as usize {
+        info!(
+            "[Sections] {} route reps < min_routes ({}), skipping detection",
+            route_reps.len(),
+            config.min_routes
+        );
+        return vec![];
     }
 
-    let mut all_sections: Vec<FrequentSection> = Vec::new();
-    let mut section_counter = 0;
+    let cluster_start = web_time::Instant::now();
+    let raw_clusters = density_grid::detect_clusters_via_density(&route_reps, config);
+    let clusters: Vec<OverlapCluster> = raw_clusters
+        .into_iter()
+        .map(|c| expand_cluster_to_activities(c, &significant_groups))
+        .collect();
 
-    // Process each sport type
-    for (sport_type, sport_tracks) in &tracks_by_sport {
-        if sport_tracks.len() < config.min_activities as usize {
-            continue;
-        }
+    let significant_clusters: Vec<_> = clusters
+        .into_iter()
+        .filter(|c| c.activity_ids.len() >= config.min_activities as usize)
+        .collect();
 
-        info!(
-            "[Sections] Processing {} {} tracks via density grid",
-            sport_tracks.len(),
-            sport_type
-        );
+    info!(
+        "[Sections] Density grid: {} significant clusters ({}+ activities) in {}ms",
+        significant_clusters.len(),
+        config.min_activities,
+        cluster_start.elapsed().as_millis()
+    );
 
-        // Containment-gated density grid over ROUTE representatives
-        // (one rep per significant group). Sections emerge from the
-        // overlap of distinct routes — not from one route being
-        // repeated. See `density_grid.rs` for the algorithm.
-        //
-        // Sport is derived from the authoritative `sport_types` map
-        // because `g.sport_type` defaults to "Ride" inside the grouping
-        // module unless the caller overrides it (see grouping.rs:626).
-        let sport_route_reps: Vec<(&str, &[GpsPoint])> = significant_groups
-            .iter()
-            .filter(|g| {
-                sport_types
-                    .get(&g.representative_id)
-                    .map(|s| s == sport_type)
-                    .unwrap_or(false)
-            })
-            .filter_map(|g| {
-                let rep_pts = track_map.get(g.representative_id.as_str())?;
-                Some((g.representative_id.as_str(), *rep_pts))
-            })
-            .collect();
-        if sport_route_reps.len() < config.min_routes as usize {
-            continue;
-        }
-        let cluster_start = web_time::Instant::now();
-        let raw_clusters = density_grid::detect_clusters_via_density(&sport_route_reps, config);
-        let clusters: Vec<OverlapCluster> = raw_clusters
-            .into_iter()
-            .map(|c| expand_cluster_to_activities(c, &significant_groups))
-            .collect();
+    // Convert clusters to sections - PARALLELIZED with rayon
+    let section_convert_start = web_time::Instant::now();
 
-        let significant_clusters: Vec<_> = clusters
-            .into_iter()
-            .filter(|c| c.activity_ids.len() >= config.min_activities as usize)
-            .collect();
+    let cluster_data: Vec<_> = significant_clusters
+        .into_iter()
+        .map(|cluster| {
+            let ids: Vec<String> = cluster.activity_ids.iter().cloned().collect();
+            let sport = dominant_sport(&ids, sport_types);
+            (cluster, sport)
+        })
+        .enumerate()
+        .collect();
 
-        info!(
-            "[Sections] Density grid: {} significant clusters ({}+ activities) for {} in {}ms",
-            significant_clusters.len(),
-            config.min_activities,
-            sport_type,
-            cluster_start.elapsed().as_millis()
-        );
+    #[cfg(feature = "parallel")]
+    let raw_sections: Vec<FrequentSection> = cluster_data
+        .into_par_iter()
+        .filter_map(|(idx, (cluster, sport))| {
+            process_cluster(
+                idx,
+                cluster,
+                &sport,
+                &track_map,
+                &activity_to_route,
+                config,
+                None,
+            )
+        })
+        .collect();
 
-        // Convert clusters to sections - PARALLELIZED with rayon
-        let section_convert_start = web_time::Instant::now();
+    #[cfg(not(feature = "parallel"))]
+    let raw_sections: Vec<FrequentSection> = cluster_data
+        .into_iter()
+        .filter_map(|(idx, (cluster, sport))| {
+            process_cluster(
+                idx,
+                cluster,
+                &sport,
+                &track_map,
+                &activity_to_route,
+                config,
+                None,
+            )
+        })
+        .collect();
 
-        // Prepare data for parallel processing
-        let cluster_data: Vec<_> = significant_clusters.into_iter().enumerate().collect();
+    info!(
+        "[Sections] Converted {} sections in {}ms",
+        raw_sections.len(),
+        section_convert_start.elapsed().as_millis()
+    );
 
-        // Process clusters (parallel if feature enabled)
-        #[cfg(feature = "parallel")]
-        let sport_sections: Vec<FrequentSection> = cluster_data
-            .into_par_iter()
-            .filter_map(|(idx, cluster)| {
-                process_cluster(
-                    idx,
-                    cluster,
-                    sport_type,
-                    &track_map,
-                    &activity_to_route,
-                    config,
-                    None,
-                )
-            })
-            .collect();
+    let fold_start = web_time::Instant::now();
+    let fold_sections = split_folding_sections(raw_sections, config);
+    info!(
+        "[Sections] After fold splitting: {} sections in {}ms",
+        fold_sections.len(),
+        fold_start.elapsed().as_millis()
+    );
 
-        #[cfg(not(feature = "parallel"))]
-        let sport_sections: Vec<FrequentSection> = cluster_data
-            .into_iter()
-            .filter_map(|(idx, cluster)| {
-                process_cluster(
-                    idx,
-                    cluster,
-                    sport_type,
-                    &track_map,
-                    &activity_to_route,
-                    config,
-                    None,
-                )
-            })
-            .collect();
+    let heading_start = web_time::Instant::now();
+    let heading_sections = split_at_heading_changes(fold_sections, config);
+    info!(
+        "[Sections] After heading splitting: {} sections in {}ms",
+        heading_sections.len(),
+        heading_start.elapsed().as_millis()
+    );
 
-        info!(
-            "[Sections] Converted {} sections for {} in {}ms",
-            sport_sections.len(),
-            sport_type,
-            section_convert_start.elapsed().as_millis()
-        );
+    let gradient_start = web_time::Instant::now();
+    let gradient_sections = split_at_gradient_changes(heading_sections, config);
+    info!(
+        "[Sections] After gradient splitting: {} sections in {}ms",
+        gradient_sections.len(),
+        gradient_start.elapsed().as_millis()
+    );
 
-        // Post-process step 1: Split sections that fold back on themselves (out-and-back)
-        let fold_start = web_time::Instant::now();
-        let fold_sections = split_folding_sections(sport_sections, config);
-        info!(
-            "[Sections] After fold splitting: {} sections in {}ms",
-            fold_sections.len(),
-            fold_start.elapsed().as_millis()
-        );
+    let merge_start = web_time::Instant::now();
+    let merged_sections = merge_nearby_sections(gradient_sections, config);
+    info!(
+        "[Sections] After nearby merge: {} sections in {}ms",
+        merged_sections.len(),
+        merge_start.elapsed().as_millis()
+    );
 
-        // Post-process step 1b: Split sections at heading inflection points
-        let heading_start = web_time::Instant::now();
-        let heading_sections = split_at_heading_changes(fold_sections, config);
-        info!(
-            "[Sections] After heading splitting: {} sections in {}ms",
-            heading_sections.len(),
-            heading_start.elapsed().as_millis()
-        );
+    let dedup_start = web_time::Instant::now();
+    let deduped_sections = remove_overlapping_sections(merged_sections, config);
+    info!(
+        "[Sections] After dedup: {} unique sections in {}ms",
+        deduped_sections.len(),
+        dedup_start.elapsed().as_millis()
+    );
 
-        // Post-process step 1c: Split sections at gradient changes (if elevation available)
-        let gradient_start = web_time::Instant::now();
-        let gradient_sections = split_at_gradient_changes(heading_sections, config);
-        info!(
-            "[Sections] After gradient splitting: {} sections in {}ms",
-            gradient_sections.len(),
-            gradient_start.elapsed().as_millis()
-        );
+    let split_start = web_time::Instant::now();
+    let final_sections = if config.enable_density_splits {
+        split_high_variance_sections(deduped_sections, &track_map, config)
+    } else {
+        deduped_sections
+    };
+    info!(
+        "[Sections] After density splitting: {} sections in {}ms",
+        final_sections.len(),
+        split_start.elapsed().as_millis()
+    );
 
-        // Post-process step 2: Merge sections that are nearby (reversed, parallel, GPS drift)
-        let merge_start = web_time::Instant::now();
-        let merged_sections = merge_nearby_sections(gradient_sections, config);
-        info!(
-            "[Sections] After nearby merge: {} sections in {}ms",
-            merged_sections.len(),
-            merge_start.elapsed().as_millis()
-        );
-
-        // Post-process step 3: Remove sections that contain or are contained by others
-        let dedup_start = web_time::Instant::now();
-        let deduped_sections = remove_overlapping_sections(merged_sections, config);
-        info!(
-            "[Sections] After dedup: {} unique sections in {}ms",
-            deduped_sections.len(),
-            dedup_start.elapsed().as_millis()
-        );
-
-        // Post-process step 4: Split sections with high-traffic portions.
-        // Disabled by default — it's a 1.5× section count multiplier and
-        // with route-intersection input the cluster IS the high-traffic
-        // core, so there's nothing to extract. Opt-in via config.
-        let split_start = web_time::Instant::now();
-        let final_sections = if config.enable_density_splits {
-            split_high_variance_sections(deduped_sections, &track_map, config)
-        } else {
-            deduped_sections
-        };
-        info!(
-            "[Sections] After density splitting: {} sections in {}ms",
-            final_sections.len(),
-            split_start.elapsed().as_millis()
-        );
-
-        // Re-number sections
-        for (i, mut section) in final_sections.into_iter().enumerate() {
-            section.id = format!("sec_{}_{}", sport_type.to_lowercase(), section_counter + i);
-            all_sections.push(section);
-        }
-        section_counter += all_sections.len();
-    }
+    let mut all_sections = final_sections;
 
     // Sort by visit count (most visited first)
     all_sections.sort_by_key(|s| std::cmp::Reverse(s.visit_count));
+
+    // Re-number IDs per dominant sport so existing single-sport sections
+    // keep stable `sec_ride_0`-style IDs and cross-sport sections get a
+    // namespace from their dominant sport.
+    let mut id_counters: HashMap<String, usize> = HashMap::new();
+    for section in all_sections.iter_mut() {
+        let sport_key = section.sport_type.to_lowercase();
+        let counter = id_counters.entry(sport_key.clone()).or_insert(0);
+        section.id = format!("sec_{}_{}", sport_key, *counter);
+        *counter += 1;
+    }
 
     info!("[Sections] Detected {} total sections", all_sections.len());
 
@@ -1233,24 +1197,8 @@ pub fn detect_sections_multiscale_with_progress(
         })
         .collect();
 
-    // Group tracks by sport type
-    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
-    for (activity_id, points) in tracks {
-        let sport = sport_types
-            .get(activity_id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        tracks_by_sport
-            .entry(sport)
-            .or_default()
-            .push((activity_id.as_str(), points.as_slice()));
-    }
-
-    // Calculate totals for progress reporting (now ONCE, not per-preset)
-    let total_tracks_across_sports: u32 = tracks_by_sport.values().map(|v| v.len() as u32).sum();
-
-    // Phase 1: Building R-trees (ONCE per sport type, not per preset)
-    progress.on_phase(DetectionPhase::BuildingRtrees, total_tracks_across_sports);
+    // Phase 1: Building R-trees (one pass over all tracks)
+    progress.on_phase(DetectionPhase::BuildingRtrees, tracks.len() as u32);
 
     // Use the smallest min_section_length across all presets for overlap detection
     // This ensures we capture overlaps that any preset might need
@@ -1268,236 +1216,182 @@ pub fn detect_sections_multiscale_with_progress(
     let mut all_sections: Vec<FrequentSection> = Vec::new();
     let mut all_potentials: Vec<PotentialSection> = Vec::new();
 
-    // Process each sport type: build R-trees ONCE, find overlaps ONCE, then filter per preset
-    for (sport_type, sport_tracks) in &tracks_by_sport {
-        let min_tracks_for_processing = if config.include_potentials {
-            1
-        } else {
-            config
-                .scale_presets
-                .iter()
-                .map(|p| p.min_activities as usize)
-                .min()
-                .unwrap_or(1)
-        };
-        if sport_tracks.len() < min_tracks_for_processing {
-            continue;
-        }
-
-        // Phase 1 + 2: containment-gated density grid with connectivity
-        // bridging. Route representatives are rasterised into cells of
-        // size proximity_threshold; bridge cells (≥ 2 tracks) maintain
-        // corridor connectivity where GPS jitter shifts a route rep.
-        // Extraction still requires min_routes contributing tracks.
-        //
-        // BuildingRtrees fires once for the density-grid pass (which has
-        // no internal progress hooks). FindingOverlaps then ticks per
-        // cluster as we run process_cluster on each, so the UI bar moves
-        // through the actual assembly work (which dominates wall time on
-        // datasets with many clusters).
-        progress.on_phase(DetectionPhase::BuildingRtrees, sport_tracks.len() as u32);
-
-        // Build route representatives for THIS sport. Each significant
-        // route group contributes one rep to the density grid. This is
-        // the "alphabet" view: we draw each distinct route once, and
-        // sections emerge from the OVERLAP of multiple routes — not
-        // from one route being repeated.
-        //
-        // Sport is derived from the authoritative `sport_types` map via
-        // the representative's id, NOT `g.sport_type` — the grouping
-        // module defaults that field to "Ride" and relies on the caller
-        // to override it, so trusting it here would silently drop every
-        // group when the caller didn't set it.
-        let sport_route_reps: Vec<(&str, &[GpsPoint])> = significant_groups
+    let min_tracks_for_processing = if config.include_potentials {
+        1
+    } else {
+        config
+            .scale_presets
             .iter()
-            .filter(|g| {
-                sport_types
-                    .get(&g.representative_id)
-                    .map(|s| s == sport_type)
-                    .unwrap_or(false)
-            })
+            .map(|p| p.min_activities as usize)
+            .min()
+            .unwrap_or(1)
+    };
+
+    if tracks.len() >= min_tracks_for_processing {
+        // Containment-gated density grid with connectivity bridging across
+        // all sports. Each significant route group contributes one rep,
+        // regardless of sport — a road traversed by both cyclists and
+        // runners becomes a single cluster, and the section's dominant
+        // sport is computed per-cluster at emission time.
+        let route_reps: Vec<(&str, &[GpsPoint])> = significant_groups
+            .iter()
             .filter_map(|g| {
                 let rep_pts = track_map.get(g.representative_id.as_str())?;
                 Some((g.representative_id.as_str(), *rep_pts))
             })
             .collect();
 
-        if sport_route_reps.len() < config.min_routes as usize {
+        if route_reps.len() < config.min_routes as usize {
             info!(
-                "[MultiScale] {} has {} routes < min_routes ({}), skipping",
-                sport_type,
-                sport_route_reps.len(),
+                "[MultiScale] {} route reps < min_routes ({}), skipping",
+                route_reps.len(),
                 config.min_routes
             );
             progress.on_phase(DetectionPhase::FindingOverlaps, 0);
-            continue;
-        }
+        } else {
+            let cluster_start = web_time::Instant::now();
+            let raw_clusters =
+                density_grid::detect_clusters_via_density(&route_reps, &overlap_config);
 
-        let cluster_start = web_time::Instant::now();
-        let raw_clusters =
-            density_grid::detect_clusters_via_density(&sport_route_reps, &overlap_config);
+            // Expand each cluster's activity_ids from route representatives
+            // to the full activity set of the contributing routes.
+            let all_clusters: Vec<OverlapCluster> = raw_clusters
+                .into_iter()
+                .map(|c| expand_cluster_to_activities(c, &significant_groups))
+                .collect();
 
-        // Expand each cluster's activity_ids: cluster currently
-        // identifies routes via their representative IDs, but the
-        // FrequentSection needs the full activity set across all
-        // contributing routes for visit count and per-activity portions.
-        let all_clusters: Vec<OverlapCluster> = raw_clusters
-            .into_iter()
-            .map(|c| expand_cluster_to_activities(c, &significant_groups))
-            .collect();
+            let total_overlaps: u32 = all_clusters.iter().map(|c| c.overlaps.len() as u32).sum();
+            stats.overlaps_found += total_overlaps;
+            info!(
+                "[MultiScale] Density grid: {} clusters from {} routes ({} synthesised overlaps) in {}ms",
+                all_clusters.len(),
+                route_reps.len(),
+                total_overlaps,
+                cluster_start.elapsed().as_millis()
+            );
 
-        let total_overlaps: u32 = all_clusters.iter().map(|c| c.overlaps.len() as u32).sum();
-        stats.overlaps_found += total_overlaps;
-        info!(
-            "[MultiScale] Density grid: {} clusters from {} routes ({} synthesised overlaps) for {} in {}ms",
-            all_clusters.len(),
-            sport_route_reps.len(),
-            total_overlaps,
-            sport_type,
-            cluster_start.elapsed().as_millis()
-        );
+            // Bucket each cluster into the preset whose [min_length, max_length)
+            // contains its representative length (longest contributing portion).
+            let bucketed: Vec<(OverlapCluster, &ScalePreset, bool, String)> = all_clusters
+                .into_iter()
+                .filter_map(|c| {
+                    let max_len = c
+                        .overlaps
+                        .iter()
+                        .map(|o| o.overlap_length)
+                        .fold(0.0_f64, f64::max);
+                    let preset = config
+                        .scale_presets
+                        .iter()
+                        .find(|p| max_len >= p.min_length && max_len < p.max_length)?;
+                    let is_significant = c.activity_ids.len() >= preset.min_activities as usize;
+                    let ids: Vec<String> = c.activity_ids.iter().cloned().collect();
+                    let sport = dominant_sport(&ids, sport_types);
+                    Some((c, preset, is_significant, sport))
+                })
+                .collect();
 
-        if all_clusters.is_empty() {
-            // Still emit a phase header so the UI doesn't sit on the
-            // previous label while we move to the next sport / phase.
-            progress.on_phase(DetectionPhase::FindingOverlaps, 0);
-            continue;
-        }
-
-        // Bucket each cluster into the preset whose [min_length, max_length)
-        // contains its representative length (longest contributing portion).
-        // Each cluster maps to at most one preset.
-        let bucketed: Vec<(OverlapCluster, &ScalePreset, bool)> = all_clusters
-            .into_iter()
-            .filter_map(|c| {
-                let max_len = c
-                    .overlaps
-                    .iter()
-                    .map(|o| o.overlap_length)
-                    .fold(0.0_f64, f64::max);
-                let preset = config
-                    .scale_presets
-                    .iter()
-                    .find(|p| max_len >= p.min_length && max_len < p.max_length)?;
-                let is_significant = c.activity_ids.len() >= preset.min_activities as usize;
-                Some((c, preset, is_significant))
-            })
-            .collect();
-
-        // Process all clusters in one parallel pass — each cluster runs
-        // through process_cluster (significant) or PotentialSection
-        // construction (below min_activities) exactly once. This
-        // maximises rayon parallelism: 134 clusters in flight at once
-        // instead of 4 preset-buckets each running their cluster set
-        // sequentially.
-        //
-        // Emit a per-cluster tick from inside the closure so the progress
-        // bar moves smoothly through assembly work (which dominates wall
-        // time on datasets with many clusters). The FFI crossing cost per
-        // tick is microseconds vs seconds spent in process_cluster, so we
-        // don't bother batching.
-        progress.on_phase(DetectionPhase::FindingOverlaps, bucketed.len() as u32);
-        let progress_ref: &dyn DetectionProgressCallback = progress.as_ref();
-        type ClusterResult = (Option<FrequentSection>, Option<PotentialSection>);
-        let process_one = |(idx, (cluster, preset, is_significant)): (
-            usize,
-            (OverlapCluster, &ScalePreset, bool),
-        )|
-         -> ClusterResult {
-            let scale_config = SectionConfig {
-                min_section_length: preset.min_length,
-                max_section_length: preset.max_length,
-                min_activities: preset.min_activities,
-                ..config.clone()
-            };
-            let result = if is_significant {
-                let section = process_cluster(
-                    idx,
-                    cluster,
-                    sport_type,
-                    &track_map,
-                    &activity_to_route,
-                    &scale_config,
-                    Some(preset.name),
-                );
-                (section, None)
-            } else if config.include_potentials {
-                let activity_count = cluster.activity_ids.len();
-                if activity_count == 0 {
-                    (None, None)
-                } else {
-                    let (_rep_id, rep_polyline) = select_medoid(&cluster, &track_map);
-                    if rep_polyline.is_empty() {
+            progress.on_phase(DetectionPhase::FindingOverlaps, bucketed.len() as u32);
+            let progress_ref: &dyn DetectionProgressCallback = progress.as_ref();
+            type ClusterResult = (Option<FrequentSection>, Option<PotentialSection>);
+            let process_one = |(idx, (cluster, preset, is_significant, sport_type)): (
+                usize,
+                (OverlapCluster, &ScalePreset, bool, String),
+            )|
+             -> ClusterResult {
+                let scale_config = SectionConfig {
+                    min_section_length: preset.min_length,
+                    max_section_length: preset.max_length,
+                    min_activities: preset.min_activities,
+                    ..config.clone()
+                };
+                let result = if is_significant {
+                    let section = process_cluster(
+                        idx,
+                        cluster,
+                        &sport_type,
+                        &track_map,
+                        &activity_to_route,
+                        &scale_config,
+                        Some(preset.name),
+                    );
+                    (section, None)
+                } else if config.include_potentials {
+                    let activity_count = cluster.activity_ids.len();
+                    if activity_count == 0 {
                         (None, None)
                     } else {
-                        let distance = calculate_route_distance(&rep_polyline);
-                        if distance < preset.min_length || distance > preset.max_length {
+                        let (_rep_id, rep_polyline) = select_medoid(&cluster, &track_map);
+                        if rep_polyline.is_empty() {
                             (None, None)
                         } else {
-                            let potential = PotentialSection {
-                                id: format!(
-                                    "pot_{}_{}_{}",
-                                    preset.name,
-                                    sport_type.to_lowercase(),
-                                    idx
-                                ),
-                                sport_type: sport_type.to_string(),
-                                polyline: rep_polyline,
-                                activity_ids: {
-                                    let mut ids: Vec<String> =
-                                        cluster.activity_ids.into_iter().collect();
-                                    ids.sort();
-                                    ids
-                                },
-                                visit_count: activity_count as u32,
-                                distance_meters: distance,
-                                confidence: 0.3 + (activity_count as f64 * 0.2),
-                                scale: preset.name,
-                            };
-                            (None, Some(potential))
+                            let distance = calculate_route_distance(&rep_polyline);
+                            if distance < preset.min_length || distance > preset.max_length {
+                                (None, None)
+                            } else {
+                                let potential = PotentialSection {
+                                    id: format!(
+                                        "pot_{}_{}_{}",
+                                        preset.name,
+                                        sport_type.to_lowercase(),
+                                        idx
+                                    ),
+                                    sport_type: sport_type.clone(),
+                                    polyline: rep_polyline,
+                                    activity_ids: {
+                                        let mut ids: Vec<String> =
+                                            cluster.activity_ids.into_iter().collect();
+                                        ids.sort();
+                                        ids
+                                    },
+                                    visit_count: activity_count as u32,
+                                    distance_meters: distance,
+                                    confidence: 0.3 + (activity_count as f64 * 0.2),
+                                    scale: preset.name,
+                                };
+                                (None, Some(potential))
+                            }
                         }
                     }
-                }
-            } else {
-                (None, None)
+                } else {
+                    (None, None)
+                };
+                progress_ref.on_progress();
+                result
             };
-            // One tick per cluster so the bar moves continuously through
-            // the dominant ~18s assembly phase.
-            progress_ref.on_progress();
-            result
-        };
 
-        #[cfg(feature = "parallel")]
-        let cluster_outputs: Vec<ClusterResult> = bucketed
-            .into_par_iter()
-            .enumerate()
-            .map(process_one)
-            .collect();
-        #[cfg(not(feature = "parallel"))]
-        let cluster_outputs: Vec<ClusterResult> =
-            bucketed.into_iter().enumerate().map(process_one).collect();
+            #[cfg(feature = "parallel")]
+            let cluster_outputs: Vec<ClusterResult> = bucketed
+                .into_par_iter()
+                .enumerate()
+                .map(process_one)
+                .collect();
+            #[cfg(not(feature = "parallel"))]
+            let cluster_outputs: Vec<ClusterResult> =
+                bucketed.into_iter().enumerate().map(process_one).collect();
 
-        for (section_opt, potential_opt) in cluster_outputs {
-            if let Some(section) = section_opt {
-                let scale_key = section
-                    .scale
-                    .map(|s| s.as_str().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                stats
-                    .sections_by_scale
-                    .entry(scale_key)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
-                all_sections.push(section);
-            }
-            if let Some(potential) = potential_opt {
-                let scale_key = potential.scale.as_str().to_string();
-                stats
-                    .potentials_by_scale
-                    .entry(scale_key)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
-                all_potentials.push(potential);
+            for (section_opt, potential_opt) in cluster_outputs {
+                if let Some(section) = section_opt {
+                    let scale_key = section
+                        .scale
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    stats
+                        .sections_by_scale
+                        .entry(scale_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    all_sections.push(section);
+                }
+                if let Some(potential) = potential_opt {
+                    let scale_key = potential.scale.as_str().to_string();
+                    stats
+                        .potentials_by_scale
+                        .entry(scale_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    all_potentials.push(potential);
+                }
             }
         }
     }
