@@ -60,7 +60,7 @@ fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> F
 
     let mut cell_visits: HashMap<(i32, i32), u32> = HashMap::new();
     let mut cell_tracks: HashMap<(i32, i32), HashSet<u32>> = HashMap::new();
-    let mut transitions: HashMap<CellPair, u32> = HashMap::new();
+    let mut transition_tracks: HashMap<CellPair, HashSet<u32>> = HashMap::new();
 
     for (t_idx, (_, pts)) in tracks.iter().enumerate() {
         if pts.len() < 2 {
@@ -85,12 +85,20 @@ fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> F
                 if let Some(p) = prev
                     && p != c
                 {
-                    *transitions.entry((p, c)).or_insert(0) += 1;
+                    transition_tracks
+                        .entry((p, c))
+                        .or_default()
+                        .insert(t_idx as u32);
                 }
             }
             prev_cell = Some(*cells.last().unwrap_or(&a));
         }
     }
+
+    let transitions: HashMap<CellPair, u32> = transition_tracks
+        .iter()
+        .map(|(k, v)| (*k, v.len() as u32))
+        .collect();
 
     FlowGraph {
         cell_visits,
@@ -144,9 +152,12 @@ fn find_nodes(flow: &FlowGraph, min_visits: u32, divergence_threshold: f64) -> V
             continue;
         }
 
+        let min_exit_tracks = 3u32;
         let significant_dirs = dir_traffic
             .iter()
-            .filter(|&&c| (c as f64) >= (total as f64) * divergence_threshold)
+            .filter(|&&c| {
+                c >= min_exit_tracks && (c as f64) >= (total as f64) * divergence_threshold
+            })
             .count();
 
         if significant_dirs >= 3 {
@@ -563,10 +574,43 @@ mod tests {
             })
             .collect();
 
+        // Need ≥3 tracks per exit direction for junction detection.
+        // Duplicate each direction to simulate realistic traffic.
+        let track_a2 = track_a
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude + 0.00001, p.longitude))
+            .collect::<Vec<_>>();
+        let track_a3 = track_a
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude - 0.00001, p.longitude))
+            .collect::<Vec<_>>();
+        let track_b2 = track_b
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude, p.longitude + 0.00001))
+            .collect::<Vec<_>>();
+        let track_b3 = track_b
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude, p.longitude - 0.00001))
+            .collect::<Vec<_>>();
+        let track_c2 = track_c
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude, p.longitude + 0.00001))
+            .collect::<Vec<_>>();
+        let track_c3 = track_c
+            .iter()
+            .map(|p| GpsPoint::new(p.latitude, p.longitude - 0.00001))
+            .collect::<Vec<_>>();
+
         let sport_tracks: Vec<(&str, &[GpsPoint])> = vec![
-            ("a", track_a.as_slice()),
-            ("b", track_b.as_slice()),
-            ("c", track_c.as_slice()),
+            ("a1", track_a.as_slice()),
+            ("a2", track_a2.as_slice()),
+            ("a3", track_a3.as_slice()),
+            ("b1", track_b.as_slice()),
+            ("b2", track_b2.as_slice()),
+            ("b3", track_b3.as_slice()),
+            ("c1", track_c.as_slice()),
+            ("c2", track_c2.as_slice()),
+            ("c3", track_c3.as_slice()),
         ];
 
         let flow = build_flow_graph(&sport_tracks, &config);
