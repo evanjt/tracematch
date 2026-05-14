@@ -38,7 +38,6 @@
 //! ```
 
 use geo::{Coord, LineString, algorithm::simplify::Simplify};
-use rstar::{AABB, RTreeObject};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -57,11 +56,15 @@ pub use matching::compare_routes;
 
 // Route grouping algorithms
 pub mod grouping;
+pub mod grouping_filter;
+pub use grouping::{
+    GROUPING_PHASE_COMPARING, group_signatures, group_signatures_with_matches,
+    group_signatures_with_progress, should_group_routes,
+};
 #[cfg(feature = "parallel")]
 pub use grouping::{
     group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
 };
-pub use grouping::{group_signatures, group_signatures_with_matches, should_group_routes};
 
 // Geographic utilities (distance, bounds, center calculations)
 pub mod geo_utils;
@@ -77,10 +80,11 @@ pub mod synthetic;
 #[cfg(feature = "synthetic")]
 pub mod scenarios;
 pub use sections::{
-    DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection,
-    MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch,
-    SectionPortion, SplitResult, detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, detect_sections_optimized, find_all_track_portions,
+    DetectionMethod, DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats,
+    FrequentSection, MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset,
+    SectionConfig, SectionMatch, SectionPortion, SplitResult, detect_sections,
+    detect_sections_corridor, detect_sections_flow_graph, detect_sections_from_tracks,
+    detect_sections_multiscale, detect_sections_multiscale_with_progress, find_all_track_portions,
     find_sections_in_route, incremental::IncrementalResult,
     incremental::detect_sections_incremental, recalculate_section_polyline, split_section_at_index,
     split_section_at_point,
@@ -357,18 +361,6 @@ impl RouteSignature {
         })
     }
 
-    /// Get the bounding box of this route as RouteBounds (for R-tree indexing).
-    pub fn route_bounds(&self) -> RouteBounds {
-        RouteBounds {
-            activity_id: self.activity_id.clone(),
-            min_lat: self.bounds.min_lat,
-            max_lat: self.bounds.max_lat,
-            min_lng: self.bounds.min_lng,
-            max_lng: self.bounds.max_lng,
-            distance: self.total_distance,
-        }
-    }
-
     /// Compare this signature against another using the given config.
     ///
     /// Convenience wrapper around [`compare_routes`].
@@ -450,13 +442,17 @@ pub struct MatchConfig {
 
 impl Default for MatchConfig {
     fn default() -> Self {
+        // Softened from the 43a39da "Optimise parameters" defaults, which
+        // were too strict for commute-like routes with day-to-day GPS
+        // variation. These become the "Default" preset; users can tune via
+        // the in-app strictness slider + SectionConfig controls.
         Self {
             perfect_threshold: 15.0,
             zero_threshold: 100.0,
-            min_match_percentage: 60.0,
+            min_match_percentage: 55.0,
             min_route_distance: 500.0,
             max_distance_diff_ratio: 0.25,
-            endpoint_threshold: 200.0,
+            endpoint_threshold: 250.0,
             resample_count: 50,
             resample_spacing_meters: 50.0,
             min_resample_points: 20,
@@ -507,14 +503,6 @@ pub struct ActivityMatchInfo {
     pub match_percentage: f64,
     /// Match direction relative to the representative route
     pub direction: Direction,
-    /// GPS point index where the route portion starts (into the activity's track)
-    pub start_index: Option<u32>,
-    /// GPS point index where the route portion ends
-    pub end_index: Option<u32>,
-    /// Distance in meters of the matched route portion
-    pub route_distance: Option<f64>,
-    /// Time in seconds for the matched route portion (from time_streams)
-    pub lap_time: Option<f64>,
 }
 
 /// Result from grouping signatures, including per-activity match info.
@@ -524,29 +512,6 @@ pub struct GroupingResult {
     pub groups: Vec<RouteGroup>,
     /// Match info per activity: route_id -> Vec<ActivityMatchInfo>
     pub activity_matches: std::collections::HashMap<String, Vec<ActivityMatchInfo>>,
-}
-
-// ============================================================================
-// Spatial Indexing Types
-// ============================================================================
-
-/// Bounding box for a route (used for spatial indexing).
-#[derive(Debug, Clone)]
-pub struct RouteBounds {
-    pub activity_id: String,
-    pub min_lat: f64,
-    pub max_lat: f64,
-    pub min_lng: f64,
-    pub max_lng: f64,
-    pub distance: f64,
-}
-
-impl RTreeObject for RouteBounds {
-    type Envelope = AABB<[f64; 2]>;
-
-    fn envelope(&self) -> Self::Envelope {
-        AABB::from_corners([self.min_lng, self.min_lat], [self.max_lng, self.max_lat])
-    }
 }
 
 // ============================================================================

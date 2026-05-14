@@ -7,6 +7,7 @@
 
 use crate::geo_utils::haversine_distance;
 use crate::{Direction, GpsPoint, MatchConfig, MatchResult, RouteSignature};
+use rstar::{AABB, PointDistance, RTree, RTreeObject};
 
 /// Compare two routes and return a match result using Average Minimum Distance (AMD).
 ///
@@ -54,9 +55,11 @@ pub fn compare_routes(
     let resampled1 = resample_for_comparison(&sig1.points, sig1.total_distance, config);
     let resampled2 = resample_for_comparison(&sig2.points, sig2.total_distance, config);
 
-    // Calculate AMD in both directions (AMD is asymmetric)
-    let amd_1_to_2 = average_min_distance(&resampled1, &resampled2);
-    let amd_2_to_1 = average_min_distance(&resampled2, &resampled1);
+    // Calculate AMD in both directions using R-tree acceleration
+    let tree2 = build_point_rtree(&resampled2);
+    let tree1 = build_point_rtree(&resampled1);
+    let amd_1_to_2 = average_min_distance_rtree(&resampled1, &tree2);
+    let amd_2_to_1 = average_min_distance_rtree(&resampled2, &tree1);
 
     // Use average of both directions
     let avg_amd = (amd_1_to_2 + amd_2_to_1) / 2.0;
@@ -138,6 +141,119 @@ pub fn average_min_distance(route1: &[GpsPoint], route2: &[GpsPoint]) -> f64 {
         .sum();
 
     total_min_dist / route1.len() as f64
+}
+
+/// A point wrapper for R-tree nearest-neighbor queries on GPS coordinates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RTreePoint([f64; 2]);
+
+impl RTreeObject for RTreePoint {
+    type Envelope = AABB<[f64; 2]>;
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_point(self.0)
+    }
+}
+
+impl PointDistance for RTreePoint {
+    fn distance_2(&self, point: &[f64; 2]) -> f64 {
+        let dx = self.0[0] - point[0];
+        let dy = self.0[1] - point[1];
+        dx * dx + dy * dy
+    }
+}
+
+pub(crate) fn build_point_rtree(points: &[GpsPoint]) -> RTree<RTreePoint> {
+    RTree::bulk_load(
+        points
+            .iter()
+            .map(|p| RTreePoint([p.latitude, p.longitude]))
+            .collect(),
+    )
+}
+
+/// R-tree accelerated AMD: O(n log m) instead of O(n×m).
+pub(crate) fn average_min_distance_rtree(route: &[GpsPoint], tree: &RTree<RTreePoint>) -> f64 {
+    if route.is_empty() || tree.size() == 0 {
+        return f64::INFINITY;
+    }
+
+    let total_min_dist: f64 = route
+        .iter()
+        .map(|p| {
+            let query = [p.latitude, p.longitude];
+            let nearest = tree.nearest_neighbor(&query).unwrap();
+            let nearest_pt = GpsPoint::new(nearest.0[0], nearest.0[1]);
+            haversine_distance(p, &nearest_pt)
+        })
+        .sum();
+
+    total_min_dist / route.len() as f64
+}
+
+/// Precomputed resample + R-tree for a route, reused across N pairwise
+/// comparisons during grouping.
+///
+/// Building one R-tree per pair (as `compare_routes` does inline) is
+/// pathologically slow in WASM: 426 routes → 91k pairs → 182k R-tree
+/// builds and 182k Vec allocations for the resampled points. With a
+/// prepared cache the work drops to 426 builds + 91k cheap lookups.
+pub struct PreparedRoute {
+    pub resampled: Vec<GpsPoint>,
+    pub(crate) tree: RTree<RTreePoint>,
+}
+
+/// Build a `PreparedRoute` from a signature for repeated comparison.
+pub fn prepare_route(sig: &RouteSignature, config: &MatchConfig) -> PreparedRoute {
+    let resampled = resample_for_comparison(&sig.points, sig.total_distance, config);
+    let tree = build_point_rtree(&resampled);
+    PreparedRoute { resampled, tree }
+}
+
+/// Compare two routes using precomputed `PreparedRoute` data.
+///
+/// Same semantics as [`compare_routes`] but avoids rebuilding the
+/// resample + R-tree on every call. Use this when comparing the same
+/// signature against many others (e.g. inside `group_signatures`).
+pub fn compare_prepared_routes(
+    sig1: &RouteSignature,
+    prep1: &PreparedRoute,
+    sig2: &RouteSignature,
+    prep2: &PreparedRoute,
+    config: &MatchConfig,
+) -> Option<MatchResult> {
+    let distance_ratio = if sig1.total_distance > sig2.total_distance {
+        sig2.total_distance / sig1.total_distance
+    } else {
+        sig1.total_distance / sig2.total_distance
+    };
+    if distance_ratio < 0.5 {
+        return None;
+    }
+
+    let amd_1_to_2 = average_min_distance_rtree(&prep1.resampled, &prep2.tree);
+    let amd_2_to_1 = average_min_distance_rtree(&prep2.resampled, &prep1.tree);
+    let avg_amd = (amd_1_to_2 + amd_2_to_1) / 2.0;
+
+    let match_percentage =
+        amd_to_percentage(avg_amd, config.perfect_threshold, config.zero_threshold);
+    if match_percentage < config.min_match_percentage {
+        return None;
+    }
+
+    let direction = determine_direction_by_endpoints(sig1, sig2, config.endpoint_threshold);
+    let final_direction = if match_percentage >= 70.0 {
+        direction
+    } else {
+        Direction::Partial
+    };
+
+    Some(MatchResult {
+        activity_id_1: sig1.activity_id.clone(),
+        activity_id_2: sig2.activity_id.clone(),
+        match_percentage,
+        direction: final_direction,
+        amd: avg_amd,
+    })
 }
 
 /// Convert AMD to a match percentage using thresholds.

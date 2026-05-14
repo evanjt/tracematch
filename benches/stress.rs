@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::synthetic::SyntheticScenario;
-use tracematch::{SectionConfig, detect_sections_multiscale, detect_sections_optimized};
+use tracematch::{SectionConfig, detect_sections_multiscale};
 
 // ============================================================================
 // 1. Scaling Curve (Multiscale) — Find the N^2 cliff
@@ -45,40 +45,7 @@ fn bench_scaling_curve(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 2. Scaling Curve (Optimized) — Comparison with multiscale
-// ============================================================================
-
-fn bench_scaling_curve_optimized(c: &mut Criterion) {
-    let mut group = c.benchmark_group("scaling_curve_optimized");
-    group.sampling_mode(SamplingMode::Flat);
-    group.warm_up_time(Duration::from_secs(5));
-
-    for count in [50, 100, 250, 500, 1000, 2000] {
-        if count >= 2000 {
-            group.sample_size(2);
-            group.measurement_time(Duration::from_secs(120));
-        } else if count >= 500 {
-            group.sample_size(2);
-            group.measurement_time(Duration::from_secs(30));
-        } else {
-            group.sample_size(5);
-            group.measurement_time(Duration::from_secs(60));
-        }
-
-        let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
-        let dataset = scenario.generate();
-        let config = SectionConfig::default();
-
-        group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
-            b.iter(|| detect_sections_optimized(&dataset.tracks, &dataset.sport_types, &config));
-        });
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// 3. Route Length Impact — Does downsampling hold for long routes?
+// 2. Route Length Impact — Does downsampling hold for long routes?
 // ============================================================================
 
 fn bench_route_length_impact(c: &mut Criterion) {
@@ -249,7 +216,6 @@ use tracematch::GpsPoint;
 criterion_group!(
     benches,
     bench_scaling_curve,
-    bench_scaling_curve_optimized,
     bench_route_length_impact,
     bench_overlap_density,
     bench_no_overlap_worst_case,
