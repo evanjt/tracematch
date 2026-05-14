@@ -430,9 +430,9 @@
       const idx = analysis.sections.indexOf(section);
       L.polyline(latlngs, { color: SECTION_COLOR, weight: 5, opacity: 0.9 })
         .bindPopup(
-          `<b>${section.name || `Section ${idx + 1}`}</b><br>` +
-            `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
-            `${section.visitCount} traversals`
+          `<b>Section ${idx + 1}</b><br>` +
+            `${(section.distanceMeters / 1000).toFixed(1)} km · ${section.visitCount} traversals` +
+            (section.name ? `<br><span style="font-size:11px;color:#aaa">${section.name}</span>` : '')
         )
         .on('mouseover', () => onSectionHover(section))
         .on('mouseout', () => onSectionLeave())
@@ -881,6 +881,7 @@
                 onmouseenter={() => onSectionHover(section)}
                 onmouseleave={() => onSectionLeave()}
                 onclick={() => zoomToSection(section)}
+                title={section.name || ''}
               >
                 <span class="color-swatch" style="background: {SECTION_COLOR}"></span>
                 <span class="row-name">{sectionIndexLabel(section)}</span>

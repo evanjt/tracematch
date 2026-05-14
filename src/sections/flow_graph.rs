@@ -385,11 +385,13 @@ fn find_best_run(
     }
 }
 
-fn snap_edge_to_track(
+fn edge_to_section(
     edge: &GraphEdge,
+    edge_idx: usize,
     flow: &FlowGraph,
     tracks: &[(&str, &[GpsPoint])],
-) -> (Vec<GpsPoint>, usize, f64) {
+    sport_type: &str,
+) -> Option<FrequentSection> {
     let cell_set: HashSet<(i32, i32)> = edge.cells.iter().copied().collect();
 
     let mut runs: Vec<TrackRun> = Vec::new();
@@ -409,15 +411,14 @@ fn snap_edge_to_track(
     }
 
     if runs.is_empty() {
-        return (vec![], 0, 0.0);
+        return None;
     }
 
-    // Pick the track closest to the median run distance. This rejects
-    // outliers: double-backs (too long), multi-lap circuits (too long),
-    // and partial traversals (too short).
     let mut distances: Vec<f64> = runs.iter().map(|r| r.distance).collect();
     distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = distances[distances.len() / 2];
+    let min_dist = distances[0];
+    let max_dist = distances[distances.len() - 1];
 
     let best = runs
         .iter()
@@ -428,18 +429,7 @@ fn snap_edge_to_track(
         })
         .unwrap();
 
-    let pts = &tracks[best.track_idx].1[best.start..best.end];
-    (pts.to_vec(), best.track_idx, best.distance)
-}
-
-fn edge_to_section(
-    edge: &GraphEdge,
-    edge_idx: usize,
-    flow: &FlowGraph,
-    tracks: &[(&str, &[GpsPoint])],
-    sport_type: &str,
-) -> Option<FrequentSection> {
-    let (polyline, rep_idx, distance) = snap_edge_to_track(edge, flow, tracks);
+    let polyline = tracks[best.track_idx].1[best.start..best.end].to_vec();
     if polyline.len() < 2 {
         return None;
     }
@@ -451,13 +441,23 @@ fn edge_to_section(
         .collect();
 
     let rep_id = tracks
-        .get(rep_idx)
+        .get(best.track_idx)
         .map(|(id, _)| id.to_string())
         .unwrap_or_default();
 
+    let debug_name = format!(
+        "{}cells | {}trk | dist {}-{}-{}m | sel {}m",
+        edge.cells.len(),
+        runs.len(),
+        min_dist as i32,
+        median as i32,
+        max_dist as i32,
+        best.distance as i32,
+    );
+
     Some(FrequentSection {
         id: format!("sec_{sport_type}_{edge_idx}").to_lowercase(),
-        name: None,
+        name: Some(debug_name),
         sport_type: sport_type.to_string(),
         polyline,
         representative_activity_id: rep_id,
@@ -465,7 +465,7 @@ fn edge_to_section(
         activity_ids,
         activity_portions: vec![],
         route_ids: vec![],
-        distance_meters: distance,
+        distance_meters: best.distance,
         activity_traces: HashMap::new(),
         confidence: 0.5,
         observation_count: edge.track_ids.len() as u32,
