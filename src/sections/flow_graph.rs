@@ -339,17 +339,7 @@ fn snap_edge_to_track(
     flow: &FlowGraph,
     tracks: &[(&str, &[GpsPoint])],
 ) -> (Vec<GpsPoint>, usize, f64) {
-    let cell_set: HashSet<(i32, i32)> = {
-        let mut s = HashSet::with_capacity(edge.cells.len() * 9);
-        for c in &edge.cells {
-            for dy in -1..=1i32 {
-                for dx in -1..=1i32 {
-                    s.insert((c.0 + dy, c.1 + dx));
-                }
-            }
-        }
-        s
-    };
+    let cell_set: HashSet<(i32, i32)> = edge.cells.iter().copied().collect();
 
     let mut best_track: usize = 0;
     let mut best_pts: Vec<GpsPoint> = Vec::new();

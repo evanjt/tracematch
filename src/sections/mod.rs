@@ -771,6 +771,15 @@ pub fn detect_sections_flow_graph(
         all_sections.extend(sections);
     }
 
+    let before = all_sections.len();
+    all_sections = postprocess::merge_nearby_sections(all_sections, config);
+    all_sections = postprocess::remove_overlapping_sections(all_sections, config);
+    info!(
+        "[FlowGraph] {} sections after overlap removal (was {})",
+        all_sections.len(),
+        before
+    );
+
     all_sections
 }
 
