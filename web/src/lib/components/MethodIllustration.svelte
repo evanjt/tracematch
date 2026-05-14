@@ -1,191 +1,139 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import type { FrequentSection } from '../wasm/types';
+
   let {
     mode = 'corridor',
     proximity = 150,
     minTracks = 3,
     minRoutes = 3,
+    minSectionLength = 200,
   }: {
     mode: 'density' | 'flow' | 'corridor';
     proximity?: number;
     minTracks?: number;
     minRoutes?: number;
+    minSectionLength?: number;
   } = $props();
 
-  type Trace = { pts: [number, number][]; route: number };
+  // SVG (0-400, 0-200) mapped to GPS coordinates.
+  // ~3km east-west, ~1.5km north-south around Sion, Switzerland.
+  const REF_LAT = 46.22;
+  const REF_LNG = 7.36;
+  const LNG_SPAN = 0.04;
+  const LAT_SPAN = 0.02;
 
-  // 14 traces on a 400x200 canvas, organized into 4 route groups.
-  // Traces within the same area are kept within ~8px of each other
-  // so they share grid cells at typical cell sizes (15-25px).
+  function svgToGps(x: number, y: number) {
+    return { latitude: REF_LAT - (y / 200) * LAT_SPAN, longitude: REF_LNG + (x / 400) * LNG_SPAN };
+  }
+  function gpsToSvg(lat: number, lng: number): [number, number] {
+    return [(lng - REF_LNG) / LNG_SPAN * 400, (REF_LAT - lat) / LAT_SPAN * 200];
+  }
+
+  // 14 traces in 4 route groups. Coordinates are SVG space.
+  type Trace = { pts: [number, number][]; route: number };
   const traces: Trace[] = [
-    // Route 0: main east-west corridor (5 traces, tight spread)
     { pts: [[15,105],[55,90],[110,78],[165,72],[220,70],[275,72],[330,78],[385,88]], route: 0 },
     { pts: [[18,107],[58,92],[113,80],[168,74],[223,72],[278,74],[333,80],[388,90]], route: 0 },
     { pts: [[12,103],[52,88],[107,76],[162,70],[217,68],[272,70],[327,76],[382,86]], route: 0 },
     { pts: [[16,109],[56,94],[111,82],[166,76],[221,74],[276,76],[331,82],[386,92]], route: 0 },
     { pts: [[14,101],[54,86],[109,74],[164,68],[219,66],[274,68],[329,74],[384,84]], route: 0 },
-
-    // Route 1: shares west half with route 0, branches north at x~165
     { pts: [[16,106],[56,91],[111,79],[165,73],[185,52],[200,30],[210,15]], route: 1 },
     { pts: [[13,104],[53,89],[108,77],[162,71],[182,50],[197,28],[207,13]], route: 1 },
     { pts: [[19,108],[59,93],[114,81],[168,75],[188,54],[203,32],[213,17]], route: 1 },
-
-    // Route 2: comes from south, joins route 0 at x~275
     { pts: [[200,190],[220,170],[245,145],[270,115],[285,90],[330,79],[385,89]], route: 2 },
     { pts: [[203,192],[223,172],[248,147],[273,117],[288,92],[333,81],[388,91]], route: 2 },
-
-    // Route 3: local loop overlapping route 0 in center (x~165-275)
+    { pts: [[175,182],[195,162],[222,138],[252,108],[272,88],[308,76],[368,86]], route: 2 },
     { pts: [[165,73],[195,65],[225,63],[255,65],[275,73],[260,88],[225,92],[195,88],[165,73]], route: 3 },
     { pts: [[168,75],[198,67],[228,65],[258,67],[278,75],[263,90],[228,94],[198,90],[168,75]], route: 3 },
     { pts: [[162,71],[192,63],[222,61],[252,63],[272,71],[257,86],[222,90],[192,86],[162,71]], route: 3 },
   ];
 
-  // 1px ~ 7.5m. Cell size = proximity / 7.5.
-  const SCALE = 7.5;
+  // WASM module loaded lazily
+  let wasm: typeof import('../wasm/pkg/tracematch_wasm.js') | null = $state(null);
 
-  function rasterise(pts: [number, number][], cellSize: number): Set<string> {
-    const cells = new Set<string>();
-    for (let i = 0; i < pts.length; i++) {
-      const [x, y] = pts[i];
-      cells.add(`${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`);
-      if (i < pts.length - 1) {
-        const [x1, y1] = pts[i + 1];
-        const dist = Math.max(Math.abs(x1 - x), Math.abs(y1 - y));
-        const steps = Math.ceil(dist / (cellSize * 0.4));
-        for (let s = 1; s < steps; s++) {
-          const t = s / steps;
-          const ix = Math.floor((x + (x1 - x) * t) / cellSize);
-          const iy = Math.floor((y + (y1 - y) * t) / cellSize);
-          cells.add(`${ix},${iy}`);
-        }
-      }
-    }
-    return cells;
+  onMount(async () => {
+    const mod = await import('../wasm/pkg/tracematch_wasm.js');
+    try { await mod.default(); } catch { /* already initialized */ }
+    wasm = mod;
+  });
+
+  // Build WASM inputs from illustration traces
+  function buildInputs() {
+    const tracks: [string, { latitude: number; longitude: number }[]][] = traces.map((t, i) => [
+      `trace_${i}`,
+      t.pts.map(([x, y]) => svgToGps(x, y)),
+    ]);
+    const sportTypes: Record<string, string> = {};
+    for (let i = 0; i < traces.length; i++) sportTypes[`trace_${i}`] = 'Run';
+    return { tracks, sportTypes };
   }
 
-  function traceSegments(
-    hotCells: Set<string>,
-    cellSize: number,
-  ): string[] {
-    const segments: string[] = [];
-    for (const t of traces) {
-      let run: [number, number][] = [];
-      for (const [x, y] of t.pts) {
-        const key = `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
-        if (hotCells.has(key)) {
-          run.push([x, y]);
-        } else {
-          if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-          run = [];
-        }
-      }
-      if (run.length >= 2) segments.push(run.map(p => p.join(',')).join(' '));
-    }
-    return segments;
-  }
-
-  function computeCorridor(cellSize: number, threshold: number): string[] {
-    const cellCounts = new Map<string, Set<number>>();
-    traces.forEach((t, i) => {
-      for (const key of rasterise(t.pts, cellSize)) {
-        if (!cellCounts.has(key)) cellCounts.set(key, new Set());
-        cellCounts.get(key)!.add(i);
-      }
+  function buildConfig() {
+    return JSON.stringify({
+      proximityThreshold: proximity,
+      minSectionLength,
+      maxSectionLength: 200000,
+      minActivities: minTracks,
+      clusterTolerance: 80,
+      samplePoints: 50,
+      detectionMode: 'discovery',
+      includePotentials: false,
+      scalePresets: [
+        { name: 'short', minLength: 100, maxLength: 500, minActivities: Math.max(minTracks, 2) },
+        { name: 'medium', minLength: 500, maxLength: 2000, minActivities: Math.max(minTracks, 2) },
+        { name: 'long', minLength: 2000, maxLength: 50000, minActivities: Math.max(minTracks, 2) },
+      ],
+      preserveHierarchy: true,
+      jaccardThreshold: 0.5,
+      minRoutes,
+      enableDensitySplits: false,
+      mergeDistanceMultiplier: 4.0,
+      minCellVisits: 5,
+      divergenceThreshold: 0.15,
+      minCorridorTracks: minTracks,
     });
-    const hot = new Set<string>();
-    for (const [key, ids] of cellCounts) {
-      if (ids.size >= threshold) hot.add(key);
-    }
-    return traceSegments(hot, cellSize);
   }
 
-  function computeDensity(cellSize: number, threshold: number): string[] {
-    const cellRoutes = new Map<string, Set<number>>();
-    for (const t of traces) {
-      for (const key of rasterise(t.pts, cellSize)) {
-        if (!cellRoutes.has(key)) cellRoutes.set(key, new Set());
-        cellRoutes.get(key)!.add(t.route);
-      }
-    }
-    const hot = new Set<string>();
-    for (const [key, routes] of cellRoutes) {
-      if (routes.size >= threshold) hot.add(key);
-    }
-    return traceSegments(hot, cellSize);
-  }
+  // Run real detection and convert results to SVG polylines
+  const highlights = $derived.by(() => {
+    if (!wasm) return [];
 
-  function computeFlow(cellSize: number, threshold: number): string[] {
-    // Count traces per cell
-    const cellCounts = new Map<string, Set<number>>();
-    traces.forEach((t, i) => {
-      for (const key of rasterise(t.pts, cellSize)) {
-        if (!cellCounts.has(key)) cellCounts.set(key, new Set());
-        cellCounts.get(key)!.add(i);
-      }
-    });
+    const { tracks, sportTypes } = buildInputs();
+    const tracksJson = JSON.stringify(tracks);
+    const sportTypesJson = JSON.stringify(sportTypes);
+    const configJson = buildConfig();
 
-    // Track transitions
-    const exits = new Map<string, Map<string, Set<number>>>();
-    traces.forEach((t, ti) => {
-      const cells: string[] = [];
-      for (const [x, y] of t.pts) {
-        const key = `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
-        if (cells.length === 0 || cells[cells.length - 1] !== key) cells.push(key);
-      }
-      for (let i = 0; i < cells.length - 1; i++) {
-        if (!exits.has(cells[i])) exits.set(cells[i], new Map());
-        const m = exits.get(cells[i])!;
-        if (!m.has(cells[i + 1])) m.set(cells[i + 1], new Set());
-        m.get(cells[i + 1])!.add(ti);
-      }
-    });
-
-    // Junctions: cells with 3+ exit directions each having 2+ traces
-    const junctions = new Set<string>();
-    for (const [cell, exitMap] of exits) {
-      const count = cellCounts.get(cell)?.size ?? 0;
-      if (count < threshold) continue;
-      let sigDirs = 0;
-      for (const ids of exitMap.values()) {
-        if (ids.size >= 2) sigDirs++;
-      }
-      if (sigDirs >= 2) junctions.add(cell);
-    }
-
-    // Trace edges between junctions
-    const segments: string[] = [];
-    for (const t of traces) {
-      const cells: { key: string; pt: [number, number] }[] = [];
-      for (const [x, y] of t.pts) {
-        const key = `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
-        if (cells.length === 0 || cells[cells.length - 1].key !== key) {
-          cells.push({ key, pt: [x, y] });
+    let sections: FrequentSection[] = [];
+    try {
+      if (mode === 'corridor') {
+        sections = wasm.detectSectionsCorridor(tracksJson, sportTypesJson, configJson);
+      } else if (mode === 'flow') {
+        sections = wasm.detectSectionsFlowGraph(tracksJson, sportTypesJson, configJson);
+      } else {
+        // Density grid needs route groups. Build signatures and group first.
+        const sigs: any[] = [];
+        for (const [id, pts] of tracks) {
+          const sig = wasm.createSignature(id, JSON.stringify(pts), '{}');
+          if (sig) sigs.push(sig);
         }
+        const groups = wasm.groupRoutes(JSON.stringify(sigs), '{}');
+        const groupsJson = JSON.stringify(groups);
+        sections = wasm.detectSectionsWithProgress(
+          tracksJson, sportTypesJson, groupsJson, configJson,
+          () => {},
+        );
       }
-      let run: [number, number][] = [];
-      let inEdge = false;
-      for (const { key, pt } of cells) {
-        if (junctions.has(key)) {
-          if (inEdge && run.length >= 1) {
-            run.push(pt);
-            segments.push(run.map(p => p.join(',')).join(' '));
-          }
-          run = [pt];
-          inEdge = true;
-        } else if (inEdge) {
-          run.push(pt);
-        }
-      }
+    } catch (e) {
+      console.warn('[MethodIllustration] detection error:', e);
+      return [];
     }
-    return segments;
-  }
 
-  const cellSize = $derived(proximity / SCALE);
-
-  const highlights = $derived(
-    mode === 'corridor' ? computeCorridor(cellSize, minTracks) :
-    mode === 'density' ? computeDensity(cellSize, minRoutes) :
-    computeFlow(cellSize, minTracks)
-  );
+    // Convert section polylines from GPS back to SVG
+    return sections.map(s =>
+      s.polyline.map(p => gpsToSvg(p.latitude, p.longitude).join(',')).join(' ')
+    );
+  });
 
   const traceStrings = traces.map(t => t.pts.map(p => p.join(',')).join(' '));
 </script>
