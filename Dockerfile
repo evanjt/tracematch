@@ -6,16 +6,7 @@ FROM rust:1.95-bookworm AS wasm-builder
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
 WORKDIR /build
-
-# Cache Cargo registry and git deps across builds
-COPY Cargo.toml Cargo.lock ./
-COPY tracematch-wasm/Cargo.toml tracematch-wasm/Cargo.toml
-RUN mkdir -p src && echo "" > src/lib.rs && mkdir -p tracematch-wasm/src && echo "fn main(){}" > tracematch-wasm/src/lib.rs \
-    && cargo fetch
-
-# Copy real source and build
-COPY src/ src/
-COPY tracematch-wasm/src/ tracematch-wasm/src/
+COPY . .
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
     cd tracematch-wasm && wasm-pack build --target web --release \
