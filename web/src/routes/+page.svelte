@@ -83,6 +83,7 @@
   let minActivities = $state(3);
   let minRoutes = $state(3);
   let activePreset = $state<PresetKey | null>('balanced');
+  let sectionMode = $state<'density' | 'flow'>('density');
   let settingsCollapsed = $state(true);
 
   function applyPreset(key: PresetKey) {
@@ -702,7 +703,9 @@
           { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
         ],
         preserveHierarchy: true,
-        minRoutes
+        minRoutes,
+        minCellVisits: 5,
+        divergenceThreshold: 0.15,
       });
 
       const traces = traceStore.traces.map((t) => ({
@@ -713,7 +716,7 @@
 
       const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
         analysisProgress = { phase, current, total };
-      });
+      }, sectionMode);
 
       if (result.sections.length === 0 && traceStore.traces.length >= 3) {
         sectionError = 'No sections detected with current settings.';
@@ -906,6 +909,10 @@
           </button>
           {#if !settingsCollapsed}
             <div class="settings-panel">
+              <div class="preset-chips">
+                <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
+                <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
+              </div>
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
                   <button

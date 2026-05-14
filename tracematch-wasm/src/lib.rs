@@ -263,6 +263,36 @@ pub fn detect_sections_with_progress(
     Ok(val)
 }
 
+/// Detect sections via flow-graph analysis.
+///
+/// Builds a road/trail network from GPS traces by tracking cell-to-cell
+/// flow, finds divergence points (junctions), and returns edges between
+/// them as sections.
+#[wasm_bindgen(js_name = "detectSectionsFlowGraph")]
+pub fn detect_sections_flow_graph(
+    tracks_json: &str,
+    sport_types_json: &str,
+    config_json: &str,
+) -> Result<JsValue, JsError> {
+    let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
+        serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let sport_types: std::collections::HashMap<String, String> =
+        serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
+        tracematch::SectionConfig::default()
+    } else {
+        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
+    };
+
+    let sections = tracematch::detect_sections_flow_graph(&tracks, &sport_types, &config);
+
+    let val =
+        serde_wasm_bindgen::to_value(&sections).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(val)
+}
+
 /// Find known sections within a GPS route.
 ///
 /// Returns array of SectionMatch objects sorted by start_index.

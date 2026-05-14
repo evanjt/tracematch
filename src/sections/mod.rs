@@ -26,6 +26,7 @@
 
 mod consensus;
 mod density_grid;
+mod flow_graph;
 pub mod incremental;
 mod medoid;
 pub mod optimized;
@@ -288,6 +289,14 @@ pub struct SectionConfig {
     /// default 50 m proximity).
     #[serde(default = "default_merge_distance_multiplier")]
     pub merge_distance_multiplier: f64,
+    /// Minimum cell visits for a cell to be considered part of the road
+    /// network in flow-graph mode. Default 5.
+    #[serde(default = "default_min_cell_visits")]
+    pub min_cell_visits: u32,
+    /// Fraction of outgoing traffic an exit must carry to count as
+    /// "significant" for divergence-point detection. Default 0.15 (15%).
+    #[serde(default = "default_divergence_threshold")]
+    pub divergence_threshold: f64,
 }
 
 fn default_jaccard_threshold() -> f64 {
@@ -298,6 +307,12 @@ fn default_min_routes() -> u32 {
 }
 fn default_merge_distance_multiplier() -> f64 {
     4.0
+}
+fn default_min_cell_visits() -> u32 {
+    5
+}
+fn default_divergence_threshold() -> f64 {
+    0.15
 }
 
 impl Default for SectionConfig {
@@ -317,6 +332,8 @@ impl Default for SectionConfig {
             min_routes: default_min_routes(),
             enable_density_splits: false,
             merge_distance_multiplier: default_merge_distance_multiplier(),
+            min_cell_visits: default_min_cell_visits(),
+            divergence_threshold: default_divergence_threshold(),
         }
     }
 }
@@ -708,6 +725,53 @@ pub fn process_cluster(
         created_at: None,
         consensus_state: None,
     })
+}
+
+/// Detect sections via flow-graph analysis.
+///
+/// Builds a road/trail network from GPS traces by tracking cell-to-cell
+/// flow, finds divergence points (junctions), and traces edges between
+/// them. Each edge becomes a section.
+pub fn detect_sections_flow_graph(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+) -> Vec<FrequentSection> {
+    info!(
+        "[FlowGraph] Detecting from {} tracks (min_visits={}, divergence={})",
+        tracks.len(),
+        config.min_cell_visits,
+        config.divergence_threshold,
+    );
+
+    let mut tracks_by_sport: HashMap<String, Vec<(&str, &[GpsPoint])>> = HashMap::new();
+    for (id, pts) in tracks {
+        let sport = sport_types
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+        tracks_by_sport
+            .entry(sport)
+            .or_default()
+            .push((id.as_str(), pts.as_slice()));
+    }
+
+    let mut all_sections = Vec::new();
+    for (sport, sport_tracks) in &tracks_by_sport {
+        if sport_tracks.len() < config.min_activities as usize {
+            continue;
+        }
+        info!(
+            "[FlowGraph] Processing {} {} tracks",
+            sport_tracks.len(),
+            sport
+        );
+        let sections = flow_graph::detect_sections_via_flow_graph(sport_tracks, sport, config);
+        info!("[FlowGraph] {} sections for {}", sections.len(), sport);
+        all_sections.extend(sections);
+    }
+
+    all_sections
 }
 
 /// Detect frequent sections from FULL GPS tracks.

@@ -43,9 +43,9 @@ use std::collections::{HashMap, HashSet};
 /// approximately `cell_size_m` square in physical space.
 #[derive(Clone, Copy)]
 pub(super) struct CellGrid {
-    cell_size_m: f64,
-    lat_to_m: f64,
-    lng_to_m: f64,
+    pub(super) cell_size_m: f64,
+    pub(super) lat_to_m: f64,
+    pub(super) lng_to_m: f64,
 }
 
 impl CellGrid {
@@ -62,10 +62,16 @@ impl CellGrid {
         let lng_idx = (lng * self.lng_to_m / self.cell_size_m).floor() as i32;
         (lat_idx, lng_idx)
     }
+
+    pub fn cell_of_to_distance(&self, a: (i32, i32), b: (i32, i32)) -> f64 {
+        let dy = (b.0 - a.0) as f64 * self.cell_size_m;
+        let dx = (b.1 - a.1) as f64 * self.cell_size_m;
+        (dy * dy + dx * dx).sqrt()
+    }
 }
 
 /// Standard 2D Bresenham — 4-connected, every cell from start to end inclusive.
-fn bresenham_cells(start: (i32, i32), end: (i32, i32)) -> Vec<(i32, i32)> {
+pub(super) fn bresenham_cells(start: (i32, i32), end: (i32, i32)) -> Vec<(i32, i32)> {
     let (x0, y0) = start;
     let (x1, y1) = end;
     let dx = (x1 - x0).abs();
