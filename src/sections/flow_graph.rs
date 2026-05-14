@@ -334,6 +334,57 @@ fn compute_path_length(cells: &[(i32, i32)], grid: &CellGrid) -> f64 {
     total
 }
 
+struct TrackRun {
+    track_idx: usize,
+    start: usize,
+    end: usize,
+    distance: f64,
+}
+
+fn find_best_run(
+    pts: &[GpsPoint],
+    cell_set: &HashSet<(i32, i32)>,
+    grid: &CellGrid,
+) -> Option<(usize, usize, f64)> {
+    let mut best_start = 0usize;
+    let mut best_end = 0usize;
+    let mut best_dist = 0.0f64;
+    let mut run_start: Option<usize> = None;
+    let mut run_dist = 0.0f64;
+
+    for (i, p) in pts.iter().enumerate() {
+        let c = grid.cell_of(p.latitude, p.longitude);
+        if cell_set.contains(&c) {
+            if run_start.is_none() {
+                run_start = Some(i);
+                run_dist = 0.0;
+            } else if i > 0 {
+                run_dist += haversine_distance(&pts[i - 1], p);
+            }
+        } else if let Some(s) = run_start {
+            if run_dist > best_dist {
+                best_start = s;
+                best_end = i;
+                best_dist = run_dist;
+            }
+            run_start = None;
+        }
+    }
+    if let Some(s) = run_start
+        && run_dist > best_dist
+    {
+        best_start = s;
+        best_end = pts.len();
+        best_dist = run_dist;
+    }
+
+    if best_dist > 0.0 {
+        Some((best_start, best_end, best_dist))
+    } else {
+        None
+    }
+}
+
 fn snap_edge_to_track(
     edge: &GraphEdge,
     flow: &FlowGraph,
@@ -341,57 +392,44 @@ fn snap_edge_to_track(
 ) -> (Vec<GpsPoint>, usize, f64) {
     let cell_set: HashSet<(i32, i32)> = edge.cells.iter().copied().collect();
 
-    let mut best_track: usize = 0;
-    let mut best_pts: Vec<GpsPoint> = Vec::new();
-    let mut best_dist: f64 = 0.0;
-
+    let mut runs: Vec<TrackRun> = Vec::new();
     for &t_idx in &edge.track_ids {
         let idx = t_idx as usize;
         if idx >= tracks.len() {
             continue;
         }
-        let pts = tracks[idx].1;
-
-        let mut run_start: Option<usize> = None;
-        let mut run_dist = 0.0f64;
-        let mut cur_best_start = 0usize;
-        let mut cur_best_end = 0usize;
-        let mut cur_best_dist = 0.0f64;
-
-        for (i, p) in pts.iter().enumerate() {
-            let c = flow.grid.cell_of(p.latitude, p.longitude);
-            if cell_set.contains(&c) {
-                if run_start.is_none() {
-                    run_start = Some(i);
-                    run_dist = 0.0;
-                } else if i > 0 {
-                    run_dist += haversine_distance(&pts[i - 1], p);
-                }
-            } else if let Some(s) = run_start {
-                if run_dist > cur_best_dist {
-                    cur_best_start = s;
-                    cur_best_end = i;
-                    cur_best_dist = run_dist;
-                }
-                run_start = None;
-            }
-        }
-        if let Some(s) = run_start
-            && run_dist > cur_best_dist
-        {
-            cur_best_start = s;
-            cur_best_end = pts.len();
-            cur_best_dist = run_dist;
-        }
-
-        if cur_best_dist > best_dist {
-            best_dist = cur_best_dist;
-            best_track = idx;
-            best_pts = pts[cur_best_start..cur_best_end].to_vec();
+        if let Some((s, e, d)) = find_best_run(tracks[idx].1, &cell_set, &flow.grid) {
+            runs.push(TrackRun {
+                track_idx: idx,
+                start: s,
+                end: e,
+                distance: d,
+            });
         }
     }
 
-    (best_pts, best_track, best_dist)
+    if runs.is_empty() {
+        return (vec![], 0, 0.0);
+    }
+
+    // Pick the track closest to the median run distance. This rejects
+    // outliers: double-backs (too long), multi-lap circuits (too long),
+    // and partial traversals (too short).
+    let mut distances: Vec<f64> = runs.iter().map(|r| r.distance).collect();
+    distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = distances[distances.len() / 2];
+
+    let best = runs
+        .iter()
+        .min_by(|a, b| {
+            let da = (a.distance - median).abs();
+            let db = (b.distance - median).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap();
+
+    let pts = &tracks[best.track_idx].1[best.start..best.end];
+    (pts.to_vec(), best.track_idx, best.distance)
 }
 
 fn edge_to_section(
