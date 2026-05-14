@@ -55,7 +55,7 @@ fn build_flow_graph(tracks: &[(&str, &[GpsPoint])], config: &SectionConfig) -> F
         if n == 0 { 0.0 } else { sum / n as f64 }
     };
 
-    let cell_size_m = config.proximity_threshold;
+    let cell_size_m = config.proximity_threshold * 2.0;
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
     let mut cell_visits: HashMap<(i32, i32), u32> = HashMap::new();
@@ -363,10 +363,19 @@ fn merge_pass_through_edges(mut edges: Vec<GraphEdge>, nodes: &[GraphNode]) -> V
             }
         }
 
-        // Find a pass-through junction (exactly 2 edges)
+        // Find a pass-through junction (exactly 2 edges) where the
+        // shorter edge is a stub (< 5 cells). Only merge stubs into
+        // their longer neighbor — don't dissolve junctions between
+        // two real corridors.
         let merge = junction_edges.iter().find_map(|(junction, edge_idxs)| {
             if edge_idxs.len() == 2 {
-                Some((*junction, edge_idxs[0], edge_idxs[1]))
+                let len_a = edges[edge_idxs[0]].cells.len();
+                let len_b = edges[edge_idxs[1]].cells.len();
+                if len_a.min(len_b) < 5 {
+                    Some((*junction, edge_idxs[0], edge_idxs[1]))
+                } else {
+                    None
+                }
             } else {
                 None
             }
