@@ -72,9 +72,9 @@
 
   // Section detection parameters
   const PRESETS = {
-    relaxed: { proximityThreshold: 75, minSectionLength: 100, minActivities: 2, minRoutes: 2 },
-    balanced: { proximityThreshold: 50, minSectionLength: 200, minActivities: 3, minRoutes: 3 },
-    strict: { proximityThreshold: 35, minSectionLength: 500, minActivities: 5, minRoutes: 4 },
+    relaxed: { proximityThreshold: 200, minSectionLength: 100, minActivities: 2, minRoutes: 2 },
+    balanced: { proximityThreshold: 150, minSectionLength: 200, minActivities: 3, minRoutes: 3 },
+    strict: { proximityThreshold: 75, minSectionLength: 500, minActivities: 5, minRoutes: 4 },
   } as const;
   type PresetKey = keyof typeof PRESETS;
 
@@ -96,7 +96,7 @@
   }
 
   const saved = loadSettings();
-  let proximityThreshold = $state(saved.proximityThreshold ?? 50);
+  let proximityThreshold = $state(saved.proximityThreshold ?? 150);
   let minSectionLength = $state(saved.minSectionLength ?? 200);
   let minActivities = $state(saved.minActivities ?? 3);
   let minRoutes = $state(saved.minRoutes ?? 3);
@@ -964,7 +964,7 @@
               <label class="slider-row">
                 <span class="slider-label">Proximity threshold</span>
                 <span class="slider-value">{proximityThreshold} m</span>
-                <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} oninput={onSliderChange} />
+                <input type="range" min="25" max="300" step="25" bind:value={proximityThreshold} oninput={onSliderChange} />
                 <span class="slider-hint">Max distance between tracks to overlap</span>
               </label>
               <label class="slider-row">
@@ -1067,7 +1067,7 @@
                 <label class="slider-row">
                   <span class="slider-label">Proximity threshold</span>
                   <span class="slider-value">{proximityThreshold} m</span>
-                  <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} oninput={onSliderChange} />
+                  <input type="range" min="25" max="300" step="25" bind:value={proximityThreshold} oninput={onSliderChange} />
                   <span class="slider-hint">Max distance between tracks to overlap</span>
                 </label>
                 <label class="slider-row">

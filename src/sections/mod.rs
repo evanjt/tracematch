@@ -287,7 +287,7 @@ pub struct SectionConfig {
     /// Multiplier on `proximity_threshold` for the `merge_nearby_sections`
     /// postprocess step. Higher → more aggressive merging of nearby
     /// fragments into single sections. Default 4.0 (200 m at the
-    /// default 50 m proximity).
+    /// default 150 m proximity).
     #[serde(default = "default_merge_distance_multiplier")]
     pub merge_distance_multiplier: f64,
     /// Minimum cell visits for a cell to be considered part of the road
@@ -327,7 +327,7 @@ fn default_min_corridor_tracks() -> u32 {
 impl Default for SectionConfig {
     fn default() -> Self {
         Self {
-            proximity_threshold: 50.0,
+            proximity_threshold: 150.0,
             min_section_length: 200.0,
             max_section_length: 200_000.0,
             min_activities: 3,

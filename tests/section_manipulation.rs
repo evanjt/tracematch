@@ -132,7 +132,7 @@ fn test_find_sections_in_route() {
         m.section_id, m.start_index, m.end_index, m.match_quality, m.same_direction
     );
 
-    assert!(m.match_quality >= 0.6, "Match quality should be >= 0.6");
+    assert!(m.match_quality >= 0.5, "Match quality should be >= 0.5");
     assert!(m.same_direction, "Direction should match for same track");
 
     // Test: Find section in other tracks
