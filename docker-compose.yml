@@ -1,16 +1,23 @@
 services:
-  web:
+  wasm:
     build:
       context: .
-      target: wasm-builder
+      target: wasm-dev
     entrypoint: []
     command: >
       sh -c "
-        cd tracematch-wasm && wasm-pack build --target web --dev &&
-        cp -r pkg /shared/wasm
+        cd tracematch-wasm &&
+        wasm-pack build --target web --release &&
+        cp -r pkg/* /output/ &&
+        cargo watch --poll -w ../src -w src -s '
+          wasm-pack build --target web --release &&
+          cp -r pkg/* /output/
+        '
       "
     volumes:
-      - wasm-pkg:/shared
+      - .:/build
+      - rust-target:/build/target
+      - wasm-pkg:/output
 
   dev:
     image: node:22-slim
@@ -18,10 +25,8 @@ services:
     command: >
       sh -c "
         npm install &&
-        mkdir -p static/wasm &&
         echo 'Waiting for WASM build...' &&
-        until [ -f /shared/wasm/tracematch_wasm_bg.wasm ]; do sleep 1; done &&
-        cp -r /shared/wasm/* static/wasm/ &&
+        until [ -f /app/src/lib/wasm/pkg/tracematch_wasm_bg.wasm ]; do sleep 1; done &&
         npm run dev -- --host 0.0.0.0 --port 5173
       "
     ports:
@@ -29,9 +34,10 @@ services:
     volumes:
       - ./web:/app
       - /app/node_modules
-      - wasm-pkg:/shared
+      - wasm-pkg:/app/src/lib/wasm/pkg
     depends_on:
-      - web
+      - wasm
 
 volumes:
   wasm-pkg:
+  rust-target:

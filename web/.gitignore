@@ -8,6 +8,7 @@ node_modules
 /.svelte-kit
 /build
 /static/wasm
+/src/lib/wasm/pkg
 
 # OS
 .DS_Store

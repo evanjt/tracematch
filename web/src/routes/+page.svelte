@@ -2,13 +2,9 @@
   import { onMount } from 'svelte';
   import { traceStore, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
-  import {
-    initWasm,
-    createSignature,
-    groupRoutes,
-    detectSections
-  } from '$lib/wasm/engine';
-  import type { RouteSignature, RouteGroup, FrequentSection, GpsPoint, SectionPortion } from '$lib/wasm/types';
+  import { runAnalysisAsync } from '$lib/wasm/engine';
+  import MethodIllustration from '$lib/components/MethodIllustration.svelte';
+  import type { RouteGroup, FrequentSection, GpsPoint } from '$lib/wasm/types';
 
   // --- Sport color system ---
   const SPORT_COLORS: Record<string, string> = {
@@ -31,17 +27,120 @@
   let wasmReady = $state(false);
   let analysing = $state(false);
   let analysisProgress = $state<{ phase: string; current: number; total: number } | null>(null);
+  let overallProgress = $state(0);
   let error = $state<string | null>(null);
+
+  // Each analysis pipeline step gets an equal slice of the overall 0-100
+  // bar. Within a step, sub-progress (current/total) fills its slice.
+  // Transitions ("Serializing...", "Preparing...") snap to the start of the
+  // next step so the bar advances cleanly between phases.
+  const ANALYSIS_STEPS = [
+    'Creating signatures',
+    'Comparing route pairs',
+    'Building spatial indices',
+    'Finding section overlaps',
+    'Post-processing sections',
+    'Saving results'
+  ] as const;
+  const TOTAL_STEPS = ANALYSIS_STEPS.length;
+  // Maps every phase string (including transitions and the init phase) to
+  // the step index it belongs to. Step index = 0 for everything before
+  // grouping; transitions hop to the index of the upcoming real step.
+  // The "Finding dense regions" / "Assembling sections" labels come from
+  // the density-grid section detection in Rust (re-labelled in
+  // sectionWorker.ts via PHASE_LABELS).
+  const PHASE_TO_STEP: Record<string, number> = {
+    'Preparing': 0,
+    'Initializing WASM engine': 0,
+    'Creating signatures': 0,
+    'Serializing routes for grouping': 1,
+    'Preparing route comparison': 1,
+    'Comparing route pairs': 1,
+    'Serializing tracks for section detection': 2,
+    'Preparing section detection': 2,
+    'Finding dense regions': 2,
+    'Assembling sections': 3,
+    'Post-processing sections': 4,
+    'Finalizing results': 5,
+    'Saving results': 5
+  };
   let sectionError = $state<string | null>(null);
   let dragOver = $state(false);
   let mapDragOver = $state(false);
   let mapContainer: HTMLDivElement;
+  let renderProgress = $state<{ current: number; total: number } | null>(null);
+  let importProgress = $state<{ current: number; total: number } | null>(null);
 
   // Section detection parameters
-  let proximityThreshold = $state(50);
-  let minSectionLength = $state(200);
-  let minActivities = $state(3);
+  const PRESETS = {
+    relaxed: { proximityThreshold: 200, minSectionLength: 100, minActivities: 2, minRoutes: 2 },
+    balanced: { proximityThreshold: 150, minSectionLength: 200, minActivities: 3, minRoutes: 3 },
+    strict: { proximityThreshold: 75, minSectionLength: 500, minActivities: 5, minRoutes: 4 },
+  } as const;
+  type PresetKey = keyof typeof PRESETS;
+
+  const SETTINGS_KEY = 'tracematch-detection-settings';
+  type SavedSettings = {
+    proximityThreshold: number;
+    minSectionLength: number;
+    minActivities: number;
+    minRoutes: number;
+    sectionMode: 'density' | 'flow' | 'corridor';
+  };
+
+  function loadSettings(): Partial<SavedSettings> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+
+  const saved = loadSettings();
+  let proximityThreshold = $state(saved.proximityThreshold ?? 150);
+  let minSectionLength = $state(saved.minSectionLength ?? 200);
+  let minActivities = $state(saved.minActivities ?? 3);
+  let minRoutes = $state(saved.minRoutes ?? 3);
+  let activePreset = $state<PresetKey | null>(null);
+  let sectionMode = $state<'density' | 'flow' | 'corridor'>(saved.sectionMode ?? 'density');
   let settingsCollapsed = $state(true);
+
+  // Determine initial preset from loaded values
+  activePreset = (Object.entries(PRESETS) as [PresetKey, typeof PRESETS[PresetKey]][]).find(
+    ([, p]) =>
+      p.proximityThreshold === proximityThreshold &&
+      p.minSectionLength === minSectionLength &&
+      p.minActivities === minActivities &&
+      p.minRoutes === minRoutes
+  )?.[0] ?? null;
+
+  function applyPreset(key: PresetKey) {
+    const p = PRESETS[key];
+    proximityThreshold = p.proximityThreshold;
+    minSectionLength = p.minSectionLength;
+    minActivities = p.minActivities;
+    minRoutes = p.minRoutes;
+    activePreset = key;
+  }
+
+  function onSliderChange() {
+    activePreset = (Object.entries(PRESETS) as [PresetKey, typeof PRESETS[PresetKey]][]).find(
+      ([, p]) =>
+        p.proximityThreshold === proximityThreshold &&
+        p.minSectionLength === minSectionLength &&
+        p.minActivities === minActivities &&
+        p.minRoutes === minRoutes
+    )?.[0] ?? null;
+  }
+
+  // Persist detection settings to localStorage
+  $effect(() => {
+    if (typeof localStorage === 'undefined') return;
+    const settings: SavedSettings = {
+      proximityThreshold, minSectionLength, minActivities, minRoutes, sectionMode,
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  });
 
   // Layer visibility
   let showTraces = $state(true);
@@ -258,8 +357,11 @@
   }
 
   // --- Map sync functions ---
-  function syncTracesToMap() {
+  let _renderVersion = 0;
+
+  async function syncTracesToMap() {
     if (!map || !L || !traceLayerGroup) return;
+    const thisRender = ++_renderVersion;
     const traces = traceStore.traces;
     const currentIds = new Set(traces.map((t) => t.id));
 
@@ -271,41 +373,51 @@
       }
     }
 
-    // Add polylines for new traces
-    let addedAny = false;
+    // Find traces that need rendering
+    const toAdd = traces.filter((t) => !tracePolylines.has(t.id));
+    if (toAdd.length === 0) return;
+
+    const total = toAdd.length;
+    if (total > 30) renderProgress = { current: 0, total };
+
     const allLatLngs: L.LatLng[] = [];
-    for (const trace of traces) {
-      if (tracePolylines.has(trace.id)) {
+    const batchSize = 30;
+
+    for (let i = 0; i < toAdd.length; i += batchSize) {
+      if (_renderVersion !== thisRender) return;
+      const end = Math.min(i + batchSize, toAdd.length);
+      for (let j = i; j < end; j++) {
+        const trace = toAdd[j];
+        const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
+        if (latlngs.length === 0) continue;
+
+        const color = sportColor(trace.sportType);
+        const pl = L.polyline(latlngs, { color, weight: 2, opacity: 0.5 })
+          .bindPopup(
+            `<b>${trace.name}</b><br>` +
+              `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts` +
+              `<br>${trace.sportType || 'Unknown'}`
+          )
+          .addTo(traceLayerGroup!);
+        tracePolylines.set(trace.id, { polyline: pl, sportType: trace.sportType || 'Other' });
         if (isTraceVisible(trace)) {
-          const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
           allLatLngs.push(...latlngs);
         }
-        continue;
       }
-      const latlngs = trace.points.map((p) => L!.latLng(p.latitude, p.longitude));
-      if (latlngs.length === 0) continue;
 
-      const traceId = trace.id;
-      const color = sportColor(trace.sportType);
-      const pl = L.polyline(latlngs, { color, weight: 2, opacity: 0.5 })
-        .bindPopup(
-          `<b>${trace.name}</b><br>` +
-            `${(trace.distance / 1000).toFixed(1)} km &middot; ${trace.points.length} pts` +
-            `<br>${trace.sportType || 'Unknown'}`
-        )
-        .addTo(traceLayerGroup!);
-      tracePolylines.set(traceId, { polyline: pl, sportType: trace.sportType || 'Other' });
-      addedAny = true;
-      if (isTraceVisible(trace)) {
-        allLatLngs.push(...latlngs);
+      // Fit bounds after first batch for quick initial view
+      if (i === 0 && !hasFitOnce && allLatLngs.length > 0) {
+        hasFitOnce = true;
+        map!.fitBounds(L!.latLngBounds(allLatLngs), { padding: [40, 40] });
+      }
+
+      if (total > 30) renderProgress = { current: end, total };
+      if (i + batchSize < toAdd.length) {
+        await new Promise((r) => setTimeout(r, 0));
       }
     }
 
-    // Fit bounds only on first batch load
-    if (addedAny && !hasFitOnce && allLatLngs.length > 0) {
-      hasFitOnce = true;
-      map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-    }
+    renderProgress = null;
   }
 
   function syncRoutesToMap() {
@@ -355,9 +467,9 @@
       const idx = analysis.sections.indexOf(section);
       L.polyline(latlngs, { color: SECTION_COLOR, weight: 5, opacity: 0.9 })
         .bindPopup(
-          `<b>${section.name || `Section ${idx + 1}`}</b><br>` +
-            `${(section.distanceMeters / 1000).toFixed(1)} km<br>` +
-            `${section.visitCount} traversals`
+          `<b>Section ${idx + 1}</b><br>` +
+            `${(section.distanceMeters / 1000).toFixed(1)} km · ${section.visitCount} traversals` +
+            (section.name ? `<br><span style="font-size:11px;color:#aaa">${section.name}</span>` : '')
         )
         .on('mouseover', () => onSectionHover(section))
         .on('mouseout', () => onSectionLeave())
@@ -402,13 +514,14 @@
 
   // --- Lifecycle ---
   onMount(async () => {
+    console.time('[tracematch] startup:total');
+    console.time('[tracematch] startup:idb-load');
     await traceStore.load();
-    try {
-      await initWasm();
-      wasmReady = true;
-    } catch (e) {
-      error = `Failed to load WASM: ${e}`;
-    }
+    console.timeEnd('[tracematch] startup:idb-load');
+    // WASM is loaded lazily inside the analysis worker on first run.
+    wasmReady = true;
+    console.timeEnd('[tracematch] startup:total');
+    console.log(`[tracematch] ${traceStore.traces.length} traces loaded, analysis: ${traceStore.analysis ? 'yes' : 'no'}`);
 
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     mq.addEventListener('change', () => { if (themeMode === 'system') resolvedDark = mq.matches; });
@@ -443,7 +556,7 @@
       routeLayerGroup = L.layerGroup();
       sectionLayerGroup = L.layerGroup();
 
-      syncTracesToMap();
+      void syncTracesToMap();
       updateLayerVisibility();
     });
   });
@@ -462,7 +575,7 @@
   $effect(() => {
     traceStore.traces;
     if (!map || !L) return;
-    syncTracesToMap();
+    void syncTracesToMap();
   });
 
   // React to analysis changes
@@ -483,6 +596,22 @@
     }
   });
 
+  // Derive overall analysis progress from the current sub-step progress.
+  // Unknown phases (no entry in PHASE_TO_STEP) keep the bar where it was
+  // rather than snapping back to zero.
+  $effect(() => {
+    if (!analysisProgress) {
+      overallProgress = 0;
+      return;
+    }
+    const idx = PHASE_TO_STEP[analysisProgress.phase];
+    if (idx === undefined) return;
+    const sub = analysisProgress.total > 0
+      ? Math.min(analysisProgress.current / analysisProgress.total, 1)
+      : 0;
+    overallProgress = ((idx + sub) / TOTAL_STEPS) * 100;
+  });
+
   // React to layer toggles
   $effect(() => {
     showTraces; showRoutes; showSections;
@@ -500,33 +629,75 @@
   // --- File handling ---
   async function handleFiles(files: FileList | File[]) {
     error = null;
-    const batch: StoredTrace[] = [];
-    for (const file of files) {
-      if (!file.name.endsWith('.gpx')) {
-        error = `Skipped ${file.name} — only GPX files are supported currently`;
-        continue;
+    const fileArray = Array.from(files);
+    const total = fileArray.length;
+    if (total === 0) return;
+
+    // Show progress IMMEDIATELY so the user gets feedback the moment
+    // they confirm the file picker — before any parsing/IDB work runs.
+    importProgress = { current: 0, total };
+    // Yield once so Svelte renders the overlay before we start the
+    // synchronous-ish parse loop.
+    await new Promise((r) => setTimeout(r, 0));
+
+    console.time('[tracematch] import:total');
+
+    // Read + parse files in parallel within each batch. Sequential
+    // `await file.text()` over 400+ files was the dominant cost.
+    // Promise.all lets the browser overlap the disk reads while we
+    // bulk-insert each batch.
+    const batchSize = 50;
+    let completed = 0;
+
+    for (let i = 0; i < fileArray.length; i += batchSize) {
+      const end = Math.min(i + batchSize, fileArray.length);
+      const slice = fileArray.slice(i, end);
+
+      const perFile = await Promise.all(
+        slice.map(async (file): Promise<{ err: string | null; traces: StoredTrace[] }> => {
+          if (!file.name.endsWith('.gpx')) {
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: `Skipped ${file.name}, only GPX files are supported`, traces: [] };
+          }
+          try {
+            const text = await file.text();
+            const parsed = parseGpx(text);
+            const traces: StoredTrace[] = parsed.map((trace) => ({
+              id: crypto.randomUUID(),
+              name: trace.name,
+              fileName: file.name,
+              points: trace.points,
+              distance: trace.distance,
+              sportType: trace.sportType,
+              addedAt: Date.now()
+            }));
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: null, traces };
+          } catch (e) {
+            completed++;
+            importProgress = { current: completed, total };
+            return { err: `Failed to parse ${file.name}: ${e}`, traces: [] };
+          }
+        })
+      );
+
+      const batch: StoredTrace[] = [];
+      for (const r of perFile) {
+        if (r.err) error = r.err;
+        if (r.traces.length > 0) batch.push(...r.traces);
       }
-      try {
-        const text = await file.text();
-        const parsed = parseGpx(text);
-        for (const trace of parsed) {
-          batch.push({
-            id: crypto.randomUUID(),
-            name: trace.name,
-            fileName: file.name,
-            points: trace.points,
-            distance: trace.distance,
-            sportType: trace.sportType,
-            addedAt: Date.now()
-          });
-        }
-      } catch (e) {
-        error = `Failed to parse ${file.name}: ${e}`;
+      if (batch.length > 0) {
+        await traceStore.addTraces(batch);
       }
+      await new Promise((r) => setTimeout(r, 0));
     }
-    if (batch.length > 0) {
-      await traceStore.addTraces(batch);
-    }
+
+    console.timeEnd('[tracematch] import:total');
+    console.log(`[tracematch] imported ${total} files, ${traceStore.traces.length} traces total`);
+
+    importProgress = null;
   }
 
   function handleDrop(e: DragEvent) {
@@ -551,68 +722,55 @@
     analysing = true;
     error = null;
     sectionError = null;
-    analysisProgress = { phase: 'Creating signatures', current: 0, total: traceStore.traces.length };
+    analysisProgress = { phase: 'Preparing', current: 0, total: traceStore.traces.length };
 
     try {
-      const signatures: RouteSignature[] = [];
-      const tracks: [string, GpsPoint[]][] = [];
-      const sportTypes: Record<string, string> = {};
-      const traces = traceStore.traces;
-      const batchSize = 50;
+      const sectionConfig = JSON.stringify({
+        proximityThreshold,
+        minSectionLength,
+        maxSectionLength: 5000,
+        minActivities,
+        clusterTolerance: 80,
+        samplePoints: 50,
+        detectionMode: 'discovery',
+        includePotentials: true,
+        scalePresets: [
+          { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
+          { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
+          { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
+        ],
+        preserveHierarchy: true,
+        minRoutes,
+        minCellVisits: 50,
+        divergenceThreshold: 0.15,
+        minCorridorTracks: minActivities,
+      });
 
-      for (let i = 0; i < traces.length; i += batchSize) {
-        const end = Math.min(i + batchSize, traces.length);
-        for (let j = i; j < end; j++) {
-          const trace = traces[j];
-          const sig = createSignature(trace.id, trace.points);
-          if (sig) {
-            signatures.push(sig);
-            tracks.push([trace.id, trace.points]);
-            sportTypes[trace.id] = trace.sportType ?? 'Ride';
-          }
-        }
-        analysisProgress = { phase: 'Creating signatures', current: end, total: traces.length };
-        await new Promise((r) => setTimeout(r, 0));
-      }
+      const traces = traceStore.traces.map((t) => ({
+        id: t.id,
+        points: t.points.map((p) => ({ latitude: p.latitude, longitude: p.longitude, elevation: p.elevation })),
+        sportType: t.sportType ?? 'Ride'
+      }));
 
-      analysisProgress = { phase: 'Grouping routes', current: 0, total: 1 };
-      await new Promise((r) => setTimeout(r, 0));
-      const groups = groupRoutes(signatures);
+      const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
+        analysisProgress = { phase, current, total };
+      }, sectionMode);
 
-      let sections: FrequentSection[] = [];
-      if (tracks.length >= 3) {
-        analysisProgress = { phase: 'Detecting sections', current: 0, total: 1 };
-        await new Promise((r) => setTimeout(r, 0));
-        try {
-          const sectionConfig = JSON.stringify({
-            proximityThreshold,
-            minSectionLength,
-            maxSectionLength: 5000,
-            minActivities,
-            clusterTolerance: 80,
-            samplePoints: 50,
-            detectionMode: 'discovery',
-            includePotentials: true,
-            scalePresets: [
-              { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
-              { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
-              { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
-            ],
-            preserveHierarchy: true
-          });
-          sections = detectSections(tracks, sportTypes, groups, sectionConfig);
-        } catch (e) {
-          sectionError = `Section detection failed: ${e}`;
-        }
+      if (result.sections.length === 0 && traceStore.traces.length >= 3) {
+        sectionError = 'No sections detected with current settings.';
       }
 
       analysisProgress = { phase: 'Saving results', current: 0, total: 1 };
       await traceStore.saveAnalysis({
-        signatures,
-        groups,
-        sections,
+        signatures: result.signatures,
+        groups: result.groups,
+        sections: result.sections,
         analyzedAt: Date.now()
       });
+      // Show 100% briefly so the user sees a completed bar before it
+      // disappears, instead of jumping from ~83% back to nothing.
+      analysisProgress = { phase: 'Saving results', current: 1, total: 1 };
+      await new Promise((r) => setTimeout(r, 250));
     } catch (e) {
       error = `Analysis failed: ${e}`;
     } finally {
@@ -623,7 +781,7 @@
 </script>
 
 <svelte:head>
-  <title>tracematch — GPS route analysis</title>
+  <title>tracematch - GPS route analysis</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -663,6 +821,18 @@
     <div class="header-spacer"></div>
     {#if traceStore.traces.length > 0}
       <span class="header-count">{traceStore.traces.length} traces</span>
+      <button
+        class="header-clear"
+        onclick={() => {
+          if (confirm(`Clear all ${traceStore.traces.length} traces and analysis?`)) {
+            void traceStore.clearAll();
+          }
+        }}
+        title="Clear all traces and analysis"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        <span>Clear all</span>
+      </button>
     {/if}
   </header>
 
@@ -749,6 +919,7 @@
                 onmouseenter={() => onSectionHover(section)}
                 onmouseleave={() => onSectionLeave()}
                 onclick={() => zoomToSection(section)}
+                title={section.name || ''}
               >
                 <span class="color-swatch" style="background: {SECTION_COLOR}"></span>
                 <span class="row-name">{sectionIndexLabel(section)}</span>
@@ -777,23 +948,53 @@
           </button>
           {#if !settingsCollapsed}
             <div class="settings-panel">
+              <div class="preset-chips">
+                <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
+                <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
+                <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
+              </div>
+              <p class="mode-description">
+                {#if sectionMode === 'corridor'}
+                  Finds corridors where many activities converge. Works on raw GPS traces, no route grouping needed. Best coverage.
+                {:else if sectionMode === 'density'}
+                  Detects sections where distinct route groups overlap. Requires multiple different routes to share a stretch.
+                {:else}
+                  Identifies road junctions from GPS flow and traces sections between divergence points.
+                {/if}
+              </p>
+              <MethodIllustration mode={sectionMode} proximity={proximityThreshold} minTracks={minActivities} {minRoutes} {minSectionLength} />
+              <div class="preset-chips">
+                {#each Object.keys(PRESETS) as key}
+                  <button
+                    class="preset-chip"
+                    class:active={activePreset === key}
+                    onclick={() => applyPreset(key as PresetKey)}
+                  >{key}</button>
+                {/each}
+              </div>
               <label class="slider-row">
                 <span class="slider-label">Proximity threshold</span>
                 <span class="slider-value">{proximityThreshold} m</span>
-                <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} />
+                <input type="range" min="25" max="300" step="25" bind:value={proximityThreshold} oninput={onSliderChange} />
                 <span class="slider-hint">Max distance between tracks to overlap</span>
               </label>
               <label class="slider-row">
                 <span class="slider-label">Min section length</span>
                 <span class="slider-value">{minSectionLength} m</span>
-                <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} />
+                <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} oninput={onSliderChange} />
                 <span class="slider-hint">Shortest section to detect</span>
               </label>
               <label class="slider-row">
                 <span class="slider-label">Min activities</span>
                 <span class="slider-value">{minActivities}</span>
-                <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
+                <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                 <span class="slider-hint">Activities needed to form a section</span>
+              </label>
+              <label class="slider-row">
+                <span class="slider-label">Min distinct routes</span>
+                <span class="slider-value">{minRoutes}</span>
+                <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
+                <span class="slider-hint">How many different routes must overlap</span>
               </label>
             </div>
           {/if}
@@ -806,8 +1007,15 @@
                 <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
               {/if}
             </div>
-            <div class="progress-bar">
-              <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+            <div class="progress-bar progress-bar-step">
+              <div class="progress-fill" style="width: {analysisProgress.total > 1 ? Math.min(analysisProgress.current / analysisProgress.total * 100, 100) : 50}%"></div>
+            </div>
+            <div class="progress-overall-row">
+              <span>Overall</span>
+              <span class="progress-count">{Math.round(overallProgress)}%</span>
+            </div>
+            <div class="progress-bar progress-bar-overall">
+              <div class="progress-fill" style="width: {overallProgress}%"></div>
             </div>
           {:else if analysing}
             Analysing...
@@ -858,23 +1066,38 @@
             </button>
             {#if !settingsCollapsed}
               <div class="settings-panel">
+                <div class="preset-chips">
+                  {#each Object.keys(PRESETS) as key}
+                    <button
+                      class="preset-chip"
+                      class:active={activePreset === key}
+                      onclick={() => applyPreset(key as PresetKey)}
+                    >{key}</button>
+                  {/each}
+                </div>
                 <label class="slider-row">
                   <span class="slider-label">Proximity threshold</span>
                   <span class="slider-value">{proximityThreshold} m</span>
-                  <input type="range" min="10" max="150" step="5" bind:value={proximityThreshold} />
+                  <input type="range" min="25" max="300" step="25" bind:value={proximityThreshold} oninput={onSliderChange} />
                   <span class="slider-hint">Max distance between tracks to overlap</span>
                 </label>
                 <label class="slider-row">
                   <span class="slider-label">Min section length</span>
                   <span class="slider-value">{minSectionLength} m</span>
-                  <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} />
+                  <input type="range" min="50" max="2000" step="50" bind:value={minSectionLength} oninput={onSliderChange} />
                   <span class="slider-hint">Shortest section to detect</span>
                 </label>
                 <label class="slider-row">
                   <span class="slider-label">Min activities</span>
                   <span class="slider-value">{minActivities}</span>
-                  <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
+                  <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                   <span class="slider-hint">Activities needed to form a section</span>
+                </label>
+                <label class="slider-row">
+                  <span class="slider-label">Min distinct routes</span>
+                  <span class="slider-value">{minRoutes}</span>
+                  <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
+                  <span class="slider-hint">How many different routes must overlap</span>
                 </label>
               </div>
             {/if}
@@ -887,8 +1110,15 @@
                   <span class="progress-count">{analysisProgress.current}/{analysisProgress.total}</span>
                 {/if}
               </div>
-              <div class="progress-bar">
-                <div class="progress-fill" style="width: {analysisProgress.total > 1 ? (analysisProgress.current / analysisProgress.total * 100) : 50}%"></div>
+              <div class="progress-bar progress-bar-step">
+                <div class="progress-fill" style="width: {analysisProgress.total > 1 ? Math.min(analysisProgress.current / analysisProgress.total * 100, 100) : 50}%"></div>
+              </div>
+              <div class="progress-overall-row">
+                <span>Overall</span>
+                <span class="progress-count">{Math.round(overallProgress)}%</span>
+              </div>
+              <div class="progress-bar progress-bar-overall">
+                <div class="progress-fill" style="width: {overallProgress}%"></div>
               </div>
             {:else if analysing}
               Analysing...
@@ -901,8 +1131,8 @@
 
       <footer class="sidebar-footer">
         <p>
-          Powered by <a href="https://github.com/evanjt/tracematch" target="_blank">tracematch</a>
-          — all computation runs locally in your browser via WebAssembly. No data leaves your device.
+          Powered by <a href="https://github.com/evanjt/tracematch" target="_blank">tracematch</a>.
+          All computation runs locally in your browser via WebAssembly. No data leaves your device.
         </p>
       </footer>
     </div>
@@ -980,11 +1210,36 @@
 
       {#if mapDragOver}
         <div class="map-drop-overlay">Drop GPX files here</div>
-      {/if}
-      {#if !wasmReady && !error && !mapDragOver}
+      {:else if traceStore.loading && traceStore.loadProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Loading traces {traceStore.loadProgress.current}/{traceStore.loadProgress.total}
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {traceStore.loadProgress.current / traceStore.loadProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if importProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Importing {importProgress.current}/{importProgress.total} files
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {importProgress.current / importProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if renderProgress}
+        <div class="map-overlay">
+          <div class="overlay-status">
+            Rendering {renderProgress.current}/{renderProgress.total} traces
+            <div class="overlay-bar">
+              <div class="overlay-fill" style="width: {renderProgress.current / renderProgress.total * 100}%"></div>
+            </div>
+          </div>
+        </div>
+      {:else if !wasmReady && !error}
         <div class="map-overlay">Loading WASM engine...</div>
-      {/if}
-      {#if traceStore.traces.length === 0 && !mapDragOver}
+      {:else if traceStore.traces.length === 0}
         <div class="map-overlay">Drop GPX files anywhere or use the sidebar</div>
       {/if}
     </div>
@@ -1073,6 +1328,26 @@
     font-size: 12px;
     color: var(--text-muted);
     flex-shrink: 0;
+  }
+
+  .header-clear {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .header-clear:hover {
+    color: #ef4444;
+    border-color: #ef4444;
+    background: color-mix(in srgb, #ef4444 8%, transparent);
   }
 
   .content {
@@ -1327,6 +1602,30 @@
     margin-bottom: 8px;
   }
 
+  .preset-chips {
+    display: flex;
+    gap: 6px;
+  }
+  .preset-chip {
+    flex: 1;
+    padding: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .preset-chip:hover { border-color: var(--primary); color: var(--text); }
+  .preset-chip.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+  }
+
   .slider-row {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -1349,6 +1648,12 @@
     font-size: 11px;
     color: var(--text-muted);
     opacity: 0.7;
+  }
+  .mode-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 4px 0 8px;
+    line-height: 1.4;
   }
 
   .btn-analyse {
@@ -1381,6 +1686,21 @@
     background: rgba(255, 255, 255, 0.3);
     border-radius: 2px;
     overflow: hidden;
+  }
+  .progress-bar-step .progress-fill {
+    background: rgba(255, 255, 255, 0.6);
+  }
+  .progress-overall-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    margin-top: 8px;
+    margin-bottom: 4px;
+    opacity: 0.85;
+  }
+  .progress-bar-overall {
+    height: 5px;
   }
   .progress-fill {
     height: 100%;
@@ -1519,6 +1839,29 @@
     pointer-events: none;
     z-index: 1000;
     box-shadow: var(--shadow-lg);
+  }
+
+  .overlay-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    min-width: 180px;
+  }
+
+  .overlay-bar {
+    width: 100%;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .overlay-fill {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 2px;
+    transition: width 0.15s ease-out;
   }
 
   .map-drop-overlay {
