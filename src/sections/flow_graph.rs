@@ -514,8 +514,6 @@ fn edge_to_section(
     let mut distances: Vec<f64> = runs.iter().map(|r| r.distance).collect();
     distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = distances[distances.len() / 2];
-    let min_dist = distances[0];
-    let max_dist = distances[distances.len() - 1];
 
     let best = runs
         .iter()
@@ -542,19 +540,9 @@ fn edge_to_section(
         .map(|(id, _)| id.to_string())
         .unwrap_or_default();
 
-    let debug_name = format!(
-        "{}cells | {}trk | dist {}-{}-{}m | sel {}m",
-        edge.cells.len(),
-        runs.len(),
-        min_dist as i32,
-        median as i32,
-        max_dist as i32,
-        best.distance as i32,
-    );
-
     Some(FrequentSection {
         id: format!("sec_{sport_type}_{edge_idx}").to_lowercase(),
-        name: Some(debug_name),
+        name: None,
         sport_type: sport_type.to_string(),
         polyline,
         representative_activity_id: rep_id,
