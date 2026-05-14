@@ -962,7 +962,7 @@
                   Identifies road junctions from GPS flow and traces sections between divergence points.
                 {/if}
               </p>
-              <MethodIllustration mode={sectionMode} />
+              <MethodIllustration mode={sectionMode} proximity={proximityThreshold} minTracks={minActivities} minRoutes={minRoutes} />
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
                   <button
