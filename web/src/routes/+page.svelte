@@ -74,6 +74,7 @@
   let proximityThreshold = $state(50);
   let minSectionLength = $state(200);
   let minActivities = $state(3);
+  let minRoutes = $state(3);
   let settingsCollapsed = $state(true);
 
   // Layer visibility
@@ -673,7 +674,8 @@
           { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
           { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
         ],
-        preserveHierarchy: true
+        preserveHierarchy: true,
+        minRoutes
       });
 
       const traces = traceStore.traces.map((t) => ({
@@ -895,6 +897,12 @@
                 <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
                 <span class="slider-hint">Activities needed to form a section</span>
               </label>
+              <label class="slider-row">
+                <span class="slider-label">Min distinct routes</span>
+                <span class="slider-value">{minRoutes}</span>
+                <input type="range" min="2" max="6" step="1" bind:value={minRoutes} />
+                <span class="slider-hint">How many different routes must overlap</span>
+              </label>
             </div>
           {/if}
         </div>
@@ -982,6 +990,12 @@
                   <span class="slider-value">{minActivities}</span>
                   <input type="range" min="2" max="10" step="1" bind:value={minActivities} />
                   <span class="slider-hint">Activities needed to form a section</span>
+                </label>
+                <label class="slider-row">
+                  <span class="slider-label">Min distinct routes</span>
+                  <span class="slider-value">{minRoutes}</span>
+                  <input type="range" min="2" max="6" step="1" bind:value={minRoutes} />
+                  <span class="slider-hint">How many different routes must overlap</span>
                 </label>
               </div>
             {/if}
