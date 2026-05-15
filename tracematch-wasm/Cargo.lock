@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "tracematch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "geo",
  "log",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "tracematch-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
