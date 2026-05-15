@@ -171,7 +171,7 @@
     <polyline {points} fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
   {/each}
   {#each highlights as points}
-    <polyline {points} fill="none" stroke="#FC4C02" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.9" />
+    <polyline {points} fill="none" stroke="#4F46E5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.9" />
   {/each}
 
   <!-- Scale bar -->

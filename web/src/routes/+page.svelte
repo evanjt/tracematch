@@ -11,7 +11,7 @@
     Ride: '#3B82F6', Run: '#10B981', Walk: '#8B5CF6', Swim: '#06B6D4'
   };
   const DEFAULT_SPORT_COLOR = '#64748b';
-  const SECTION_COLOR = '#FC4C02';
+  const SECTION_COLOR = '#4F46E5';
 
   function sportColor(sportType: string | undefined): string {
     return SPORT_COLORS[sportType ?? ''] ?? DEFAULT_SPORT_COLOR;
@@ -102,7 +102,7 @@
   let minActivities = $state(saved.minActivities ?? 3);
   let minRoutes = $state(saved.minRoutes ?? 3);
   let activePreset = $state<PresetKey | null>(null);
-  let sectionMode = $state<'density' | 'flow' | 'corridor'>(saved.sectionMode ?? 'density');
+  let sectionMode = $state<'density' | 'flow' | 'corridor'>(saved.sectionMode ?? 'corridor');
   let settingsCollapsed = $state(true);
 
   // Determine initial preset from loaded values
@@ -477,7 +477,7 @@
 
       const markerIcon = L.divIcon({
         className: 'section-marker',
-        html: '<div style="width:10px;height:10px;border-radius:50%;background:#FC4C02;border:2px solid white;"></div>',
+        html: '<div style="width:10px;height:10px;border-radius:50%;background:#4F46E5;border:2px solid white;"></div>',
         iconSize: [14, 14],
         iconAnchor: [7, 7]
       });
@@ -902,7 +902,7 @@
 
         <!-- Top Sections -->
         {#if sectionError}
-          <div class="error">{sectionError}</div>
+          <div class="info">{sectionError}</div>
         {/if}
 
         {#if sortedSections.length > 0}
@@ -1066,6 +1066,21 @@
             </button>
             {#if !settingsCollapsed}
               <div class="settings-panel">
+                <div class="preset-chips">
+                  <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
+                  <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
+                  <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
+                </div>
+                <p class="mode-description">
+                  {#if sectionMode === 'corridor'}
+                    Finds corridors where many activities converge. Works on raw GPS traces, no route grouping needed. Best coverage.
+                  {:else if sectionMode === 'density'}
+                    Detects sections where distinct route groups overlap. Requires multiple different routes to share a stretch.
+                  {:else}
+                    Identifies road junctions from GPS flow and traces sections between divergence points.
+                  {/if}
+                </p>
+                <MethodIllustration mode={sectionMode} proximity={proximityThreshold} minTracks={minActivities} {minRoutes} {minSectionLength} />
                 <div class="preset-chips">
                   {#each Object.keys(PRESETS) as key}
                     <button
@@ -1345,9 +1360,9 @@
     flex-shrink: 0;
   }
   .header-clear:hover {
-    color: #ef4444;
-    border-color: #ef4444;
-    background: color-mix(in srgb, #ef4444 8%, transparent);
+    color: #dc2626;
+    border-color: #dc2626;
+    background: color-mix(in srgb, #dc2626 8%, transparent);
   }
 
   .content {
@@ -1369,13 +1384,24 @@
   }
 
   .error {
-    background: color-mix(in srgb, #b91c1c 10%, var(--card));
-    color: #ef4444;
+    background: color-mix(in srgb, #dc2626 10%, var(--card));
+    color: #dc2626;
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 13px;
     word-break: break-word;
     margin-bottom: 8px;
+  }
+
+  .info {
+    background: color-mix(in srgb, var(--text-muted) 8%, var(--card));
+    color: var(--text-muted);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    word-break: break-word;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-subtle);
   }
 
   .summary-bar {
