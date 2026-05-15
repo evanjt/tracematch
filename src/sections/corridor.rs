@@ -774,7 +774,7 @@ fn skeleton_segment_to_section(
 /// are grouped and the median-distance track becomes the section polyline.
 pub(super) fn detect_sections_via_corridor(
     tracks: &[(&str, &[GpsPoint])],
-    sport_type: &str,
+    sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
     if tracks.len() < 2 {
@@ -950,10 +950,12 @@ pub(super) fn detect_sections_via_corridor(
             config.proximity_threshold,
         );
 
+        let section_sport = super::dominant_sport(&activity_ids, sport_types);
+
         sections.push(FrequentSection {
-            id: format!("sec_{sport_type}_{comp_idx}").to_lowercase(),
+            id: format!("sec_{section_sport}_{comp_idx}").to_lowercase(),
             name: None,
-            sport_type: sport_type.to_string(),
+            sport_type: section_sport,
             polyline,
             representative_activity_id: rep_id,
             visit_count: activity_ids.len() as u32,
@@ -1087,7 +1089,11 @@ mod tests {
             .map(|(id, pts)| (id.as_str(), pts.as_slice()))
             .collect();
 
-        let sections = detect_sections_via_corridor(&sport_tracks, "Run", &config);
+        let sport_types: HashMap<String, String> = sport_tracks
+            .iter()
+            .map(|(id, _)| (id.to_string(), "Run".to_string()))
+            .collect();
+        let sections = detect_sections_via_corridor(&sport_tracks, &sport_types, &config);
         assert!(
             !sections.is_empty(),
             "should detect corridor from 5 parallel tracks"
@@ -1096,6 +1102,80 @@ mod tests {
             sections[0].visit_count >= 3,
             "corridor should have ≥3 traversals, got {}",
             sections[0].visit_count
+        );
+    }
+
+    #[test]
+    fn corridor_detects_cross_sport_section() {
+        // A road traversed by cyclists and runners should produce a single
+        // section whose `activity_ids` includes activities from both sports.
+        // The section's `sport_type` is the dominant sport; the UI uses
+        // `activity_ids` to render per-sport filter chips.
+        let config = SectionConfig {
+            proximity_threshold: 50.0,
+            min_section_length: 50.0,
+            min_activities: 2,
+            min_corridor_tracks: 2,
+            ..SectionConfig::default()
+        };
+
+        let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+        let mut sport_types: HashMap<String, String> = HashMap::new();
+        // 3 Ride tracks
+        for t in 0..3 {
+            let id = format!("ride_{}", t);
+            let pts: Vec<GpsPoint> = (0..200)
+                .map(|i| GpsPoint::new(46.20 + (i as f64) * 0.00005, 7.36 + (t as f64) * 0.00005))
+                .collect();
+            sport_types.insert(id.clone(), "Ride".to_string());
+            tracks.push((id, pts));
+        }
+        // 3 Run tracks along the same corridor, slightly offset
+        for t in 0..3 {
+            let id = format!("run_{}", t);
+            let pts: Vec<GpsPoint> = (0..200)
+                .map(|i| {
+                    GpsPoint::new(
+                        46.20 + (i as f64) * 0.00005,
+                        7.36 + ((t + 3) as f64) * 0.00005,
+                    )
+                })
+                .collect();
+            sport_types.insert(id.clone(), "Run".to_string());
+            tracks.push((id, pts));
+        }
+
+        let sport_tracks: Vec<(&str, &[GpsPoint])> = tracks
+            .iter()
+            .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+            .collect();
+
+        let sections = detect_sections_via_corridor(&sport_tracks, &sport_types, &config);
+        assert!(
+            !sections.is_empty(),
+            "should detect a corridor section across both sports"
+        );
+
+        let section = &sections[0];
+        let sports_in_section: HashSet<&str> = section
+            .activity_ids
+            .iter()
+            .filter_map(|id| sport_types.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(
+            sports_in_section.len() >= 2,
+            "section should contain activities from at least 2 sports, got {:?}",
+            sports_in_section
+        );
+        assert!(
+            section.activity_ids.len() >= 4,
+            "section should aggregate activities across sports, got {}",
+            section.activity_ids.len()
+        );
+        assert!(
+            section.sport_type == "Ride" || section.sport_type == "Run",
+            "section sport_type should be one of the contributing sports, got {}",
+            section.sport_type
         );
     }
 
@@ -1120,7 +1200,11 @@ mod tests {
         let sport_tracks: Vec<(&str, &[GpsPoint])> =
             vec![("a", track_a.as_slice()), ("b", track_b.as_slice())];
 
-        let sections = detect_sections_via_corridor(&sport_tracks, "Run", &config);
+        let sport_types: HashMap<String, String> = sport_tracks
+            .iter()
+            .map(|(id, _)| (id.to_string(), "Run".to_string()))
+            .collect();
+        let sections = detect_sections_via_corridor(&sport_tracks, &sport_types, &config);
         assert!(
             sections.is_empty(),
             "sparse tracks should produce no sections, got {}",
