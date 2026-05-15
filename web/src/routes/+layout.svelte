@@ -9,8 +9,8 @@
     --primary: #5b8db8;
     --primary-dark: #4a7a9e;
     --primary-subtle: rgba(91, 141, 184, 0.1);
-    --accent: #f5a623;
-    --section-orange: #FC4C02;
+    --accent: #6366F1;
+    --section: #4F46E5;
     --bg: #fafafa;
     --bg-elevated: #ffffff;
     --card: #ffffff;
