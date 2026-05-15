@@ -368,16 +368,20 @@ fn default_divergence_threshold() -> f64 {
     0.15
 }
 fn default_min_corridor_tracks() -> u32 {
-    3
+    2
 }
 
 impl Default for SectionConfig {
     fn default() -> Self {
         Self {
-            proximity_threshold: 150.0,
-            min_section_length: 200.0,
+            // Tuned for consumer fitness data: GPS noise is higher than research-grade tracks
+            // and per-user activity counts are sparse, so defaults are deliberately permissive.
+            // Override via SectionConfig { ..Default::default() } or conservative()/discovery()
+            // for stricter scenarios.
+            proximity_threshold: 200.0,
+            min_section_length: 150.0,
             max_section_length: 200_000.0,
-            min_activities: 3,
+            min_activities: 2,
             cluster_tolerance: 80.0,
             sample_points: 50,
             detection_mode: DetectionMode::Discovery,
