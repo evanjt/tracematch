@@ -3,9 +3,9 @@
 //! the example-based integration tests.
 
 use proptest::prelude::*;
+use tracematch::GpsPoint;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::union_find::UnionFind;
-use tracematch::GpsPoint;
 
 fn pt(lat: f64, lon: f64) -> GpsPoint {
     GpsPoint::new(lat, lon)
@@ -56,5 +56,29 @@ proptest! {
         let mut uf: UnionFind<u32> = UnionFind::new();
         uf.union(&a, &b);
         prop_assert!(uf.connected(&a, &b));
+    }
+}
+
+proptest! {
+    /// Resampling must never emit NaN coordinates, even when the track
+    /// contains exact duplicate points (zero-length segments).
+    #[test]
+    fn resample_route_finite_with_duplicate_points(
+        n_points in 4usize..40,
+        dup_idx in 0usize..38,
+        target in 3usize..20,
+    ) {
+        let mut points: Vec<GpsPoint> = (0..n_points)
+            .map(|i| pt(47.0 + i as f64 * 0.001, 7.0 + i as f64 * 0.001))
+            .collect();
+        let dup_at = dup_idx % (n_points - 1);
+        let dup = points[dup_at];
+        points.insert(dup_at + 1, dup);
+
+        let resampled = tracematch::matching::resample_route(&points, target);
+        for p in &resampled {
+            prop_assert!(p.latitude.is_finite());
+            prop_assert!(p.longitude.is_finite());
+        }
     }
 }

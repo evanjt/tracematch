@@ -298,6 +298,13 @@ pub fn resample_route(points: &[GpsPoint], target_count: usize) -> Vec<GpsPoint>
     for curr in points.iter().skip(1) {
         let seg_dist = haversine_distance(prev_point, curr);
 
+        // Duplicate points contribute no distance; interpolating across them
+        // would divide by zero and seed the output with NaN.
+        if seg_dist < 1e-9 {
+            prev_point = curr;
+            continue;
+        }
+
         while accumulated + seg_dist >= next_threshold && resampled.len() < target_count - 1 {
             // Interpolate point at the threshold distance
             let ratio = (next_threshold - accumulated) / seg_dist;
@@ -473,7 +480,10 @@ fn point_at_distance(points: &[GpsPoint], cumulative: &[f64], target_dist: f64) 
     }
 
     // Binary search for the segment containing target_dist
-    let idx = match cumulative.binary_search_by(|d| d.partial_cmp(&target_dist).unwrap()) {
+    let idx = match cumulative.binary_search_by(|d| {
+        d.partial_cmp(&target_dist)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
         Ok(i) => return points[i], // Exact match
         Err(i) => i.saturating_sub(1),
     };
