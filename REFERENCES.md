@@ -89,6 +89,18 @@ design decision leans on published work.
   identical ground. Supports familiarity as a signal and rules physiology
   out as a boundary anchor.
 
+## Carried-ground exclusion
+
+- International Skyrunning Federation, Vertical Kilometre world record:
+  1,000 m of gain in 29:42 (Fully, Switzerland, 2017). The all-time human
+  vertical ceiling, ~2,020 m/h sustained for half an hour. Anchors the
+  velocity veto's climb-rate floor: ground climbed well below this rate
+  was climbed by a person, not ridden.
+- EN 12929-1, Safety requirements for cableway installations designed to
+  carry persons. Governs ropeway design including line speeds: fixed-grip
+  chairlifts run ~2-2.5 m/s, detachable chairs and gondolas 4-6 m/s.
+  Anchors the veto's ground-speed floor from the carried side.
+
 ## Climb characterisation
 
 - Gradient-threshold climb segmentation convention: a climb is a sustained

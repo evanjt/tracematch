@@ -17,7 +17,7 @@ fn config() -> SectionConfig {
 }
 
 fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Vec<FrequentSection> {
-    detect_sections_unified(tracks, &shapes::pooled(tracks), &config())
+    detect_sections_unified(tracks, &[], &shapes::pooled(tracks), &config())
 }
 
 // ------------------------------------------------------------- helpers
@@ -442,7 +442,7 @@ fn lift_ground_forms_no_section_but_the_piste_does() {
         .collect();
     eprintln!(
         "  confirmed lift spans: {:?}",
-        tracematch::confirmed_lift_spans(&view)
+        tracematch::confirmed_lift_spans(&view, &[])
     );
     assert_catalogue_invariants(&tracks, &sections);
     let lift_line = metre_samples(&[(0.0, 0.0), (0.0, 900.0)], 25.0);
@@ -584,6 +584,7 @@ fn boundaries_explain_the_cuts() {
     let tracks = shapes::oval_stem(6);
     let out = detect_sections_unified_explained(
         &tracks,
+        &[],
         &shapes::pooled(&tracks),
         &config(),
         &Tunables::DEFAULT,
@@ -603,6 +604,7 @@ fn boundaries_explain_the_cuts() {
     let tracks = shapes::fork_y(8);
     let out = detect_sections_unified_explained(
         &tracks,
+        &[],
         &shapes::pooled(&tracks),
         &config(),
         &Tunables::DEFAULT,
@@ -623,6 +625,7 @@ fn boundaries_explain_the_cuts() {
     let tracks = shapes::persona_commuter();
     let out = detect_sections_unified_explained(
         &tracks,
+        &[],
         &shapes::pooled(&tracks),
         &config(),
         &Tunables::DEFAULT,

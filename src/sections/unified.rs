@@ -173,8 +173,8 @@ pub struct Tunables {
     /// on each side: at 200 m merged spans absorb approach wobble and
     /// a cable car reads human (the 82% section resurfaces) while the
     /// steep-walk anchor is excluded; at 400 m the steep-walk anchor
-    /// is lost on both corpora. Residual risk is why the app-side
-    /// speed check remains the eventual robust signal.
+    /// is lost on both corpora. Residual risk is why the velocity veto
+    /// below is the robust signal wherever per-point time exists.
     pub lift_span_m: f64,
     /// Lift exclusion: minimum sustained ascent grade for a window.
     /// Measured chairlifts climb at 17-34%; steep walked ground
@@ -203,9 +203,31 @@ pub struct Tunables {
     /// four countries, sits at 1.053 or higher. Deliberately the
     /// highest safe value: 1.065+ starts eating real climbs on both
     /// corpora, while the cable-car gate holds all the way down to
-    /// 1.02. Device-sensitive; the app-side speed check is the
-    /// eventual robust signal.
+    /// 1.02. Device-sensitive; when per-point time exists the velocity
+    /// veto below is the robust signal and jitter is only the fallback
+    /// for time-less tracks.
     pub jitter_human_min: f64,
+    /// Lift exclusion, velocity veto: median ground speed below which a
+    /// timed span is moving at human climbing pace. Every measured
+    /// human span among the geometry candidates walks at 0.40-0.63 m/s;
+    /// carried spans ride at 4.7-5.8 m/s and chairlifts are engineered
+    /// for 2-5 m/s line speed. 1.5 m/s (5.4 km/h on >=22% ground) is
+    /// above any sustainable walking pace on that grade yet under every
+    /// carried system; any value in 0.7-4.6 separates the measured
+    /// corpora. Paired with `lift_min_climb_mh` because elite uphill
+    /// racers can reach carried GROUND speeds on moderate grades while
+    /// their vertical rate stays human.
+    pub lift_min_speed_ms: f64,
+    /// Lift exclusion, velocity veto: vertical rate below which a timed
+    /// span climbs like a human. The all-time human ceiling is the
+    /// Vertical Kilometre record, ~2,020 m/h sustained for half an hour
+    /// (Fully, 2017); recreational steep hiking runs 300-900 m/h.
+    /// Measured candidates: human spans 317-566 m/h, carried spans
+    /// 4,400-13,900 m/h. 1,500 m/h sits 2.6x above the measured human
+    /// envelope and 2.9x under the measured carried envelope. A span is
+    /// declassified as human only when BOTH this and the speed floor
+    /// say human; either signal alone at carried levels keeps the span.
+    pub lift_min_climb_mh: f64,
     /// Lift exclusion: matching tolerance when hunting a straight
     /// descent along a lift candidate's own line (the rescue for
     /// stairs and fall-line paths that people also walk down).
@@ -226,6 +248,8 @@ impl Tunables {
         lift_min_grade: 0.22,
         lift_min_straight: 0.975,
         jitter_human_min: 1.05,
+        lift_min_speed_ms: 1.5,
+        lift_min_climb_mh: 1500.0,
         descent_match_m: 60.0,
     };
 }
@@ -268,25 +292,36 @@ struct PassScratch {
 /// the steep-hiking range. A window qualifies when it sustains at
 /// least `LIFT_MIN_GRADE` ascent over `LIFT_SPAN_M` while staying
 /// straighter than `LIFT_MIN_STRAIGHT`; overlapping qualifying windows
-/// merge into spans. A span must then survive two vetoes: real net rise
-/// (guards barometric drift), and low micro-jitter. Jitter is the raw
-/// arc over the smoothed arc: a cabin glides (measured lift median
-/// 1.02, p95 1.065) while a walker on steep ground wobbles (every
-/// walked steep-straight climb measured, across four countries, sits at
-/// 1.053 or higher, and bootpack ascents inside snowboard days land in
-/// the same band). Jitter depends on device sampling, so the constant
-/// is device-sensitive; the app-side speed check is the eventual robust
-/// signal. Marked spans contribute no evidence to the coverage grid, so
-/// lift ground never becomes a section and never bridges the runs it
-/// connects. A descending lift ride is geometrically indistinguishable
-/// from a steep descent and is also left to the app-side speed check.
-/// Constants live in [`Tunables`] with their measured envelopes.
-pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
-    lift_spans_tuned(pts, &Tunables::DEFAULT)
+/// merge into spans. A span must then survive three vetoes: real net
+/// rise (guards barometric drift), low micro-jitter, and human-paced
+/// movement wherever per-point time exists. Jitter is the raw arc over
+/// the smoothed arc: a cabin glides (measured lift median 1.02, p95
+/// 1.065) while a walker on steep ground wobbles (every walked
+/// steep-straight climb measured, across four countries, sits at 1.053
+/// or higher, and bootpack ascents inside snowboard days land in the
+/// same band). Jitter depends on device sampling, so when `seconds`
+/// are supplied the velocity veto decides instead: a span whose median
+/// windowed ground speed AND vertical rate both sit at human climbing
+/// levels was walked, whatever its geometry says (measured envelopes
+/// on the constants in [`Tunables`]). Marked spans contribute no
+/// evidence to the coverage grid, so lift ground never becomes a
+/// section and never bridges the runs it connects. A descending lift
+/// ride is geometrically indistinguishable from a steep descent and is
+/// never marked; descent ground keeps its evidence.
+pub fn lift_spans(pts: &[GpsPoint], seconds: Option<&[f64]>) -> Vec<(usize, usize)> {
+    lift_spans_tuned(pts, seconds, &Tunables::DEFAULT)
 }
 
 /// [`lift_spans`] with explicit [`Tunables`], for the lab's sweeps.
-pub fn lift_spans_tuned(pts: &[GpsPoint], tun: &Tunables) -> Vec<(usize, usize)> {
+/// `seconds` is the per-point time offset parallel to `pts`; `None` (or
+/// a length mismatch) leaves the velocity veto out and geometry decides
+/// alone.
+pub fn lift_spans_tuned(
+    pts: &[GpsPoint],
+    seconds: Option<&[f64]>,
+    tun: &Tunables,
+) -> Vec<(usize, usize)> {
+    let seconds = seconds.filter(|s| s.len() == pts.len());
     let n = pts.len();
     if n < 3 || pts.iter().filter(|p| p.elevation.is_some()).count() < 2 {
         return Vec::new();
@@ -366,6 +401,37 @@ pub fn lift_spans_tuned(pts: &[GpsPoint], tun: &Tunables) -> Vec<(usize, usize)>
         if rise < tun.lift_span_m * tun.lift_min_grade * 0.5 {
             return;
         }
+        // Velocity veto when the track is timed, jitter otherwise.
+        // Speed is sampled over fixed-distance windows and judged by
+        // median, so a mid-ride halt occupies one window instead of
+        // dragging the whole estimate; the vertical rate spans the full
+        // duration. Windows are lift_span_m/10: coarse enough to absorb
+        // point cadence, fine enough for several samples per span.
+        if let Some(secs) = seconds {
+            let dur = secs[e] - secs[s];
+            let win = tun.lift_span_m / 10.0;
+            let mut speeds: Vec<f64> = Vec::new();
+            let (mut d0, mut t0) = (cum_raw[s], secs[s]);
+            for i in s + 1..=e {
+                if cum_raw[i] - d0 >= win {
+                    let dt = secs[i] - t0;
+                    if dt > 0.0 {
+                        speeds.push((cum_raw[i] - d0) / dt);
+                    }
+                    d0 = cum_raw[i];
+                    t0 = secs[i];
+                }
+            }
+            if dur > 0.0 && speeds.len() >= 3 {
+                speeds.sort_unstable_by(f64::total_cmp);
+                let human_speed = speeds[speeds.len() / 2] < tun.lift_min_speed_ms;
+                let human_climb = rise / dur * 3600.0 < tun.lift_min_climb_mh;
+                if !(human_speed && human_climb) {
+                    spans.push((s, e));
+                }
+                return;
+            }
+        }
         let smooth_arc = (cum[e] - cum[s]).max(1.0);
         let jitter = (cum_raw[e] - cum_raw[s]) / smooth_arc;
         if jitter < tun.jitter_human_min {
@@ -399,19 +465,26 @@ pub fn lift_spans_tuned(pts: &[GpsPoint], tun: &Tunables) -> Vec<(usize, usize)>
 /// paths are anything but straight. A candidate span is therefore
 /// rescued when any track descends most of its rise along its line with
 /// a near-straight path of its own.
-pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, usize)>> {
-    confirmed_lift_spans_tuned(tracks, &Tunables::DEFAULT)
+pub fn confirmed_lift_spans(
+    tracks: &[(&str, &[GpsPoint])],
+    seconds: &[&[f64]],
+) -> Vec<Vec<(usize, usize)>> {
+    confirmed_lift_spans_tuned(tracks, seconds, &Tunables::DEFAULT)
 }
 
 /// [`confirmed_lift_spans`] with explicit [`Tunables`], for the lab's
-/// sweeps.
+/// sweeps. `seconds` holds each track's per-point time offsets,
+/// parallel to `tracks`; pass `&[]` (or an empty slice per untimed
+/// track) where time is unavailable.
 pub fn confirmed_lift_spans_tuned(
     tracks: &[(&str, &[GpsPoint])],
+    seconds: &[&[f64]],
     tun: &Tunables,
 ) -> Vec<Vec<(usize, usize)>> {
     let candidates: Vec<Vec<(usize, usize)>> = tracks
         .iter()
-        .map(|(_, pts)| lift_spans_tuned(pts, tun))
+        .enumerate()
+        .map(|(i, (_, pts))| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
         .collect();
     if candidates.iter().all(|c| c.is_empty()) {
         return candidates;
@@ -501,6 +574,7 @@ pub fn confirmed_lift_spans_tuned(
 
 fn build_coverage_grid(
     tracks: &[(&str, &[GpsPoint])],
+    seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
 ) -> CoverageGrid {
@@ -523,7 +597,7 @@ fn build_coverage_grid(
 
     let fine = CellGrid::new(cell_size_m / tun.pass_subgrid, ref_lat);
 
-    let lift = confirmed_lift_spans_tuned(tracks, tun);
+    let lift = confirmed_lift_spans_tuned(tracks, seconds, tun);
     let keep: Vec<Vec<(usize, usize)>> = tracks
         .iter()
         .enumerate()
@@ -1314,6 +1388,7 @@ fn section_worthiness(
 fn detect_for_sport(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
+    sport_seconds: &[&[f64]],
     config: &SectionConfig,
     tun: &Tunables,
     section_idx: &mut usize,
@@ -1324,7 +1399,7 @@ fn detect_for_sport(
     }
 
     let cell_size = (config.proximity_threshold * 0.5).clamp(50.0, 150.0);
-    let coverage = build_coverage_grid(sport_tracks, cell_size, tun);
+    let coverage = build_coverage_grid(sport_tracks, sport_seconds, cell_size, tun);
 
     // Hot cells: adaptive floor, never an absolute constant.
     let hot_min = (config.min_activities as usize).max(2);
@@ -1565,12 +1640,17 @@ fn detect_for_sport(
 
 /// Detect sections using the unified pipeline: coverage grid →
 /// same-traffic supernodes → medoid + consensus geometry.
+///
+/// `seconds` carries each track's per-point time offsets, parallel to
+/// `tracks`; it feeds only the lift velocity veto. Pass `&[]` when time
+/// streams are unavailable and the lift rule rests on geometry alone.
 pub fn detect_sections_unified(
     tracks: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    detect_sections_unified_tuned(tracks, sport_types, config, &Tunables::DEFAULT)
+    detect_sections_unified_tuned(tracks, seconds, sport_types, config, &Tunables::DEFAULT)
 }
 
 /// [`detect_sections_unified`] with explicit [`Tunables`]. The
@@ -1578,11 +1658,12 @@ pub fn detect_sections_unified(
 /// passes anything but [`Tunables::DEFAULT`].
 pub fn detect_sections_unified_tuned(
     tracks: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     tun: &Tunables,
 ) -> Vec<FrequentSection> {
-    detect_sections_unified_explained(tracks, sport_types, config, tun).sections
+    detect_sections_unified_explained(tracks, seconds, sport_types, config, tun).sections
 }
 
 /// [`detect_sections_unified`] carrying its boundary records beside the
@@ -1590,18 +1671,20 @@ pub fn detect_sections_unified_tuned(
 /// off, with the numbers that decided it.
 pub fn detect_sections_unified_explained(
     tracks: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     tun: &Tunables,
 ) -> UnifiedDetection {
+    const NO_TIME: &[f64] = &[];
     // Partition tracks per sport; sections never span sports.
-    let mut by_sport: HashMap<&str, Vec<(&str, &[GpsPoint])>> = HashMap::new();
-    for (id, pts) in tracks {
+    type SportTracks<'a> = (Vec<(&'a str, &'a [GpsPoint])>, Vec<&'a [f64]>);
+    let mut by_sport: HashMap<&str, SportTracks> = HashMap::new();
+    for (i, (id, pts)) in tracks.iter().enumerate() {
         let sport = sport_types.get(id).map(|s| s.as_str()).unwrap_or("Unknown");
-        by_sport
-            .entry(sport)
-            .or_default()
-            .push((id.as_str(), pts.as_slice()));
+        let entry = by_sport.entry(sport).or_default();
+        entry.0.push((id.as_str(), pts.as_slice()));
+        entry.1.push(seconds.get(i).copied().unwrap_or(NO_TIME));
     }
 
     let mut sport_names: Vec<&str> = by_sport.keys().copied().collect();
@@ -1610,10 +1693,17 @@ pub fn detect_sections_unified_explained(
     let mut all_sections: Vec<FrequentSection> = Vec::new();
     let mut boundaries: Vec<BoundaryRecord> = Vec::new();
     for sport in sport_names {
-        let sport_tracks = &by_sport[sport];
+        let (sport_tracks, sport_seconds) = &by_sport[sport];
         let mut idx = 0usize;
-        let sections =
-            detect_for_sport(sport, sport_tracks, config, tun, &mut idx, &mut boundaries);
+        let sections = detect_for_sport(
+            sport,
+            sport_tracks,
+            sport_seconds,
+            config,
+            tun,
+            &mut idx,
+            &mut boundaries,
+        );
         all_sections.extend(sections);
     }
 
@@ -1650,7 +1740,7 @@ mod tests {
     fn straight_steep_ascent_is_lift() {
         // ~10m steps north, +5m elevation each: 50% grade, dead straight.
         let pts = climb(9.0e-5, 5.0, false, 80);
-        let spans = lift_spans(&pts);
+        let spans = lift_spans(&pts, None);
         assert_eq!(spans.len(), 1);
         let (s, e) = spans[0];
         assert!(
@@ -1665,28 +1755,28 @@ mod tests {
     fn winding_climb_is_not_lift() {
         // Same climb rate per metre of ground but zigzagging: a trail.
         let pts = climb(9.0e-5, 5.0, true, 80);
-        assert!(lift_spans(&pts).is_empty());
+        assert!(lift_spans(&pts, None).is_empty());
     }
 
     #[test]
     fn straight_steep_descent_is_not_lift() {
         let mut pts = climb(9.0e-5, 5.0, false, 80);
         pts.reverse();
-        assert!(lift_spans(&pts).is_empty());
+        assert!(lift_spans(&pts, None).is_empty());
     }
 
     #[test]
     fn straight_chairlift_grade_is_lift() {
         // 26% sustained and dead straight: a typical chairlift line.
         let pts = climb(9.0e-5, 2.6, false, 80);
-        assert_eq!(lift_spans(&pts).len(), 1);
+        assert_eq!(lift_spans(&pts, None).len(), 1);
     }
 
     #[test]
     fn gentle_straight_ascent_is_not_lift() {
         // 10% sustained: an ordinary straight road climb.
         let pts = climb(9.0e-5, 1.0, false, 80);
-        assert!(lift_spans(&pts).is_empty());
+        assert!(lift_spans(&pts, None).is_empty());
     }
 
     #[test]
@@ -1699,7 +1789,7 @@ mod tests {
                 GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, lng, 2.6 * i as f64)
             })
             .collect();
-        assert!(lift_spans(&pts).is_empty());
+        assert!(lift_spans(&pts, None).is_empty());
     }
 
     #[test]
@@ -1710,7 +1800,7 @@ mod tests {
         down.reverse();
         let tracks: Vec<(&str, &[GpsPoint])> =
             vec![("up", up.as_slice()), ("down", down.as_slice())];
-        let confirmed = confirmed_lift_spans(&tracks);
+        let confirmed = confirmed_lift_spans(&tracks, &[]);
         assert!(confirmed.iter().all(|c| c.is_empty()));
     }
 
@@ -1727,7 +1817,46 @@ mod tests {
             .collect();
         let tracks: Vec<(&str, &[GpsPoint])> =
             vec![("up", up.as_slice()), ("down", down.as_slice())];
-        let confirmed = confirmed_lift_spans(&tracks);
+        let confirmed = confirmed_lift_spans(&tracks, &[]);
         assert_eq!(confirmed[0].len(), 1);
+    }
+
+    /// Timestamps for `climb` geometry at a constant ground speed;
+    /// steps are ~10 m apart.
+    fn times_at(pts: &[GpsPoint], speed_ms: f64) -> Vec<f64> {
+        let mut t = vec![0.0f64];
+        for w in pts.windows(2) {
+            let d = crate::geo_utils::haversine_distance(&w[0], &w[1]);
+            t.push(t.last().unwrap() + d / speed_ms);
+        }
+        t
+    }
+
+    #[test]
+    fn slow_timed_climb_is_not_lift() {
+        // Straight and steep enough to be a lift by geometry, but timed
+        // at hiking pace: the velocity veto keeps it human ground.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 0.7);
+        assert!(lift_spans(&pts, Some(&secs)).is_empty());
+    }
+
+    #[test]
+    fn carried_speed_confirms_lift() {
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 4.0);
+        assert_eq!(lift_spans(&pts, Some(&secs)).len(), 1);
+    }
+
+    #[test]
+    fn halted_cabin_is_still_lift() {
+        // A mid-ride loading halt drags the mean but occupies a single
+        // distance window; the median windowed speed stays carried.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let mut secs = times_at(&pts, 4.0);
+        for s in secs.iter_mut().skip(40) {
+            *s += 240.0;
+        }
+        assert_eq!(lift_spans(&pts, Some(&secs)).len(), 1);
     }
 }

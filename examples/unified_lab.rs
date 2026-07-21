@@ -35,18 +35,35 @@ struct Activity {
     sport: String,
     date: String,
     points: Vec<GpsPoint>,
+    /// Per-point time offsets in seconds, parallel to `points`; empty
+    /// when any point lacks a timestamp. Feeds the lift velocity veto.
+    seconds: Vec<f64>,
 }
 
-/// Parse a GPX file capturing lat/lon plus the `<ele>` that follows each
-/// trkpt on the next line, and the metadata `<time>` as the activity date.
-fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, String) {
+/// Seconds since epoch zero from a per-trkpt `<time>` line. Corpus
+/// exports anonymise the date to 1970-01-01 and keep real offsets, so
+/// day roll-over past midnight still counts.
+fn point_seconds(trimmed: &str) -> Option<f64> {
+    let inner = &trimmed[trimmed.find("<time>")? + 6..trimmed.find("</time>")?];
+    let day: f64 = inner.get(8..10)?.parse().ok()?;
+    let h: f64 = inner.get(11..13)?.parse().ok()?;
+    let m: f64 = inner.get(14..16)?.parse().ok()?;
+    let s: f64 = inner.get(17..19)?.parse().ok()?;
+    Some((day - 1.0) * 86_400.0 + h * 3600.0 + m * 60.0 + s)
+}
+
+/// Parse a GPX file capturing lat/lon, the `<ele>` that follows each
+/// trkpt on the next line, each point's `<time>` offset, and the
+/// metadata `<time>` as the activity date.
+fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, Vec<f64>, String) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return (Vec::new(), String::new()),
+        Err(_) => return (Vec::new(), Vec::new(), String::new()),
     };
 
     let mut date = String::new();
     let mut points: Vec<GpsPoint> = Vec::new();
+    let mut times: Vec<Option<f64>> = Vec::new();
     let mut pending: Option<(f64, f64)> = None;
 
     for line in content.lines() {
@@ -63,6 +80,7 @@ fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, String) {
             // Flush a trkpt that never received an <ele>.
             if let Some((lat, lon)) = pending.take() {
                 points.push(GpsPoint::new(lat, lon));
+                times.push(None);
             }
             if let (Some(lat_start), Some(lon_start)) =
                 (trimmed.find("lat=\""), trimmed.find("lon=\""))
@@ -87,13 +105,26 @@ fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, String) {
                 Some(e) => GpsPoint::with_elevation(lat, lon, e),
                 None => GpsPoint::new(lat, lon),
             });
+            times.push(None);
             pending = None;
+        } else if pending.is_none()
+            && let Some(t) = times.last_mut()
+            && t.is_none()
+            && trimmed.starts_with("<time>")
+        {
+            *t = point_seconds(trimmed);
         }
     }
     if let Some((lat, lon)) = pending.take() {
         points.push(GpsPoint::new(lat, lon));
+        times.push(None);
     }
-    (points, date)
+    let seconds = if !times.is_empty() && times.iter().all(Option::is_some) {
+        times.into_iter().flatten().collect()
+    } else {
+        Vec::new()
+    };
+    (points, seconds, date)
 }
 
 /// Derive a sport type from the activity file name (Sion corpus naming,
@@ -153,7 +184,7 @@ fn load_corpus(dir: &Path) -> Vec<Activity> {
         if !path.extension().is_some_and(|e| e == "gpx") {
             continue;
         }
-        let (points, date) = load_gpx_full(&path);
+        let (points, seconds, date) = load_gpx_full(&path);
         if points.len() < 50 {
             continue;
         }
@@ -179,6 +210,7 @@ fn load_corpus(dir: &Path) -> Vec<Activity> {
             sport,
             date,
             points,
+            seconds,
         });
     }
     // Chronological, so incremental experiments can replay history.
@@ -1010,7 +1042,8 @@ fn main() {
             .iter()
             .map(|a| (a.id.as_str(), a.points.as_slice()))
             .collect();
-        let confirmed = tracematch::confirmed_lift_spans(&track_view);
+        let secs_view: Vec<&[f64]> = activities.iter().map(|a| a.seconds.as_slice()).collect();
+        let confirmed = tracematch::confirmed_lift_spans(&track_view, &secs_view);
         let mut feats: Vec<serde_json::Value> = Vec::new();
         for (a, spans) in activities.iter().zip(&confirmed) {
             for &(s, e) in spans {
@@ -1074,6 +1107,11 @@ fn main() {
             .filter(|a| *sport == "All" || a.sport == *sport)
             .map(|a| (a.id.clone(), a.points.clone()))
             .collect();
+        let seconds: Vec<&[f64]> = activities
+            .iter()
+            .filter(|a| *sport == "All" || a.sport == *sport)
+            .map(|a| a.seconds.as_slice())
+            .collect();
         let sport_types: HashMap<String, String> = tracks
             .iter()
             .map(|(id, _)| (id.clone(), sport.to_string()))
@@ -1133,6 +1171,7 @@ fn main() {
                 "unified" => {
                     let out = tracematch::detect_sections_unified_explained(
                         &tracks,
+                        &seconds,
                         &sport_types,
                         &section_config,
                         &tracematch::Tunables::DEFAULT,
@@ -1275,17 +1314,26 @@ fn main() {
         println!("=== Loading-window replay (pooled, anchored at the newest activity) ===");
         let mut runs: Vec<(&str, usize, Vec<FrequentSection>, u128)> = Vec::new();
         for (label, days) in spans {
+            let in_window = |a: &&Activity| {
+                days == i64::MAX || day_of(&a.date).is_some_and(|d| newest - d < days)
+            };
             let tracks: Vec<(String, Vec<GpsPoint>)> = activities
                 .iter()
-                .filter(|a| days == i64::MAX || day_of(&a.date).is_some_and(|d| newest - d < days))
+                .filter(in_window)
                 .map(|a| (a.id.clone(), a.points.clone()))
+                .collect();
+            let secs: Vec<&[f64]> = activities
+                .iter()
+                .filter(in_window)
+                .map(|a| a.seconds.as_slice())
                 .collect();
             let types: HashMap<String, String> = tracks
                 .iter()
                 .map(|(id, _)| (id.clone(), "All".to_string()))
                 .collect();
             let t = Instant::now();
-            let sections = tracematch::detect_sections_unified(&tracks, &types, &section_config);
+            let sections =
+                tracematch::detect_sections_unified(&tracks, &secs, &types, &section_config);
             runs.push((label, tracks.len(), sections, t.elapsed().as_millis()));
         }
         let rs_all: Vec<Vec<Vec<GpsPoint>>> = runs
@@ -1409,6 +1457,13 @@ fn main() {
             .filter(|(i, _)| i % 10 != 0)
             .map(|(_, t)| t.clone())
             .collect();
+        let all_secs: Vec<&[f64]> = activities.iter().map(|a| a.seconds.as_slice()).collect();
+        let jk_secs: Vec<&[f64]> = all_secs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 10 != 0)
+            .map(|(_, s)| *s)
+            .collect();
         let track_view: Vec<(&str, &[GpsPoint])> = activities
             .iter()
             .map(|a| (a.id.as_str(), a.points.as_slice()))
@@ -1499,12 +1554,14 @@ fn main() {
                 let t0 = Instant::now();
                 let full = tracematch::detect_sections_unified_tuned(
                     &tracks,
+                    &all_secs,
                     &types,
                     &section_config,
                     &tun,
                 );
                 let jk = tracematch::detect_sections_unified_tuned(
                     &jk_tracks,
+                    &jk_secs,
                     &types,
                     &section_config,
                     &tun,
@@ -1573,7 +1630,7 @@ fn main() {
                     }
                 }
 
-                let lift = tracematch::confirmed_lift_spans_tuned(&track_view, &tun);
+                let lift = tracematch::confirmed_lift_spans_tuned(&track_view, &all_secs, &tun);
                 let n_lift: usize = lift.iter().map(|s| s.len()).sum();
 
                 let steep: Vec<String> = full
@@ -1656,16 +1713,17 @@ fn main() {
                 .iter()
                 .map(|a| (a.id.clone(), a.points.clone()))
                 .collect();
+            let full_secs: Vec<&[f64]> = sport_acts.iter().map(|a| a.seconds.as_slice()).collect();
             let types = |ts: &[(String, Vec<GpsPoint>)]| -> HashMap<String, String> {
                 ts.iter()
                     .map(|(id, _)| (id.clone(), sport.to_string()))
                     .collect()
             };
-            let detect = |ts: &[(String, Vec<GpsPoint>)]| -> Vec<FrequentSection> {
-                tracematch::detect_sections_unified(ts, &types(ts), &section_config)
+            let detect = |ts: &[(String, Vec<GpsPoint>)], ss: &[&[f64]]| -> Vec<FrequentSection> {
+                tracematch::detect_sections_unified(ts, ss, &types(ts), &section_config)
             };
 
-            let full = detect(&full_tracks);
+            let full = detect(&full_tracks, &full_secs);
             let resample_all = |secs: &[FrequentSection]| -> Vec<Vec<GpsPoint>> {
                 secs.iter()
                     .map(|s| {
@@ -1729,16 +1787,23 @@ fn main() {
                 .filter(|(i, _)| i % 10 != 0)
                 .map(|(_, t)| t.clone())
                 .collect();
-            let jk_sections = detect(&jk);
+            let jk_secs: Vec<&[f64]> = full_secs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 10 != 0)
+                .map(|(_, s)| *s)
+                .collect();
+            let jk_sections = detect(&jk, &jk_secs);
             let jk_persist = persistence(&jk_sections);
 
             // Chronological prefixes (activities are date-sorted).
+            let prefix_k =
+                |frac: f64| (((full_tracks.len() as f64) * frac).round() as usize).max(1);
             let prefix = |frac: f64| -> Vec<(String, Vec<GpsPoint>)> {
-                let k = ((full_tracks.len() as f64) * frac).round() as usize;
-                full_tracks[..k.max(1)].to_vec()
+                full_tracks[..prefix_k(frac)].to_vec()
             };
-            let half = detect(&prefix(0.5));
-            let three_q = detect(&prefix(0.75));
+            let half = detect(&prefix(0.5), &full_secs[..prefix_k(0.5)]);
+            let three_q = detect(&prefix(0.75), &full_secs[..prefix_k(0.75)]);
             // Growth stability: what fraction of the half-corpus catalogue
             // still exists (per containment) in the full catalogue?
             let growth_half = {
