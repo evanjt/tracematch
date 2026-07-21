@@ -483,6 +483,7 @@ fn geojson_for_sections(
                 obj.insert("sinuosity".into(), serde_json::json!(round2(r.sinuosity)));
                 obj.insert("converge".into(), serde_json::json!(round2(r.converge)));
                 obj.insert("oneway".into(), serde_json::json!(round2(r.oneway)));
+                obj.insert("recency_days".into(), serde_json::json!(r.recency_days.round()));
             }
             serde_json::json!({
                 "type": "Feature",
@@ -521,11 +522,32 @@ struct RankFeatures {
     sinuosity: f64,
     /// Effective number of approach and leave directions (exp of bearing
     /// entropy over 45 degree sectors). Converged-upon ground is sought out.
+    /// Counts only outings not based beside the section: when a trip
+    /// terminal sits within two matching tolerances of it, every crossing
+    /// that outing makes is leaving or returning to base, and its bearings
+    /// measure where the athlete starts, not which ground they choose.
     converge: f64,
     /// |same - reverse| / traversals. Descents and circuits read one-way.
     oneway: f64,
-    /// Equal-weight mean of the six percentile ranks within the catalogue.
+    /// Days from the section's newest visit to the corpus's newest
+    /// activity. Always reported; joins the score with --rank-recency.
+    recency_days: f64,
+    /// Equal-weight mean of the feature percentile ranks within the
+    /// catalogue (six features; recency joins under --rank-recency).
     score: f64,
+}
+
+/// Civil date string ("YYYY-MM-DD...") to a day count (Hinnant's algorithm).
+fn day_of(date: &str) -> Option<i64> {
+    let y: i64 = date.get(0..4)?.parse().ok()?;
+    let m: i64 = date.get(5..7)?.parse().ok()?;
+    let d: i64 = date.get(8..10)?.parse().ok()?;
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    Some(era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy)
 }
 
 fn bearing_deg(a: &GpsPoint, b: &GpsPoint) -> f64 {
@@ -620,7 +642,22 @@ fn rank_sections(
     sections: &[FrequentSection],
     by_id: &HashMap<&str, &Activity>,
     proximity: f64,
+    rank_recency: bool,
 ) -> Vec<(String, RankFeatures)> {
+    // "Now" is the corpus head, not the wall clock: a static corpus must
+    // not go stale by being analysed later.
+    let newest = by_id
+        .values()
+        .filter_map(|a| day_of(&a.date))
+        .max()
+        .unwrap_or(0);
+    // Base apron for the home-funnel discount, in matching tolerances.
+    // Default 2; LAB_FUNNEL_MULT overrides for probing the plateau.
+    let funnel_mult: f64 = std::env::var("LAB_FUNNEL_MULT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2.0);
+    let funnel_r = funnel_mult * proximity;
     let mut feats: Vec<(String, RankFeatures)> = Vec::new();
     for s in sections {
         let mut apex_vals: Vec<f64> = Vec::new();
@@ -628,6 +665,7 @@ fn rank_sections(
         let (mut same, mut rev) = (0usize, 0usize);
         let mut months: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut last_day = i64::MIN;
         for aid in &s.activity_ids {
             if !seen.insert(aid.as_str()) {
                 continue;
@@ -646,6 +684,22 @@ fn rank_sections(
             if act.date.len() >= 7 {
                 months.insert(act.date[..7].to_string());
             }
+            if let Some(d) = day_of(&act.date) {
+                last_day = last_day.max(d);
+            }
+            // Home-funnel discount: when either trip terminal sits within
+            // two matching tolerances of the section, every crossing this
+            // outing makes is leaving or returning to base, out leg and
+            // return fan-in alike. Those bearings measure where the athlete
+            // starts, so the whole outing stays out of the entropy;
+            // crossings from outings based elsewhere still count.
+            let terminal_carried = {
+                let head = &pts[0];
+                let tail = &pts[pts.len() - 1];
+                s.polyline.iter().any(|p| {
+                    haversine_distance(head, p) < funnel_r || haversine_distance(tail, p) < funnel_r
+                })
+            };
             let start = &pts[0];
             let roam = pts
                 .iter()
@@ -667,11 +721,12 @@ fn rank_sections(
                 }
                 // Approach and leave bearings taken one matching tolerance
                 // out. Traversals at the trace edge contribute none.
-                if let Some(p) = point_at_distance_back(pts, st, proximity) {
+                if !terminal_carried && let Some(p) = point_at_distance_back(pts, st, proximity) {
                     let b = bearing_deg(&p, &pts[st]);
                     sectors[(((b + 22.5) % 360.0) / 45.0) as usize % 8] += 1;
                 }
-                if en < pts.len()
+                if !terminal_carried
+                    && en < pts.len()
                     && let Some(p) = point_at_distance_fwd(pts, en.min(pts.len() - 1), proximity)
                 {
                     let b = bearing_deg(&pts[en.min(pts.len() - 1)], &p);
@@ -718,6 +773,11 @@ fn rank_sections(
                 sinuosity,
                 converge,
                 oneway,
+                recency_days: if last_day == i64::MIN {
+                    36500.0
+                } else {
+                    (newest - last_day).max(0) as f64
+                },
                 score: 0.0,
             },
         ));
@@ -727,7 +787,7 @@ fn rank_sections(
     // ties get their average rank.
     let n = feats.len();
     if n > 1 {
-        let cols: [fn(&RankFeatures) -> f64; 6] = [
+        let mut cols: Vec<fn(&RankFeatures) -> f64> = vec![
             |f| f.apex,
             |f| f.grade,
             |f| f.months as f64,
@@ -735,6 +795,11 @@ fn rank_sections(
             |f| f.converge,
             |f| f.oneway,
         ];
+        if rank_recency {
+            // Fresher ranks higher: percentile of the negated staleness.
+            cols.push(|f| -f.recency_days);
+        }
+        let n_cols = cols.len() as f64;
         let mut pct_sum = vec![0.0f64; n];
         for col in cols {
             let mut order: Vec<usize> = (0..n).collect();
@@ -759,7 +824,7 @@ fn rank_sections(
             }
         }
         for (idx, f) in feats.iter_mut().enumerate() {
-            f.1.score = pct_sum[idx] / 6.0;
+            f.1.score = pct_sum[idx] / n_cols;
         }
     } else if n == 1 {
         feats[0].1.score = 0.5;
@@ -778,22 +843,31 @@ fn write_ranking_md(
     sport: &str,
     ranked: &[(String, RankFeatures)],
     sections: &[FrequentSection],
+    rank_recency: bool,
 ) {
     let by_id: HashMap<&str, &FrequentSection> =
         sections.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut out = String::new();
     out.push_str(&format!("# Interestingness ranking: {}\n\n", sport));
+    out.push_str(if rank_recency {
+        "Score = equal-weight mean of seven percentile-normalised features\n\
+         (recency included).\n"
+    } else {
+        "Score = equal-weight mean of six percentile-normalised features\n\
+         (recency reported but not scored).\n"
+    });
     out.push_str(
-        "Score = equal-weight mean of six percentile-normalised features.\n\
-         apex: share of outing roam at the section (was it the point of the ride).\n\
+        "apex: share of outing roam at the section (was it the point of the ride).\n\
          grade: max sustained gradient over 300 m. months: distinct visit months.\n\
-         sinu: 1 - chord/arc. conv: effective approach directions. 1way: direction purity.\n\n",
+         sinu: 1 - chord/arc. conv: effective approach directions, counting only\n\
+         outings not based within two matching tolerances of the section.\n\
+         1way: direction purity. rec: days from last visit to the corpus head.\n\n",
     );
     out.push_str(
-        "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way |\n",
+        "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way | rec d |\n",
     );
     out.push_str(
-        "|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|\n",
+        "|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|------:|\n",
     );
     for (i, (id, r)) in ranked.iter().enumerate() {
         let (len_m, visits) = by_id
@@ -801,7 +875,7 @@ fn write_ranking_md(
             .map(|s| (s.distance_meters, s.visit_count))
             .unwrap_or((0.0, 0));
         out.push_str(&format!(
-            "| {} | {} | {:.2} | {:.0} | {} | {} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} |\n",
+            "| {} | {} | {:.2} | {:.0} | {} | {} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} | {:.0} |\n",
             i + 1,
             id,
             r.score,
@@ -813,6 +887,7 @@ fn write_ranking_md(
             r.sinuosity,
             r.converge,
             r.oneway,
+            r.recency_days,
         ));
     }
     std::fs::write(path, out).ok();
@@ -872,6 +947,7 @@ fn main() {
     let mut stability = false;
     let mut windows = false;
     let mut sweep = false;
+    let mut rank_recency = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -901,6 +977,10 @@ fn main() {
             }
             "--sweep" => {
                 sweep = true;
+                i += 1;
+            }
+            "--rank-recency" => {
+                rank_recency = true;
                 i += 1;
             }
             _ => i += 1,
@@ -1097,6 +1177,7 @@ fn main() {
                         &sections,
                         &activities_by_id,
                         section_config.proximity_threshold,
+                        rank_recency,
                     );
                     for (i, (id, r)) in ranked.iter().take(10).enumerate() {
                         let len_m = sections
@@ -1106,7 +1187,7 @@ fn main() {
                             .unwrap_or(0.0);
                         println!(
                             "    rank {:>2}  {}  score {:.2}  {:.0}m  months {}  apex {:.2}  \
-                             grade {:.1}%  sinu {:.2}  conv {:.1}  1way {:.2}",
+                             grade {:.1}%  sinu {:.2}  conv {:.1}  1way {:.2}  rec {:.0}d",
                             i + 1,
                             id,
                             r.score,
@@ -1117,12 +1198,13 @@ fn main() {
                             r.sinuosity,
                             r.converge,
                             r.oneway,
+                            r.recency_days,
                         );
                     }
                     if let Some(ref out) = out_dir {
                         std::fs::create_dir_all(out).ok();
                         let path = out.join(format!("{}_ranking.md", sport.to_lowercase()));
-                        write_ranking_md(&path, sport, &ranked, &sections);
+                        write_ranking_md(&path, sport, &ranked, &sections, rank_recency);
                         println!("            ranking → {}", path.display());
                     }
                     Some(ranked.into_iter().collect())
@@ -1152,17 +1234,6 @@ fn main() {
     // how the catalogue reshapes as history arrives. Persistence uses the
     // jackknife definition: 1:1 containment of at least 50% within 60 m.
     if windows {
-        let day_of = |date: &str| -> Option<i64> {
-            let y: i64 = date.get(0..4)?.parse().ok()?;
-            let m: i64 = date.get(5..7)?.parse().ok()?;
-            let d: i64 = date.get(8..10)?.parse().ok()?;
-            let yy = if m <= 2 { y - 1 } else { y };
-            let era = if yy >= 0 { yy } else { yy - 399 } / 400;
-            let yoe = yy - era * 400;
-            let mp = (m + 9) % 12;
-            let doy = (153 * mp + 2) / 5 + d - 1;
-            Some(era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy)
-        };
         let newest = activities
             .iter()
             .filter_map(|a| day_of(&a.date))
