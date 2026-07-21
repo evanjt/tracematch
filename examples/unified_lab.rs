@@ -1514,6 +1514,11 @@ fn main() {
             ("descent_match_m", vec![40.0, 60.0, 80.0], |t, v| {
                 t.descent_match_m = v
             }),
+            (
+                "cluster_gap_m",
+                vec![10_000.0, 25_000.0, 50_000.0, 100_000.0, 200_000.0],
+                |t, v| t.cluster_gap_m = v,
+            ),
         ];
 
         let bbox = |pts: &[GpsPoint]| -> (f64, f64, f64, f64) {

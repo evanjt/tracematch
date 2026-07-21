@@ -233,6 +233,25 @@ pub struct Tunables {
     /// stairs and fall-line paths that people also walk down).
     /// Plateau: 40-80 m byte-flat on both corpora.
     pub descent_match_m: f64,
+    /// Geographic clustering: tracks whose bounding boxes come within
+    /// this gap share one cluster, and each cluster projects onto its
+    /// own reference latitude. Correctness only needs clusters farther
+    /// apart than a couple of grid cells (evidence never interacts
+    /// beyond ~2 x 100 m); the value sits far above that so a region's
+    /// outings share one stable plane, and far below continent spacing
+    /// so hemispheres never share one (a single global plane sized
+    /// Melbourne's east-west cells ~14% wrong against a Valais-heavy
+    /// mean, and let ground on another continent move every cell
+    /// boundary at home). Within a cluster the residual scale error is
+    /// tan(lat) x half-span: under 1% out to ~60 km half-spans at
+    /// mid-latitudes. Swept 10-200 km: single-region corpora are
+    /// byte-flat across the whole range; on the two-continent corpus
+    /// the partition itself moves with the gap, which re-buckets
+    /// marginal ground while core one-to-one stability stays flat at
+    /// 76-80%. Derivation-anchored, never plateau-fitted: any partition
+    /// change re-cuts marginals by the same mechanism that makes local
+    /// projection necessary in the first place.
+    pub cluster_gap_m: f64,
 }
 
 impl Tunables {
@@ -251,6 +270,7 @@ impl Tunables {
         lift_min_speed_ms: 1.5,
         lift_min_climb_mh: 1500.0,
         descent_match_m: 60.0,
+        cluster_gap_m: 50_000.0,
     };
 }
 
@@ -1384,8 +1404,128 @@ fn section_worthiness(
         .collect()
 }
 
+/// Geographic clusters of one sport's tracks: connected components of
+/// bounding boxes padded by half [`Tunables::cluster_gap_m`], so any
+/// pair that could ever share evidence lands together while far-apart
+/// regions each get their own projection plane. The partition is a pure
+/// function of the activity set (box connectivity ignores input order)
+/// and clusters are ordered by their south-west corner, so section
+/// numbering stays deterministic. A track spanning two regions bridges
+/// them into one cluster by construction.
+fn geo_clusters(tracks: &[(&str, &[GpsPoint])], gap_m: f64) -> Vec<Vec<usize>> {
+    let boxes: Vec<Option<(f64, f64, f64, f64)>> = tracks
+        .iter()
+        .map(|(_, pts)| {
+            if pts.is_empty() {
+                return None;
+            }
+            let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for p in pts.iter() {
+                bb.0 = bb.0.min(p.latitude);
+                bb.1 = bb.1.max(p.latitude);
+                bb.2 = bb.2.min(p.longitude);
+                bb.3 = bb.3.max(p.longitude);
+            }
+            Some(bb)
+        })
+        .collect();
+    let pad_lat = gap_m * 0.5 / 111_132.0;
+    let padded: Vec<Option<(f64, f64, f64, f64)>> = boxes
+        .iter()
+        .map(|b| {
+            b.map(|(lat0, lat1, lng0, lng1)| {
+                let mid = ((lat0 + lat1) * 0.5).to_radians();
+                let pad_lng = gap_m * 0.5 / (111_320.0 * mid.cos().abs().max(0.01));
+                (
+                    lat0 - pad_lat,
+                    lat1 + pad_lat,
+                    lng0 - pad_lng,
+                    lng1 + pad_lng,
+                )
+            })
+        })
+        .collect();
+
+    let mut uf: crate::union_find::UnionFind<usize> = crate::union_find::UnionFind::new();
+    for i in 0..tracks.len() {
+        uf.make_set(i);
+    }
+    for (i, a) in padded.iter().enumerate() {
+        let Some(a) = a else { continue };
+        for (j, b) in padded.iter().enumerate().skip(i + 1) {
+            let Some(b) = b else { continue };
+            if a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3 {
+                uf.union(&i, &j);
+            }
+        }
+    }
+
+    let mut by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        if b.is_some() {
+            by_root.entry(uf.find(&i)).or_default().push(i);
+        }
+    }
+    let mut keyed: Vec<((f64, f64), Vec<usize>)> = by_root
+        .into_values()
+        .map(|members| {
+            let mut sw = (f64::MAX, f64::MAX);
+            for &i in &members {
+                let bb = boxes[i].expect("cluster members have boxes");
+                sw.0 = sw.0.min(bb.0);
+                sw.1 = sw.1.min(bb.2);
+            }
+            (sw, members)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.0.total_cmp(&b.0.0).then(a.0.1.total_cmp(&b.0.1)));
+    keyed.into_iter().map(|(_, members)| members).collect()
+}
+
 /// Detect sections for one sport's tracks via the unified pipeline.
+///
+/// Tracks split into geographic clusters first and the pipeline runs
+/// per cluster on the cluster's own reference latitude. One global
+/// plane sizes east-west cells by cos(reference)/cos(local) — ~14%
+/// wrong for a corpus spanning Valais and Melbourne — and lets ground
+/// on another continent shift every cell boundary at home; local
+/// projection removes both, and makes each region's catalogue
+/// independent of the rest of the corpus.
 fn detect_for_sport(
+    sport: &str,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    sport_seconds: &[&[f64]],
+    config: &SectionConfig,
+    tun: &Tunables,
+    section_idx: &mut usize,
+    records: &mut Vec<BoundaryRecord>,
+) -> Vec<FrequentSection> {
+    if sport_tracks.len() < config.min_activities as usize {
+        return Vec::new();
+    }
+    let mut sections = Vec::new();
+    for cluster in geo_clusters(sport_tracks, tun.cluster_gap_m) {
+        let c_tracks: Vec<(&str, &[GpsPoint])> = cluster.iter().map(|&i| sport_tracks[i]).collect();
+        let c_seconds: Vec<&[f64]> = cluster
+            .iter()
+            .map(|&i| sport_seconds.get(i).copied().unwrap_or(&[]))
+            .collect();
+        sections.extend(detect_for_cluster(
+            sport,
+            &c_tracks,
+            &c_seconds,
+            config,
+            tun,
+            section_idx,
+            records,
+        ));
+    }
+    sections
+}
+
+/// One geographic cluster's pipeline: coverage grid → same-traffic
+/// supernodes → fixed point → candidates → selection backoff.
+fn detect_for_cluster(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
     sport_seconds: &[&[f64]],
@@ -1846,6 +1986,36 @@ mod tests {
         let pts = climb(9.0e-5, 2.6, false, 80);
         let secs = times_at(&pts, 4.0);
         assert_eq!(lift_spans(&pts, Some(&secs)).len(), 1);
+    }
+
+    #[test]
+    fn far_blobs_cluster_apart_and_a_bridge_joins_them() {
+        let near: Vec<GpsPoint> = (0..10)
+            .map(|i| GpsPoint::new(46.0 + 1.0e-4 * i as f64, 7.0))
+            .collect();
+        let far: Vec<GpsPoint> = (0..10)
+            .map(|i| GpsPoint::new(37.0 + 1.0e-4 * i as f64, 7.0))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> =
+            vec![("north", near.as_slice()), ("south", far.as_slice())];
+        let clusters = geo_clusters(&tracks, Tunables::DEFAULT.cluster_gap_m);
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0], vec![1], "south-west cluster orders first");
+        assert_eq!(clusters[1], vec![0]);
+
+        let bridge: Vec<GpsPoint> = (0..=90)
+            .map(|i| GpsPoint::new(37.0 + 0.1 * i as f64, 7.0))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![
+            ("north", near.as_slice()),
+            ("south", far.as_slice()),
+            ("bridge", bridge.as_slice()),
+        ];
+        assert_eq!(
+            geo_clusters(&tracks, Tunables::DEFAULT.cluster_gap_m).len(),
+            1,
+            "a track spanning both grounds bridges them"
+        );
     }
 
     #[test]

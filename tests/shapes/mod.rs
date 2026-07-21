@@ -125,6 +125,29 @@ pub fn shift_east(tracks: Vec<(String, Vec<GpsPoint>)>, dx_m: f64) -> Vec<(Strin
         .collect()
 }
 
+/// Translate a corpus by whole degrees, for placing a shape family on
+/// another continent or in the other hemisphere.
+pub fn translate_deg(
+    tracks: Vec<(String, Vec<GpsPoint>)>,
+    dlat: f64,
+    dlng: f64,
+) -> Vec<(String, Vec<GpsPoint>)> {
+    tracks
+        .into_iter()
+        .map(|(id, pts)| {
+            let moved = pts
+                .into_iter()
+                .map(|p| GpsPoint {
+                    latitude: p.latitude + dlat,
+                    longitude: p.longitude + dlng,
+                    ..p
+                })
+                .collect();
+            (id, moved)
+        })
+        .collect()
+}
+
 /// Pooled sport map: detection sees one bucket, like production.
 pub fn pooled(tracks: &[(String, Vec<GpsPoint>)]) -> HashMap<String, String> {
     tracks

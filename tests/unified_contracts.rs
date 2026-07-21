@@ -638,6 +638,53 @@ fn boundaries_explain_the_cuts() {
     );
 }
 
+/// Catalogue rows with the positional section ids stripped: cluster
+/// ordering renumbers ids when far ground joins the corpus, and ids
+/// were never content-stable; everything else must hold exactly.
+fn sans_ids(catalogue: &str) -> String {
+    catalogue
+        .lines()
+        .map(|row| row.split_once('|').map_or(row, |(_, rest)| rest))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn far_ground_changes_nothing_local() {
+    // Each geographic cluster projects and detects on its own plane, so
+    // a season on another continent must not re-bucket a single home
+    // cell, and the far ground must still detect correctly at its own
+    // latitude. The oval is the sensitive probe: under one global plane
+    // the hemisphere-shifted mean re-sizes home cells and measurably
+    // re-cuts curved ground (oval, lollipop, switchback, hill repeats
+    // all re-cut when this was probed; straight grids survive).
+    let home = shapes::oval_stem(6);
+    let alone = detect(&home);
+    assert!(!alone.is_empty());
+
+    let mut both = home.clone();
+    both.extend(shapes::translate_deg(
+        shapes::persona_commuter(),
+        -83.8,
+        138.0,
+    ));
+    let combined = detect(&both);
+
+    let (south, north): (Vec<FrequentSection>, Vec<FrequentSection>) = combined
+        .into_iter()
+        .partition(|s| s.polyline.first().is_some_and(|p| p.latitude < 0.0));
+    assert_eq!(
+        south.len(),
+        1,
+        "the far commuter road is one section on its own plane"
+    );
+    assert_eq!(
+        sans_ids(&normalise(&north)),
+        sans_ids(&normalise(&alone)),
+        "home catalogue re-cut by ground on another continent"
+    );
+}
+
 // ------------------------------------------- invariant 4: order-free
 
 #[test]
