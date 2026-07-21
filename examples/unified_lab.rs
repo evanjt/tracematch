@@ -503,6 +503,7 @@ fn geojson_for_sections(
                 "activities": s.activity_ids.len(),
                 "self_overlap": (self_overlap_frac(&s.polyline) * 100.0).round() / 100.0,
                 "gap_m": gap_m.round(),
+                "rep": s.representative_activity_id,
             });
             if let Some(r) = ranks.and_then(|m| m.get(&s.id))
                 && let Some(obj) = props.as_object_mut()

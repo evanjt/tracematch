@@ -19,6 +19,8 @@ present. The algorithm and its rules live in `src/sections/unified.rs`.
 | The catalogue depended on arrival order (the install-window precedent) | `catalogue_is_a_pure_function_of_the_activity_set` |
 | Evidence semantics were unclear on deletion | `deleting_activities_is_the_only_way_evidence_leaves` |
 | One global projection plane serves every continent | `far_ground_changes_nothing_local` |
+| A partly represented candidate was emitted whole if it slipped under the backoff share, re-emitting represented ground | trim semantics in `assert_catalogue_invariants` (both-direction corridor share < 60%); `crossing_islands_bridge_but_long_overlap_splits`, `probe_beside_accepted_line_is_represented` (unit). The mask is deliberately planimetric: plan cells are partition-atomic so stacked ground never becomes a separate candidate here, and cross-day absolute elevation comparison is barometric drift, not signal (an elevation guard was probed and rejected 2026-07-21) |
+| Chain members each picked their own reference, so one physical line rendered as splices from different days | `chain_members_share_one_reference_and_meet_exactly`. Unification changes the source trace only, never the span: member extents stay medoid-anchored (re-deriving spans from the cover activity's portions was probed 2026-07-21 and sheared jackknife core persistence 92% → 70%) |
 
 ## Contracts that land with later tranches
 
