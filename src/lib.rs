@@ -80,15 +80,17 @@ pub mod synthetic;
 #[cfg(feature = "synthetic")]
 pub mod scenarios;
 pub use sections::{
-    DetectionMethod, DetectionMode, DetectionPhase, DetectionProgressCallback, DetectionStats,
-    FrequentSection, MultiScaleSectionResult, PotentialSection, ScaleName, ScalePreset,
-    SectionConfig, SectionMatch, SectionPortion, SplitResult, Tunables, confirmed_lift_spans,
-    confirmed_lift_spans_tuned, detect_sections, detect_sections_corridor,
-    detect_sections_flow_graph, detect_sections_from_tracks, detect_sections_multiscale,
+    BoundaryReason, BoundaryRecord, DetectionMethod, DetectionMode, DetectionPhase,
+    DetectionProgressCallback, DetectionStats, FrequentSection, MultiScaleSectionResult,
+    PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch, SectionPortion,
+    SplitResult, Tunables, UnifiedDetection, confirmed_lift_spans, confirmed_lift_spans_tuned,
+    detect_sections, detect_sections_corridor, detect_sections_flow_graph,
+    detect_sections_from_tracks, detect_sections_multiscale,
     detect_sections_multiscale_with_progress, detect_sections_unified,
-    detect_sections_unified_tuned, find_all_track_portions, find_sections_in_route,
-    incremental::IncrementalResult, incremental::detect_sections_incremental, lift_spans,
-    lift_spans_tuned, recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    detect_sections_unified_explained, detect_sections_unified_tuned, find_all_track_portions,
+    find_sections_in_route, incremental::IncrementalResult,
+    incremental::detect_sections_incremental, lift_spans, lift_spans_tuned,
+    recalculate_section_polyline, split_section_at_index, split_section_at_point,
 };
 
 // ============================================================================

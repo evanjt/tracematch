@@ -572,6 +572,69 @@ fn persona_racer_hill_is_single_passed() {
     }
 }
 
+// ----------------------------------- rule 9: boundaries explain themselves
+
+#[test]
+fn boundaries_explain_the_cuts() {
+    // Every surviving cut carries its mechanism and numbers as data.
+    // The oval entrance is a usage change; the Y junction is a fork
+    // with a worthy branch; a boundary-free corridor emits nothing.
+    use tracematch::{BoundaryReason, Tunables, detect_sections_unified_explained};
+
+    let tracks = shapes::oval_stem(6);
+    let out = detect_sections_unified_explained(
+        &tracks,
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    assert_eq!(out.sections.len(), 2);
+    let entrance = shapes::to_gps(600.0, 0.0);
+    let near_entrance = out.boundaries.iter().any(|r| {
+        matches!(r.reason, BoundaryReason::UsageChange { .. })
+            && haversine_distance(&GpsPoint::new(r.latitude, r.longitude), &entrance) < 250.0
+    });
+    assert!(
+        near_entrance,
+        "no usage-change record at the oval entrance: {:?}",
+        out.boundaries
+    );
+
+    let tracks = shapes::fork_y(8);
+    let out = detect_sections_unified_explained(
+        &tracks,
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    assert_catalogue_invariants(&tracks, &out.sections);
+    assert_eq!(out.sections.len(), 3, "trunk + two branches");
+    let junction = shapes::to_gps(0.0, 1000.0);
+    let fork_here = out.boundaries.iter().any(|r| {
+        matches!(r.reason, BoundaryReason::Fork { .. })
+            && haversine_distance(&GpsPoint::new(r.latitude, r.longitude), &junction) < 250.0
+    });
+    assert!(
+        fork_here,
+        "no fork record at the junction: {:?}",
+        out.boundaries
+    );
+
+    let tracks = shapes::persona_commuter();
+    let out = detect_sections_unified_explained(
+        &tracks,
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    assert_eq!(out.sections.len(), 1);
+    assert!(
+        out.boundaries.is_empty(),
+        "an unbroken corridor has no cuts to explain: {:?}",
+        out.boundaries
+    );
+}
+
 // ------------------------------------------- invariant 4: order-free
 
 #[test]

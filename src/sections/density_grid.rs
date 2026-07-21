@@ -63,6 +63,14 @@ impl CellGrid {
         (lat_idx, lng_idx)
     }
 
+    /// Centre of a cell, as (lat, lng). Inverse of [`Self::cell_of`].
+    pub fn centre_of(&self, cell: (i32, i32)) -> (f64, f64) {
+        (
+            (cell.0 as f64 + 0.5) * self.cell_size_m / self.lat_to_m,
+            (cell.1 as f64 + 0.5) * self.cell_size_m / self.lng_to_m,
+        )
+    }
+
     pub fn cell_of_to_distance(&self, a: (i32, i32), b: (i32, i32)) -> f64 {
         let dy = (b.0 - a.0) as f64 * self.cell_size_m;
         let dx = (b.1 - a.1) as f64 * self.cell_size_m;

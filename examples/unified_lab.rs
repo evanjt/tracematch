@@ -1103,6 +1103,8 @@ fn main() {
             groups
         };
 
+        let unified_boundaries: std::cell::RefCell<Vec<tracematch::BoundaryRecord>> =
+            std::cell::RefCell::new(Vec::new());
         let run_method = |name: &str| -> Option<(Vec<FrequentSection>, u128)> {
             if let Some(ref m) = only_method
                 && m != name
@@ -1129,7 +1131,14 @@ fn main() {
                     tracematch::detect_sections_flow_graph(&tracks, &sport_types, &section_config)
                 }
                 "unified" => {
-                    tracematch::detect_sections_unified(&tracks, &sport_types, &section_config)
+                    let out = tracematch::detect_sections_unified_explained(
+                        &tracks,
+                        &sport_types,
+                        &section_config,
+                        &tracematch::Tunables::DEFAULT,
+                    );
+                    *unified_boundaries.borrow_mut() = out.boundaries;
+                    out.sections
                 }
                 _ => return None,
             };
@@ -1192,6 +1201,36 @@ fn main() {
                         let path = out.join(format!("{}_ranking.md", sport.to_lowercase()));
                         write_ranking_md(&path, sport, &ranked, &sections);
                         println!("            ranking → {}", path.display());
+                        let brs = unified_boundaries.borrow();
+                        let feats: Vec<serde_json::Value> = brs
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!({
+                                    "type": "Feature",
+                                    "geometry": {
+                                        "type": "Point",
+                                        "coordinates": [r.longitude, r.latitude],
+                                    },
+                                    "properties": serde_json::to_value(&r.reason).unwrap(),
+                                })
+                            })
+                            .collect();
+                        let bpath =
+                            out.join(format!("{}_boundaries.geojson", sport.to_lowercase()));
+                        std::fs::write(
+                            &bpath,
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "FeatureCollection",
+                                "features": feats,
+                            }))
+                            .unwrap(),
+                        )
+                        .ok();
+                        println!(
+                            "            boundaries → {} ({})",
+                            bpath.display(),
+                            brs.len()
+                        );
                     }
                     Some(ranked.into_iter().collect())
                 } else {

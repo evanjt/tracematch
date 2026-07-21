@@ -67,6 +67,49 @@ type Portion = (usize, usize, usize, f64);
 /// Saturates at 3 — an oval lapped 4 or 12 times reads the same.
 const PASS_CLASS_MAX: u8 = 3;
 
+/// One explained decision: why a cut between two adjacent components
+/// survived, or why a candidate corridor was not emitted. Every
+/// boundary has a visible reason; these records carry that reason as
+/// data, in place of log lines.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BoundaryRecord {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub reason: BoundaryReason,
+}
+
+/// The mechanism behind a [`BoundaryRecord`], with the numbers that
+/// decided it. The decisions themselves live in
+/// [`merge_non_fork_boundaries`] and the selection backoff; records
+/// only report them.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoundaryReason {
+    /// Most shared traffic crosses the join at a different pass class:
+    /// a turnaround, a lollipop mouth, an oval entrance.
+    UsageChange { shared: u32, mismatched: u32 },
+    /// The departing traffic is collected by a section-worthy third
+    /// corridor that physically meets the join.
+    Fork {
+        through: u32,
+        needed: f64,
+        branch_leavers: u32,
+    },
+    /// The candidate's own geometry already runs within a cell of the
+    /// accepted catalogue: represented by the better line, not emitted.
+    Backoff {
+        represented: u32,
+        probed: u32,
+        score_metres: f64,
+    },
+}
+
+/// A detection outcome that carries its explanations.
+pub struct UnifiedDetection {
+    pub sections: Vec<FrequentSection>,
+    pub boundaries: Vec<BoundaryRecord>,
+}
+
 /// The detector's free constants, each documented with its meaning and
 /// the evidence behind its default. Production always runs
 /// [`Tunables::DEFAULT`]; [`detect_sections_unified_tuned`] exists so
@@ -838,6 +881,155 @@ fn pair_boundaries(
     boundary
 }
 
+/// Per-track pass-class comparison across a join: (shared, mismatched)
+/// aggregated over every adjacent cell pair on it.
+fn join_usage_mismatch(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> (usize, usize) {
+    let mut shared = 0usize;
+    let mut mismatch = 0usize;
+    for &(ca, cb) in pairs {
+        let (Some(pa), Some(pb)) = (coverage.cell_passes.get(&ca), coverage.cell_passes.get(&cb))
+        else {
+            continue;
+        };
+        for (t, ka) in pa {
+            if let Some(kb) = pb.get(t) {
+                shared += 1;
+                if ka != kb {
+                    mismatch += 1;
+                }
+            }
+        }
+    }
+    (shared, mismatch)
+}
+
+/// A pass-class boundary counts only when the change is the experience
+/// of MOST of the traffic at the join — a turnaround or loop mouth for
+/// its users. A minority's turnaround (walkers turning back on a
+/// corridor runners continue along) must not cut the majority's through
+/// corridor.
+fn is_usage_boundary(shared: usize, mismatch: usize) -> bool {
+    shared > 0 && mismatch as f64 > (0.5 * shared as f64).max(1.0)
+}
+
+/// The departing traffic collected by the best section-worthy third
+/// corridor at the join, when any collects enough to make the fork
+/// real.
+///
+/// The test is on the LEAVERS: testing the through traffic instead
+/// would let a collinear continuation of the same corridor justify the
+/// cut — it shares the through traffic by definition — and chain
+/// fragments would hold each other apart forever. The branch must
+/// physically meet the join (direct adjacency only: a corridor two
+/// cells away, reached by a stub too short to be a section, must not
+/// arbitrate a cut it never visibly touches) and must carry enough
+/// activities to be a section in its own right — on a corridor used by
+/// three activities, one turning off is noise.
+#[allow(clippy::too_many_arguments)]
+fn branch_collecting_leavers(
+    a: usize,
+    b: usize,
+    supernodes: &[Supernode],
+    owner: &HashMap<Cell, usize>,
+    pairs: &[(Cell, Cell)],
+    section_worthy: &[bool],
+    leavers: &HashSet<u32>,
+    needed: f64,
+) -> Option<usize> {
+    let mut third: HashSet<usize> = HashSet::new();
+    for &(ca, cb) in pairs {
+        for c in [ca, cb] {
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if let Some(&o) = owner.get(&(c.0 + dy, c.1 + dx))
+                        && o != a
+                        && o != b
+                        && section_worthy[o]
+                    {
+                        third.insert(o);
+                    }
+                }
+            }
+        }
+    }
+    third
+        .iter()
+        .map(|&o| supernodes[o].tracks.intersection(leavers).count())
+        .filter(|&n| n as f64 >= needed)
+        .max()
+}
+
+/// Explain the boundaries that survived the merge fixed point: re-run
+/// the keep tests read-only on the final components and record the
+/// mechanism and the numbers for each. Decisions are made in
+/// [`merge_non_fork_boundaries`]; this pass only reports them.
+fn explain_boundaries(
+    supernodes: &[Supernode],
+    coverage: &CoverageGrid,
+    divergence: f64,
+    min_activities: u32,
+    section_worthy: &[bool],
+    records: &mut Vec<BoundaryRecord>,
+) {
+    let owner = cell_owners(supernodes);
+    let boundary = pair_boundaries(supernodes, &owner);
+    let mut joins: Vec<(usize, usize)> = boundary.keys().copied().collect();
+    joins.sort_unstable();
+    for (a, b) in joins {
+        let pairs = &boundary[&(a, b)];
+        let (lat, lng) = coverage.grid.centre_of(pairs[0].0);
+        let (shared, mismatch) = join_usage_mismatch(pairs, coverage);
+        if is_usage_boundary(shared, mismatch) {
+            records.push(BoundaryRecord {
+                latitude: lat,
+                longitude: lng,
+                reason: BoundaryReason::UsageChange {
+                    shared: shared as u32,
+                    mismatched: mismatch as u32,
+                },
+            });
+            continue;
+        }
+        if !section_worthy[a] || !section_worthy[b] {
+            continue;
+        }
+        let through: HashSet<u32> = supernodes[a]
+            .tracks
+            .intersection(&supernodes[b].tracks)
+            .copied()
+            .collect();
+        if through.is_empty() {
+            continue;
+        }
+        let leavers: HashSet<u32> = supernodes[a]
+            .tracks
+            .symmetric_difference(&supernodes[b].tracks)
+            .copied()
+            .collect();
+        let needed = (divergence * through.len() as f64).max(min_activities as f64);
+        if let Some(collected) = branch_collecting_leavers(
+            a,
+            b,
+            supernodes,
+            &owner,
+            pairs,
+            section_worthy,
+            &leavers,
+            needed,
+        ) {
+            records.push(BoundaryRecord {
+                latitude: lat,
+                longitude: lng,
+                reason: BoundaryReason::Fork {
+                    through: through.len() as u32,
+                    needed,
+                    branch_leavers: collected as u32,
+                },
+            });
+        }
+    }
+}
+
 /// Merge component pairs whose boundary is not a genuine fork.
 ///
 /// A composition change only deserves to end a section when the athlete
@@ -857,6 +1049,8 @@ fn merge_non_fork_boundaries(
 ) -> Vec<Supernode> {
     let owner = cell_owners(&supernodes);
     let boundary = pair_boundaries(&supernodes, &owner);
+    let mut joins: Vec<(usize, usize)> = boundary.keys().copied().collect();
+    joins.sort_unstable();
 
     let mut uf: UnionFind<usize> = UnionFind::with_capacity(supernodes.len());
     for i in 0..supernodes.len() {
@@ -866,40 +1060,10 @@ fn merge_non_fork_boundaries(
     // directed absorption after the pairwise decisions.
     let mut frag_neighbours: HashMap<usize, Vec<usize>> = HashMap::new();
 
-    for (&(a, b), pairs) in &boundary {
-        // A pass-class boundary is exempt from merging only when the
-        // change is the experience of MOST of the traffic at the join —
-        // a turnaround or loop mouth for its users. A minority's
-        // turnaround (walkers turning back on a corridor runners
-        // continue along) must not cut the majority's through
-        // corridor. Aggregated per-track over every adjacent cell pair
-        // on the join.
-        let mut shared = 0usize;
-        let mut mismatch = 0usize;
-        for &(ca, cb) in pairs {
-            let (Some(pa), Some(pb)) =
-                (coverage.cell_passes.get(&ca), coverage.cell_passes.get(&cb))
-            else {
-                continue;
-            };
-            for (t, ka) in pa {
-                if let Some(kb) = pb.get(t) {
-                    shared += 1;
-                    if ka != kb {
-                        mismatch += 1;
-                    }
-                }
-            }
-        }
-        if shared > 0 && mismatch as f64 > (0.5 * shared as f64).max(1.0) {
-            log::debug!(
-                "[Unified] keep cut MULT {:?}|{:?}: shared={} mismatch={} at {:?}",
-                supernodes[a].cells[0],
-                supernodes[b].cells[0],
-                shared,
-                mismatch,
-                pairs[0].0,
-            );
+    for (a, b) in joins {
+        let pairs = &boundary[&(a, b)];
+        let (shared, mismatch) = join_usage_mismatch(pairs, coverage);
+        if is_usage_boundary(shared, mismatch) {
             continue;
         }
 
@@ -933,62 +1097,19 @@ fn merge_non_fork_boundaries(
             .symmetric_difference(&supernodes[b].tracks)
             .copied()
             .collect();
-        // A fork is real when the DEPARTING traffic is collected by a
-        // section-worthy corridor at the join. Testing the through
-        // traffic instead would let a collinear continuation of the
-        // same corridor justify the cut — it shares the through
-        // traffic by definition — and chain fragments would hold each
-        // other apart forever. A branch must also carry enough
-        // activities to be a section in its own right: on a corridor
-        // used by three activities, one turning off is noise.
         let needed = (divergence * through.len() as f64).max(min_activities as f64);
-
-        // A fork needs a substantial third corridor that physically
-        // meets the join — direct adjacency only. A corridor two cells
-        // away (the far bank, reached by a stub too short to be a
-        // section) must not arbitrate a cut it never visibly touches.
-        // A minor side path does not end a busy corridor.
-        let mut third: HashSet<usize> = HashSet::new();
-        for &(ca, cb) in pairs {
-            for c in [ca, cb] {
-                for dy in -1..=1i32 {
-                    for dx in -1..=1i32 {
-                        if let Some(&o) = owner.get(&(c.0 + dy, c.1 + dx))
-                            && o != a
-                            && o != b
-                            && section_worthy[o]
-                        {
-                            third.insert(o);
-                        }
-                    }
-                }
-            }
-        }
-        let forked = third
-            .iter()
-            .any(|&o| supernodes[o].tracks.intersection(&leavers).count() as f64 >= needed);
-
-        if forked {
-            log::debug!(
-                "[Unified] keep cut FORK {:?}({} cells)|{:?}({} cells): through={} needed={:.1} branches={:?}",
-                supernodes[a].cells[0],
-                supernodes[a].cells.len(),
-                supernodes[b].cells[0],
-                supernodes[b].cells.len(),
-                through.len(),
-                needed,
-                third
-                    .iter()
-                    .map(|&o| {
-                        (
-                            supernodes[o].cells[0],
-                            supernodes[o].cells.len(),
-                            supernodes[o].tracks.intersection(&leavers).count(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            );
-        } else {
+        let forked = branch_collecting_leavers(
+            a,
+            b,
+            &supernodes,
+            &owner,
+            pairs,
+            section_worthy,
+            &leavers,
+            needed,
+        )
+        .is_some();
+        if !forked {
             uf.union(&a, &b);
         }
     }
@@ -1196,6 +1317,7 @@ fn detect_for_sport(
     config: &SectionConfig,
     tun: &Tunables,
     section_idx: &mut usize,
+    records: &mut Vec<BoundaryRecord>,
 ) -> Vec<FrequentSection> {
     if sport_tracks.len() < config.min_activities as usize {
         return Vec::new();
@@ -1229,10 +1351,10 @@ fn detect_for_sport(
     //    section. A cut whose branch never surfaces is invisible on the
     //    map: the corridor stops for no reason the athlete can see.
     // Absorbing and merging can promote a component, so iterate.
+    let mut worthy =
+        section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
     for _ in 0..5 {
         let before = supernodes.len();
-        let worthy =
-            section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
         supernodes = merge_non_fork_boundaries(
             supernodes,
             &coverage,
@@ -1241,8 +1363,11 @@ fn detect_for_sport(
             &worthy,
         );
         if supernodes.len() == before {
+            // Nothing merged, so `worthy` still describes exactly these
+            // components; the explanation pass below reuses it.
             break;
         }
+        worthy = section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
     }
 
     let mut sn_sizes: Vec<usize> = supernodes.iter().map(|s| s.cells.len()).collect();
@@ -1254,6 +1379,16 @@ fn detect_for_sport(
         supernodes.len(),
         sn_sizes.get(sn_sizes.len() / 2).copied().unwrap_or(0),
         sn_sizes.last().copied().unwrap_or(0),
+    );
+
+    // Every boundary that survived explains itself, as data.
+    explain_boundaries(
+        &supernodes,
+        &coverage,
+        divergence,
+        config.min_activities,
+        &worthy,
+        records,
     );
 
     let track_map: HashMap<&str, &[GpsPoint]> =
@@ -1324,14 +1459,18 @@ fn detect_for_sport(
             }
         }
         if total > 0 && near as f64 >= same_traffic * total as f64 {
-            log::debug!(
-                "[Unified] backoff {:?}({} cells, score {:.0}): {}/{} probe points already represented",
-                node.cells[0],
-                node.cells.len(),
-                score,
-                near,
-                total,
-            );
+            if let Some(probe) = probe {
+                let mid = probe[probe.len() / 2];
+                records.push(BoundaryRecord {
+                    latitude: mid.latitude,
+                    longitude: mid.longitude,
+                    reason: BoundaryReason::Backoff {
+                        represented: near as u32,
+                        probed: total as u32,
+                        score_metres: score,
+                    },
+                });
+            }
             continue;
         }
 
@@ -1443,6 +1582,18 @@ pub fn detect_sections_unified_tuned(
     config: &SectionConfig,
     tun: &Tunables,
 ) -> Vec<FrequentSection> {
+    detect_sections_unified_explained(tracks, sport_types, config, tun).sections
+}
+
+/// [`detect_sections_unified`] carrying its boundary records beside the
+/// sections: why each surviving cut exists and which candidates backed
+/// off, with the numbers that decided it.
+pub fn detect_sections_unified_explained(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+    tun: &Tunables,
+) -> UnifiedDetection {
     // Partition tracks per sport; sections never span sports.
     let mut by_sport: HashMap<&str, Vec<(&str, &[GpsPoint])>> = HashMap::new();
     for (id, pts) in tracks {
@@ -1457,15 +1608,24 @@ pub fn detect_sections_unified_tuned(
     sport_names.sort_unstable();
 
     let mut all_sections: Vec<FrequentSection> = Vec::new();
+    let mut boundaries: Vec<BoundaryRecord> = Vec::new();
     for sport in sport_names {
         let sport_tracks = &by_sport[sport];
         let mut idx = 0usize;
-        let sections = detect_for_sport(sport, sport_tracks, config, tun, &mut idx);
+        let sections =
+            detect_for_sport(sport, sport_tracks, config, tun, &mut idx, &mut boundaries);
         all_sections.extend(sections);
     }
 
-    info!("[Unified] {} sections total", all_sections.len());
-    all_sections
+    info!(
+        "[Unified] {} sections, {} boundary records",
+        all_sections.len(),
+        boundaries.len()
+    );
+    UnifiedDetection {
+        sections: all_sections,
+        boundaries,
+    }
 }
 
 #[cfg(test)]
