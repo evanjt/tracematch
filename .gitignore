@@ -10,6 +10,7 @@ target
 /*.log
 /*.geojson
 /*.md
+!/REFERENCES.md
 /sections/
 /sections_out/
 /sionrunning/

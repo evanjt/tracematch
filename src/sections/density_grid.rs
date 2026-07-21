@@ -139,7 +139,7 @@ fn intersection_size(a: &[u32], b: &[u32]) -> usize {
 
 /// Walk a track's points, find the longest contiguous run whose cells
 /// fall in `cell_set`. Returns `(start_idx, end_idx_exclusive, distance_m)`.
-fn longest_run_in_cells(
+pub(super) fn longest_run_in_cells(
     pts: &[GpsPoint],
     cell_set: &HashSet<(i32, i32)>,
     grid: &CellGrid,

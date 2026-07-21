@@ -1,0 +1,1311 @@
+//! Unified-detector validation lab.
+//!
+//! Runs every detection method over a real GPX corpus, per sport, and
+//! reports the metrics that matter for the unified-detector work:
+//! section counts, length distribution, per-activity load, low-visit
+//! share, overlapping-pair count, runtime, and peak memory. Writes one
+//! GeoJSON per method+sport for visual inspection.
+//!
+//!     cargo run --release --example unified_lab -- \
+//!         ~/projects/personal/intervals/tracematch/sionrunning \
+//!         --out ~/projects/personal/intervals/tracematch/unified-lab
+//!
+//! Optional flags:
+//!     --sport Run          only this sport (default: all sports found)
+//!     --method density     only this method (density|corridor|flow)
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use tracematch::{
+    DetectionProgressCallback, Direction, FrequentSection, GpsPoint, MatchConfig, RouteSignature,
+    SectionConfig, geo_utils::haversine_distance, matching::resample_route,
+};
+
+#[path = "common/corpus.rs"]
+mod corpus;
+use corpus::{PhaseTimer, fmt_ms};
+
+// ---------------------------------------------------------------- loading
+
+struct Activity {
+    id: String,
+    sport: String,
+    date: String,
+    points: Vec<GpsPoint>,
+}
+
+/// Parse a GPX file capturing lat/lon plus the `<ele>` that follows each
+/// trkpt on the next line, and the metadata `<time>` as the activity date.
+fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, String) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return (Vec::new(), String::new()),
+    };
+
+    let mut date = String::new();
+    let mut points: Vec<GpsPoint> = Vec::new();
+    let mut pending: Option<(f64, f64)> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if date.is_empty()
+            && let Some(start) = trimmed.find("<time>")
+            && let Some(end) = trimmed.find("</time>")
+            && start + 6 <= end
+        {
+            date = trimmed[start + 6..end].to_string();
+        }
+
+        if trimmed.contains("<trkpt") {
+            // Flush a trkpt that never received an <ele>.
+            if let Some((lat, lon)) = pending.take() {
+                points.push(GpsPoint::new(lat, lon));
+            }
+            if let (Some(lat_start), Some(lon_start)) = (trimmed.find("lat=\""), trimmed.find("lon=\""))
+                && let (Some(lat_end), Some(lon_end)) = (
+                    trimmed[lat_start + 5..].find('"'),
+                    trimmed[lon_start + 5..].find('"'),
+                )
+                && let (Ok(lat), Ok(lon)) = (
+                    trimmed[lat_start + 5..lat_start + 5 + lat_end].parse::<f64>(),
+                    trimmed[lon_start + 5..lon_start + 5 + lon_end].parse::<f64>(),
+                )
+            {
+                pending = Some((lat, lon));
+            }
+        } else if let Some((lat, lon)) = pending
+            && let Some(start) = trimmed.find("<ele>")
+            && let Some(end) = trimmed.find("</ele>")
+            && start + 5 <= end
+        {
+            let ele = trimmed[start + 5..end].parse::<f64>().ok();
+            points.push(match ele {
+                Some(e) => GpsPoint::with_elevation(lat, lon, e),
+                None => GpsPoint::new(lat, lon),
+            });
+            pending = None;
+        }
+    }
+    if let Some((lat, lon)) = pending.take() {
+        points.push(GpsPoint::new(lat, lon));
+    }
+    (points, date)
+}
+
+/// Derive a sport type from the activity file name (Sion corpus naming,
+/// English + French).
+fn sport_from_name(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("cycl") || lower.contains("ride") || lower.contains("vélo") {
+        "Ride"
+    } else if lower.contains("run") || lower.contains("course") {
+        "Run"
+    } else if lower.contains("hik") || lower.contains("walk") || lower.contains("march") {
+        "Walk"
+    } else {
+        "Other"
+    }
+}
+
+/// Optional `_meta.json` sidecar written by the corpus scraper: authoritative
+/// intervals.icu type and local start date per activity id. Filename keyword
+/// inference stays as the fallback for corpora without one.
+fn load_meta(dir: &Path) -> HashMap<String, (String, String)> {
+    let Ok(content) = std::fs::read_to_string(dir.join("_meta.json")) else {
+        return HashMap::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return HashMap::new();
+    };
+    let Some(map) = v.as_object() else {
+        return HashMap::new();
+    };
+    map.iter()
+        .map(|(id, m)| {
+            let bucket = match m.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "Run" | "TrailRun" | "VirtualRun" => "Run",
+                "Ride" | "GravelRide" | "MountainBikeRide" | "VirtualRide" => "Ride",
+                "Walk" | "Hike" | "Snowshoe" => "Walk",
+                "OpenWaterSwim" | "Swim" => "Swim",
+                "Snowboard" | "AlpineSki" | "NordicSki" | "BackcountrySki" => "Snow",
+                _ => "Other",
+            };
+            let date = m
+                .get("date")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            (id.clone(), (bucket.to_string(), date))
+        })
+        .collect()
+}
+
+fn load_corpus(dir: &Path) -> Vec<Activity> {
+    let meta = load_meta(dir);
+    let mut activities = Vec::new();
+    let entries = std::fs::read_dir(dir).expect("read_dir");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "gpx") {
+            continue;
+        }
+        let (points, date) = load_gpx_full(&path);
+        if points.len() < 50 {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let aid = name.split('_').next().unwrap_or("");
+        let (sport, date) = match meta.get(aid) {
+            Some((bucket, meta_date)) => (
+                bucket.clone(),
+                if meta_date.is_empty() { date } else { meta_date.clone() },
+            ),
+            None => (sport_from_name(&name).to_string(), date),
+        };
+        activities.push(Activity {
+            id: name,
+            sport,
+            date,
+            points,
+        });
+    }
+    // Chronological, so incremental experiments can replay history.
+    activities.sort_by(|a, b| a.date.cmp(&b.date));
+    activities
+}
+
+// ---------------------------------------------------------------- metrics
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted[idx]
+}
+
+/// Fraction of `a`'s resampled points within `threshold` metres of any of
+/// `b`'s resampled points. cos(lat)-corrected planar distance.
+fn containment(a: &[GpsPoint], b: &[GpsPoint], threshold_m: f64) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let ref_lat = a[0].latitude.to_radians();
+    let m_per_deg_lat = 111_000.0;
+    let m_per_deg_lng = 111_000.0 * ref_lat.cos();
+    let thr2 = threshold_m * threshold_m;
+    let mut hits = 0usize;
+    for p in a {
+        let mut near = false;
+        for q in b {
+            let dx = (p.longitude - q.longitude) * m_per_deg_lng;
+            let dy = (p.latitude - q.latitude) * m_per_deg_lat;
+            if dx * dx + dy * dy <= thr2 {
+                near = true;
+                break;
+            }
+        }
+        if near {
+            hits += 1;
+        }
+    }
+    hits as f64 / a.len() as f64
+}
+
+/// Fraction of a polyline's length that re-covers ground it already
+/// covered (laps, doubled-back legs). A clean single-pass section ≈ 0.
+fn self_overlap_frac(polyline: &[GpsPoint]) -> f64 {
+    if polyline.len() < 3 {
+        return 0.0;
+    }
+    let target = ((polyline_len(polyline) / 25.0).ceil() as usize).clamp(3, 2000);
+    let pts = resample_route(polyline, target);
+    let ref_lat = pts[0].latitude.to_radians();
+    let m_lat = 111_000.0;
+    let m_lng = 111_000.0 * ref_lat.cos();
+    let cell = 30.0;
+    let mut last_visit: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut dup = 0.0;
+    let mut total = 0.0;
+    for (i, p) in pts.iter().enumerate() {
+        let c = (
+            (p.latitude * m_lat / cell).floor() as i32,
+            (p.longitude * m_lng / cell).floor() as i32,
+        );
+        let seg = if i > 0 {
+            let dx = (p.longitude - pts[i - 1].longitude) * m_lng;
+            let dy = (p.latitude - pts[i - 1].latitude) * m_lat;
+            (dx * dx + dy * dy).sqrt()
+        } else {
+            0.0
+        };
+        total += seg;
+        if matches!(last_visit.get(&c), Some(&j) if i - j > 5) {
+            dup += seg;
+        }
+        last_visit.insert(c, i);
+    }
+    if total > 0.0 { dup / total } else { 0.0 }
+}
+
+fn polyline_len(pts: &[GpsPoint]) -> f64 {
+    tracematch::matching::calculate_route_distance(pts)
+}
+
+struct MethodReport {
+    method: String,
+    sport: String,
+    n_sections: usize,
+    len_median: f64,
+    len_p90: f64,
+    len_max: f64,
+    visits_median: f64,
+    low_visit_share: f64,
+    per_activity_avg: f64,
+    per_activity_max: usize,
+    overlap_pairs: usize,
+    selfdup_count: usize,
+    selfdup_max: f64,
+    runtime_ms: u128,
+}
+
+fn analyse(
+    method: &str,
+    sport: &str,
+    sections: &[FrequentSection],
+    n_activities: usize,
+    runtime_ms: u128,
+) -> MethodReport {
+    let mut lens: Vec<f64> = sections.iter().map(|s| s.distance_meters).collect();
+    lens.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let mut visits: Vec<f64> = sections.iter().map(|s| s.visit_count as f64).collect();
+    visits.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let low_visit = sections.iter().filter(|s| s.visit_count <= 2).count();
+
+    // Per-activity section load.
+    let mut per_activity: HashMap<&str, usize> = HashMap::new();
+    for s in sections {
+        for aid in &s.activity_ids {
+            *per_activity.entry(aid.as_str()).or_default() += 1;
+        }
+    }
+    let per_activity_max = per_activity.values().copied().max().unwrap_or(0);
+    let per_activity_avg = if n_activities > 0 {
+        per_activity.values().sum::<usize>() as f64 / n_activities as f64
+    } else {
+        0.0
+    };
+
+    // Overlapping pairs: resample every polyline to ~50m spacing, then
+    // count pairs where either direction containment exceeds 30%.
+    let resampled: Vec<Vec<GpsPoint>> = sections
+        .iter()
+        .map(|s| {
+            let target = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+            resample_route(&s.polyline, target)
+        })
+        .collect();
+    let mut overlap_pairs = 0usize;
+    for i in 0..resampled.len() {
+        for j in (i + 1)..resampled.len() {
+            let c_ij = containment(&resampled[i], &resampled[j], 60.0);
+            if c_ij > 0.3 || containment(&resampled[j], &resampled[i], 60.0) > 0.3 {
+                overlap_pairs += 1;
+            }
+            let _ = c_ij;
+        }
+    }
+
+    let selfdups: Vec<f64> = sections
+        .iter()
+        .map(|s| self_overlap_frac(&s.polyline))
+        .collect();
+    let selfdup_count = selfdups.iter().filter(|&&f| f > 0.2).count();
+    let selfdup_max = selfdups.iter().cloned().fold(0.0, f64::max);
+    for (s, f) in sections.iter().zip(&selfdups) {
+        if *f > 0.08 {
+            eprintln!(
+                "    [selfdup] {} {:.0}% len={:.0}m visits={} rep={}",
+                s.id,
+                f * 100.0,
+                s.distance_meters,
+                s.visit_count,
+                s.representative_activity_id
+            );
+        }
+    }
+
+    MethodReport {
+        method: method.to_string(),
+        sport: sport.to_string(),
+        n_sections: sections.len(),
+        len_median: percentile(&lens, 0.5),
+        len_p90: percentile(&lens, 0.9),
+        len_max: lens.last().copied().unwrap_or(0.0),
+        visits_median: percentile(&visits, 0.5),
+        low_visit_share: if sections.is_empty() {
+            0.0
+        } else {
+            low_visit as f64 / sections.len() as f64
+        },
+        per_activity_avg,
+        per_activity_max,
+        overlap_pairs,
+        selfdup_count,
+        selfdup_max,
+        runtime_ms,
+    }
+}
+
+// ---------------------------------------------------------------- geojson
+
+fn geojson_for_sections(
+    sections: &[FrequentSection],
+    ranks: Option<&HashMap<String, RankFeatures>>,
+) -> serde_json::Value {
+    let features: Vec<serde_json::Value> = sections
+        .iter()
+        .map(|s| {
+            let coords: Vec<[f64; 2]> = s
+                .polyline
+                .iter()
+                .map(|p| [p.longitude, p.latitude])
+                .collect();
+            let gap_m = match (s.polyline.first(), s.polyline.last()) {
+                (Some(a), Some(b)) => tracematch::geo_utils::haversine_distance(a, b),
+                _ => 0.0,
+            };
+            let mut props = serde_json::json!({
+                "id": s.id,
+                "anchor": s.polyline.first().map(|p| format!("{:.4},{:.4}", p.latitude, p.longitude)),
+                "visits": s.visit_count,
+                "distance_m": s.distance_meters.round(),
+                "confidence": s.confidence,
+                "activities": s.activity_ids.len(),
+                "self_overlap": (self_overlap_frac(&s.polyline) * 100.0).round() / 100.0,
+                "gap_m": gap_m.round(),
+            });
+            if let Some(r) = ranks.and_then(|m| m.get(&s.id))
+                && let Some(obj) = props.as_object_mut()
+            {
+                let round2 = |v: f64| (v * 100.0).round() / 100.0;
+                obj.insert("score".into(), serde_json::json!(round2(r.score)));
+                obj.insert("apex".into(), serde_json::json!(round2(r.apex)));
+                obj.insert("grade_pct".into(), serde_json::json!(round2(r.grade)));
+                obj.insert("months".into(), serde_json::json!(r.months));
+                obj.insert("sinuosity".into(), serde_json::json!(round2(r.sinuosity)));
+                obj.insert("converge".into(), serde_json::json!(round2(r.converge)));
+                obj.insert("oneway".into(), serde_json::json!(round2(r.oneway)));
+            }
+            serde_json::json!({
+                "type": "Feature",
+                "geometry": { "type": "LineString", "coordinates": coords },
+                "properties": props,
+            })
+        })
+        .collect();
+    serde_json::json!({ "type": "FeatureCollection", "features": features })
+}
+
+// ---------------------------------------------------------- interestingness
+
+/// Per-section interestingness features, computed purely from the corpus.
+/// The score ranks and labels. It never feeds boundary detection and never
+/// overrides the support floor.
+///
+/// Grounding (full citations in REFERENCES.md): detours reveal value
+/// (Salazar Miranda et al., Comput. Environ. Urban Syst. 2021; Quercia et
+/// al., ACM Hypertext 2014; leisure detour magnitudes, Land 2024 13(5):589),
+/// challenge and accomplishment motives (Transp. Policy 2017; J. Outdoor
+/// Recreat. Tour. 2024), flow needs clear goals and challenge (Psychol.
+/// Sport Exerc. 2018 and 2022), attachment grows with repetition (Front.
+/// Psychol. 2019).
+#[derive(Clone)]
+struct RankFeatures {
+    /// Mean share of the outing's roam at which the section sits. Ground
+    /// near the far point of its outings was the point of going out.
+    apex: f64,
+    /// Max sustained absolute gradient (%) held over at least 300 m, the
+    /// climb-detection convention for "a climb, not a spike".
+    grade: f64,
+    /// Distinct calendar months with a visit. Sustained return, not burst.
+    months: u32,
+    /// 1 minus chord/arc. Loops and winding ground score high.
+    sinuosity: f64,
+    /// Effective number of approach and leave directions (exp of bearing
+    /// entropy over 45 degree sectors). Converged-upon ground is sought out.
+    converge: f64,
+    /// |same - reverse| / traversals. Descents and circuits read one-way.
+    oneway: f64,
+    /// Equal-weight mean of the six percentile ranks within the catalogue.
+    score: f64,
+}
+
+fn bearing_deg(a: &GpsPoint, b: &GpsPoint) -> f64 {
+    let (la, lb) = (a.latitude.to_radians(), b.latitude.to_radians());
+    let dl = (b.longitude - a.longitude).to_radians();
+    let y = dl.sin() * lb.cos();
+    let x = la.cos() * lb.sin() - la.sin() * lb.cos() * dl.cos();
+    (y.atan2(x).to_degrees() + 360.0) % 360.0
+}
+
+/// Walk back from `from` until `dist` metres of trace have accumulated.
+/// None when the trace ends first (the traversal starts at the edge).
+fn point_at_distance_back(pts: &[GpsPoint], from: usize, dist: f64) -> Option<GpsPoint> {
+    let mut acc = 0.0;
+    let mut i = from;
+    while i > 0 {
+        acc += haversine_distance(&pts[i - 1], &pts[i]);
+        i -= 1;
+        if acc >= dist {
+            return Some(pts[i]);
+        }
+    }
+    None
+}
+
+fn point_at_distance_fwd(pts: &[GpsPoint], from: usize, dist: f64) -> Option<GpsPoint> {
+    let mut acc = 0.0;
+    let mut i = from;
+    while i + 1 < pts.len() {
+        acc += haversine_distance(&pts[i], &pts[i + 1]);
+        i += 1;
+        if acc >= dist {
+            return Some(pts[i]);
+        }
+    }
+    None
+}
+
+fn max_sustained_grade(polyline: &[GpsPoint]) -> f64 {
+    const SUSTAIN_M: f64 = 300.0;
+    let n = polyline.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut cum = vec![0.0f64; n];
+    for i in 1..n {
+        cum[i] = cum[i - 1] + haversine_distance(&polyline[i - 1], &polyline[i]);
+    }
+    let ele: Vec<Option<f64>> = polyline.iter().map(|p| p.elevation).collect();
+    if ele.iter().flatten().count() < 2 {
+        return 0.0;
+    }
+    // Light smoothing so single-point elevation spikes cannot fake a grade.
+    let smooth: Vec<Option<f64>> = (0..n)
+        .map(|i| {
+            let (mut s, mut c) = (0.0, 0u32);
+            for e in ele[i.saturating_sub(1)..=(i + 1).min(n - 1)].iter().flatten() {
+                s += e;
+                c += 1;
+            }
+            if c > 0 { Some(s / c as f64) } else { None }
+        })
+        .collect();
+    let total = cum[n - 1];
+    let window = SUSTAIN_M.min(total.max(1.0));
+    let mut best = 0.0f64;
+    let mut j = 0usize;
+    for i in 0..n {
+        if cum[i] + window > total + 1e-9 {
+            break;
+        }
+        if j < i {
+            j = i;
+        }
+        while j < n - 1 && cum[j] - cum[i] < window {
+            j += 1;
+        }
+        if let (Some(a), Some(b)) = (smooth[i], smooth[j]) {
+            let d = cum[j] - cum[i];
+            if d > 1.0 {
+                best = best.max((b - a).abs() / d * 100.0);
+            }
+        }
+    }
+    best
+}
+
+fn rank_sections(
+    sections: &[FrequentSection],
+    by_id: &HashMap<&str, &Activity>,
+    proximity: f64,
+) -> Vec<(String, RankFeatures)> {
+    let mut feats: Vec<(String, RankFeatures)> = Vec::new();
+    for s in sections {
+        let mut apex_vals: Vec<f64> = Vec::new();
+        let mut sectors = [0usize; 8];
+        let (mut same, mut rev) = (0usize, 0usize);
+        let mut months: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for aid in &s.activity_ids {
+            if !seen.insert(aid.as_str()) {
+                continue;
+            }
+            let Some(act) = by_id.get(aid.as_str()) else {
+                continue;
+            };
+            let pts = &act.points;
+            if pts.len() < 2 {
+                continue;
+            }
+            let traversals = tracematch::find_all_track_portions(pts, &s.polyline, proximity);
+            if traversals.is_empty() {
+                continue;
+            }
+            if act.date.len() >= 7 {
+                months.insert(act.date[..7].to_string());
+            }
+            let start = &pts[0];
+            let roam = pts
+                .iter()
+                .step_by(10)
+                .map(|p| haversine_distance(start, p))
+                .fold(0.0, f64::max);
+            // One apex sample per activity: laps of the same ground sit in
+            // the same place on the outing.
+            let (st, en, _) = traversals[0];
+            let mid = &pts[(st + en) / 2];
+            if roam > 50.0 {
+                apex_vals.push((haversine_distance(start, mid) / roam).min(1.0));
+            }
+            for &(st, en, dir) in &traversals {
+                match dir {
+                    Direction::Same => same += 1,
+                    Direction::Reverse => rev += 1,
+                    _ => {}
+                }
+                // Approach and leave bearings taken one matching tolerance
+                // out. Traversals at the trace edge contribute none.
+                if let Some(p) = point_at_distance_back(pts, st, proximity) {
+                    let b = bearing_deg(&p, &pts[st]);
+                    sectors[(((b + 22.5) % 360.0) / 45.0) as usize % 8] += 1;
+                }
+                if en < pts.len()
+                    && let Some(p) = point_at_distance_fwd(pts, en.min(pts.len() - 1), proximity)
+                {
+                    let b = bearing_deg(&pts[en.min(pts.len() - 1)], &p);
+                    sectors[(((b + 22.5) % 360.0) / 45.0) as usize % 8] += 1;
+                }
+            }
+        }
+        let apex = if apex_vals.is_empty() {
+            0.0
+        } else {
+            apex_vals.iter().sum::<f64>() / apex_vals.len() as f64
+        };
+        let total_b: usize = sectors.iter().sum();
+        let converge = if total_b == 0 {
+            1.0
+        } else {
+            sectors
+                .iter()
+                .filter(|&&c| c > 0)
+                .map(|&c| {
+                    let p = c as f64 / total_b as f64;
+                    -p * p.ln()
+                })
+                .sum::<f64>()
+                .exp()
+        };
+        let trav_total = same + rev;
+        let oneway = if trav_total == 0 {
+            0.0
+        } else {
+            (same as f64 - rev as f64).abs() / trav_total as f64
+        };
+        let chord = match (s.polyline.first(), s.polyline.last()) {
+            (Some(a), Some(b)) => haversine_distance(a, b),
+            _ => 0.0,
+        };
+        let sinuosity = (1.0 - chord / s.distance_meters.max(1.0)).clamp(0.0, 1.0);
+        feats.push((
+            s.id.clone(),
+            RankFeatures {
+                apex,
+                grade: max_sustained_grade(&s.polyline),
+                months: months.len() as u32,
+                sinuosity,
+                converge,
+                oneway,
+                score: 0.0,
+            },
+        ));
+    }
+
+    // Percentile-normalise each feature within the catalogue, equal weights,
+    // ties get their average rank.
+    let n = feats.len();
+    if n > 1 {
+        let cols: [fn(&RankFeatures) -> f64; 6] = [
+            |f| f.apex,
+            |f| f.grade,
+            |f| f.months as f64,
+            |f| f.sinuosity,
+            |f| f.converge,
+            |f| f.oneway,
+        ];
+        let mut pct_sum = vec![0.0f64; n];
+        for col in cols {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                col(&feats[a].1)
+                    .partial_cmp(&col(&feats[b].1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut i = 0;
+            while i < n {
+                let mut j = i;
+                while j + 1 < n
+                    && (col(&feats[order[j + 1]].1) - col(&feats[order[i]].1)).abs() < 1e-12
+                {
+                    j += 1;
+                }
+                let avg = (i + j) as f64 / 2.0 / (n - 1) as f64;
+                for k in i..=j {
+                    pct_sum[order[k]] += avg;
+                }
+                i = j + 1;
+            }
+        }
+        for (idx, f) in feats.iter_mut().enumerate() {
+            f.1.score = pct_sum[idx] / 6.0;
+        }
+    } else if n == 1 {
+        feats[0].1.score = 0.5;
+    }
+    feats.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    feats
+}
+
+fn write_ranking_md(
+    path: &Path,
+    sport: &str,
+    ranked: &[(String, RankFeatures)],
+    sections: &[FrequentSection],
+) {
+    let by_id: HashMap<&str, &FrequentSection> =
+        sections.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut out = String::new();
+    out.push_str(&format!("# Interestingness ranking: {}\n\n", sport));
+    out.push_str(
+        "Score = equal-weight mean of six percentile-normalised features.\n\
+         apex: share of outing roam at the section (was it the point of the ride).\n\
+         grade: max sustained gradient over 300 m. months: distinct visit months.\n\
+         sinu: 1 - chord/arc. conv: effective approach directions. 1way: direction purity.\n\n",
+    );
+    out.push_str("| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way |\n");
+    out.push_str("|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|\n");
+    for (i, (id, r)) in ranked.iter().enumerate() {
+        let (len_m, visits) = by_id
+            .get(id.as_str())
+            .map(|s| (s.distance_meters, s.visit_count))
+            .unwrap_or((0.0, 0));
+        out.push_str(&format!(
+            "| {} | {} | {:.2} | {:.0} | {} | {} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} |\n",
+            i + 1,
+            id,
+            r.score,
+            len_m,
+            visits,
+            r.months,
+            r.apex,
+            r.grade,
+            r.sinuosity,
+            r.converge,
+            r.oneway,
+        ));
+    }
+    std::fs::write(path, out).ok();
+}
+
+fn resample_sections(secs: &[FrequentSection]) -> Vec<Vec<GpsPoint>> {
+    secs.iter()
+        .map(|s| {
+            let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+            resample_route(&s.polyline, t)
+        })
+        .collect()
+}
+
+fn peak_rss_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|kb| kb.parse::<f64>().ok())
+        })
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------- main
+
+struct StderrLog;
+impl log::Log for StderrLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+static STDERR_LOG: StderrLog = StderrLog;
+
+fn main() {
+    log::set_logger(&STDERR_LOG).ok();
+    log::set_max_level(if std::env::var("LAB_DEBUG").is_ok() {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    });
+    let args: Vec<String> = std::env::args().collect();
+    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("sionrunning"));
+    let mut out_dir: Option<PathBuf> = None;
+    let mut only_sport: Option<String> = None;
+    let mut only_method: Option<String> = None;
+    let mut divergence: Option<f64> = None;
+    let mut stability = false;
+    let mut windows = false;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                out_dir = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--sport" => {
+                only_sport = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--method" => {
+                only_method = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--divergence" => {
+                divergence = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--stability" => {
+                stability = true;
+                i += 1;
+            }
+            "--windows" => {
+                windows = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    if !dir.exists() {
+        eprintln!("Directory not found: {}", dir.display());
+        return;
+    }
+
+    let t_load = Instant::now();
+    let activities = load_corpus(&dir);
+    println!(
+        "Loaded {} activities in {} ({} points, elevation on {:.0}%)",
+        activities.len(),
+        fmt_ms(t_load.elapsed().as_millis()),
+        activities.iter().map(|a| a.points.len()).sum::<usize>(),
+        100.0
+            * activities
+                .iter()
+                .filter(|a| a.points.first().is_some_and(|p| p.elevation.is_some()))
+                .count() as f64
+            / activities.len().max(1) as f64,
+    );
+
+    let mut sport_counts: HashMap<&str, usize> = HashMap::new();
+    for a in &activities {
+        *sport_counts.entry(a.sport.as_str()).or_default() += 1;
+    }
+    let mut sport_list: Vec<(&str, usize)> = sport_counts.into_iter().collect();
+    sport_list.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    println!("Sports: {:?}", sport_list);
+
+    // Pooled pass: the ground is sport-agnostic — a trace is a trace.
+    // "All" detects over every activity; sport filtering belongs to the
+    // comparison layer, not to detection.
+    let mut all_list: Vec<(&str, usize)> = sport_list.clone();
+    all_list.push(("All", activities.len()));
+
+    let mut section_config = SectionConfig::default();
+    if let Some(d) = divergence {
+        section_config.divergence_threshold = d;
+    }
+    let match_config = MatchConfig::default();
+    let mut reports: Vec<MethodReport> = Vec::new();
+    let activities_by_id: HashMap<&str, &Activity> =
+        activities.iter().map(|a| (a.id.as_str(), a)).collect();
+
+    for (sport, n) in &all_list {
+        if let Some(ref s) = only_sport
+            && s != sport
+        {
+            continue;
+        }
+        if *sport != "All" && (*sport == "Other" || *n < 5) {
+            continue;
+        }
+
+        let tracks: Vec<(String, Vec<GpsPoint>)> = activities
+            .iter()
+            .filter(|a| *sport == "All" || a.sport == *sport)
+            .map(|a| (a.id.clone(), a.points.clone()))
+            .collect();
+        let sport_types: HashMap<String, String> = tracks
+            .iter()
+            .map(|(id, _)| (id.clone(), sport.to_string()))
+            .collect();
+
+        println!();
+        println!("=== {} ({} activities) ===", sport, tracks.len());
+
+        // Route grouping (needed by the density path; also a baseline
+        // stat). Meaningless pooled — routes stay within a sport.
+        let groups = if *sport == "All" {
+            Vec::new()
+        } else {
+            let t_group = Instant::now();
+            let signatures: Vec<RouteSignature> = tracks
+                .iter()
+                .filter_map(|(id, pts)| RouteSignature::from_points(id, pts, &match_config))
+                .collect();
+            let groups = tracematch::group_signatures_parallel(&signatures, &match_config);
+            let singleton = groups.iter().filter(|g| g.activity_ids.len() == 1).count();
+            println!(
+                "Route groups: {} ({} singletons), {}",
+                groups.len(),
+                singleton,
+                fmt_ms(t_group.elapsed().as_millis())
+            );
+            groups
+        };
+
+        let run_method = |name: &str| -> Option<(Vec<FrequentSection>, u128)> {
+            if let Some(ref m) = only_method
+                && m != name
+            {
+                return None;
+            }
+            let t = Instant::now();
+            let sections = match name {
+                "density" => {
+                    let timer = Arc::new(PhaseTimer::new());
+                    tracematch::detect_sections_multiscale_with_progress(
+                        &tracks,
+                        &sport_types,
+                        &groups,
+                        &section_config,
+                        timer as Arc<dyn DetectionProgressCallback>,
+                    )
+                    .sections
+                }
+                "corridor" => {
+                    tracematch::detect_sections_corridor(&tracks, &sport_types, &section_config)
+                }
+                "flow" => {
+                    tracematch::detect_sections_flow_graph(&tracks, &sport_types, &section_config)
+                }
+                "unified" => {
+                    tracematch::detect_sections_unified(&tracks, &sport_types, &section_config)
+                }
+                _ => return None,
+            };
+            Some((sections, t.elapsed().as_millis()))
+        };
+
+        for method in ["density", "corridor", "flow", "unified"] {
+            if *sport == "All" && method != "unified" {
+                continue;
+            }
+            if let Some((sections, ms)) = run_method(method) {
+                let report = analyse(method, sport, &sections, tracks.len(), ms);
+                println!(
+                    "  {:<9} {:>4} sections  median {:>6.0}m  p90 {:>7.0}m  visits med {:>3.0}  \
+                     ≤2-visit {:>3.0}%  per-act avg {:>4.1} max {:>3}  overlap pairs {:>4}  \
+                     selfdup {:>2} (max {:>3.0}%)  {}",
+                    report.method,
+                    report.n_sections,
+                    report.len_median,
+                    report.len_p90,
+                    report.visits_median,
+                    report.low_visit_share * 100.0,
+                    report.per_activity_avg,
+                    report.per_activity_max,
+                    report.overlap_pairs,
+                    report.selfdup_count,
+                    report.selfdup_max * 100.0,
+                    fmt_ms(report.runtime_ms),
+                );
+                let ranks: Option<HashMap<String, RankFeatures>> = if method == "unified" {
+                    let ranked = rank_sections(
+                        &sections,
+                        &activities_by_id,
+                        section_config.proximity_threshold,
+                    );
+                    for (i, (id, r)) in ranked.iter().take(10).enumerate() {
+                        let len_m = sections
+                            .iter()
+                            .find(|s| s.id == *id)
+                            .map(|s| s.distance_meters)
+                            .unwrap_or(0.0);
+                        println!(
+                            "    rank {:>2}  {}  score {:.2}  {:.0}m  months {}  apex {:.2}  \
+                             grade {:.1}%  sinu {:.2}  conv {:.1}  1way {:.2}",
+                            i + 1,
+                            id,
+                            r.score,
+                            len_m,
+                            r.months,
+                            r.apex,
+                            r.grade,
+                            r.sinuosity,
+                            r.converge,
+                            r.oneway,
+                        );
+                    }
+                    if let Some(ref out) = out_dir {
+                        std::fs::create_dir_all(out).ok();
+                        let path = out.join(format!("{}_ranking.md", sport.to_lowercase()));
+                        write_ranking_md(&path, sport, &ranked, &sections);
+                        println!("            ranking → {}", path.display());
+                    }
+                    Some(ranked.into_iter().collect())
+                } else {
+                    None
+                };
+                if let Some(ref out) = out_dir {
+                    std::fs::create_dir_all(out).ok();
+                    let path = out.join(format!("{}_{}.geojson", sport.to_lowercase(), method));
+                    std::fs::write(
+                        &path,
+                        serde_json::to_string(&geojson_for_sections(&sections, ranks.as_ref()))
+                            .unwrap(),
+                    )
+                    .ok();
+                    println!("            geojson → {}", path.display());
+                }
+                reports.push(report);
+            }
+        }
+    }
+
+    // --- Loading-window replay (pooled) ---------------------------------
+    // Veloq's first load syncs recent history and backfills older data
+    // later. Replay that: detect on the last 90 d / 6 mo / 1 y / 2 y /
+    // everything, each window ending at the newest activity, and measure
+    // how the catalogue reshapes as history arrives. Persistence uses the
+    // jackknife definition: 1:1 containment of at least 50% within 60 m.
+    if windows {
+        let day_of = |date: &str| -> Option<i64> {
+            let y: i64 = date.get(0..4)?.parse().ok()?;
+            let m: i64 = date.get(5..7)?.parse().ok()?;
+            let d: i64 = date.get(8..10)?.parse().ok()?;
+            let yy = if m <= 2 { y - 1 } else { y };
+            let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+            let yoe = yy - era * 400;
+            let mp = (m + 9) % 12;
+            let doy = (153 * mp + 2) / 5 + d - 1;
+            Some(era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy)
+        };
+        let newest = activities
+            .iter()
+            .filter_map(|a| day_of(&a.date))
+            .max()
+            .unwrap_or(0);
+        let spans: [(&str, i64); 5] = [
+            ("90d", 90),
+            ("6mo", 183),
+            ("1y", 365),
+            ("2y", 730),
+            ("all", i64::MAX),
+        ];
+        println!();
+        println!("=== Loading-window replay (pooled, anchored at the newest activity) ===");
+        let mut runs: Vec<(&str, usize, Vec<FrequentSection>, u128)> = Vec::new();
+        for (label, days) in spans {
+            let tracks: Vec<(String, Vec<GpsPoint>)> = activities
+                .iter()
+                .filter(|a| {
+                    days == i64::MAX || day_of(&a.date).is_some_and(|d| newest - d < days)
+                })
+                .map(|a| (a.id.clone(), a.points.clone()))
+                .collect();
+            let types: HashMap<String, String> = tracks
+                .iter()
+                .map(|(id, _)| (id.clone(), "All".to_string()))
+                .collect();
+            let t = Instant::now();
+            let sections = tracematch::detect_sections_unified(&tracks, &types, &section_config);
+            runs.push((label, tracks.len(), sections, t.elapsed().as_millis()));
+        }
+        let rs_all: Vec<Vec<Vec<GpsPoint>>> =
+            runs.iter().map(|(_, _, s, _)| resample_sections(s)).collect();
+        let survival = |from: &[Vec<GpsPoint>], into: &[Vec<GpsPoint>]| -> f64 {
+            if from.is_empty() {
+                return 1.0;
+            }
+            from.iter()
+                .filter(|f| into.iter().any(|o| containment(f, o, 60.0) >= 0.5))
+                .count() as f64
+                / from.len() as f64
+        };
+        let last = runs.len() - 1;
+        for (i, (label, n_acts, sections, ms)) in runs.iter().enumerate() {
+            let into_next = if i < last {
+                survival(&rs_all[i], &rs_all[i + 1])
+            } else {
+                1.0
+            };
+            let into_full = survival(&rs_all[i], &rs_all[last]);
+            let of_full = survival(&rs_all[last], &rs_all[i]);
+            println!(
+                "  {:<4} {:>5} acts  {:>4} sections  {:>7}  survive→next {:>3.0}%  \
+                 survive→full {:>3.0}%  of-final-already-present {:>3.0}%",
+                label,
+                n_acts,
+                sections.len(),
+                fmt_ms(*ms),
+                into_next * 100.0,
+                into_full * 100.0,
+                of_full * 100.0,
+            );
+        }
+
+        // Reference evolution across horizons: for sections that persist
+        // into the next window, does the chosen real trace change, and how
+        // far does the extent move? Measures how alive an unpinned section
+        // would be under history growth.
+        println!();
+        println!("  reference evolution between consecutive windows (matched sections):");
+        for i in 0..last {
+            let (la, _, sa, _) = &runs[i];
+            let (lb, _, sb, _) = &runs[i + 1];
+            let rb = &rs_all[i + 1];
+            let mut matched = 0usize;
+            let mut same_ref = 0usize;
+            let mut len_deltas: Vec<f64> = Vec::new();
+            for (si, s) in sa.iter().enumerate() {
+                let mut best: Option<(usize, f64)> = None;
+                for (oi, o) in rb.iter().enumerate() {
+                    let c = containment(&rs_all[i][si], o, 60.0);
+                    if c >= 0.5 && best.is_none_or(|(_, bc)| c > bc) {
+                        best = Some((oi, c));
+                    }
+                }
+                if let Some((oi, _)) = best {
+                    matched += 1;
+                    if sb[oi].representative_activity_id == s.representative_activity_id {
+                        same_ref += 1;
+                    }
+                    len_deltas.push(
+                        (sb[oi].distance_meters - s.distance_meters).abs()
+                            / s.distance_meters.max(1.0),
+                    );
+                }
+            }
+            len_deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let med = len_deltas.get(len_deltas.len() / 2).copied().unwrap_or(0.0);
+            println!(
+                "    {:>4}→{:<4} matched {:>3}  same reference {:>3.0}%  median extent delta {:>3.0}%",
+                la,
+                lb,
+                matched,
+                if matched > 0 {
+                    same_ref as f64 / matched as f64 * 100.0
+                } else {
+                    0.0
+                },
+                med * 100.0,
+            );
+        }
+    }
+
+    // --- Stability experiments (unified only) ---------------------------
+    if stability {
+        for (sport, n) in &all_list {
+            if *sport != "All" && (*sport == "Other" || *n < 20) {
+                continue;
+            }
+            if let Some(ref s) = only_sport
+                && s != sport
+            {
+                continue;
+            }
+            let sport_acts: Vec<&Activity> = activities
+                .iter()
+                .filter(|a| *sport == "All" || a.sport == *sport)
+                .collect();
+            let full_tracks: Vec<(String, Vec<GpsPoint>)> = sport_acts
+                .iter()
+                .map(|a| (a.id.clone(), a.points.clone()))
+                .collect();
+            let types = |ts: &[(String, Vec<GpsPoint>)]| -> HashMap<String, String> {
+                ts.iter()
+                    .map(|(id, _)| (id.clone(), sport.to_string()))
+                    .collect()
+            };
+            let detect = |ts: &[(String, Vec<GpsPoint>)]| -> Vec<FrequentSection> {
+                tracematch::detect_sections_unified(ts, &types(ts), &section_config)
+            };
+
+            let full = detect(&full_tracks);
+            let resample_all = |secs: &[FrequentSection]| -> Vec<Vec<GpsPoint>> {
+                secs.iter()
+                    .map(|s| {
+                        let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+                        resample_route(&s.polyline, t)
+                    })
+                    .collect()
+            };
+            let full_rs = resample_all(&full);
+
+            // A section "persists" if some single section in the other
+            // run contains ≥50% of it within 60 m (same partitioning).
+            let persistence = |other: &[FrequentSection]| -> f64 {
+                if full.is_empty() {
+                    return 0.0;
+                }
+                let other_rs = resample_all(other);
+                let survived = full_rs
+                    .iter()
+                    .filter(|f| other_rs.iter().any(|o| containment(f, o, 60.0) >= 0.5))
+                    .count();
+                survived as f64 / full_rs.len() as f64
+            };
+
+            // Ground retained: fraction of the full catalogue's length
+            // still covered by SOME section in the other run. Separates
+            // "same ground, cut differently" from "ground lost".
+            let ground = |other: &[FrequentSection]| -> f64 {
+                if full_rs.is_empty() {
+                    return 0.0;
+                }
+                let other_rs = resample_all(other);
+                let mut covered = 0usize;
+                let mut total = 0usize;
+                for f in &full_rs {
+                    for p in f {
+                        total += 1;
+                        if other_rs.iter().any(|o| {
+                            o.iter().any(|q| {
+                                let m_lng = 111_000.0 * q.latitude.to_radians().cos();
+                                let dx = (p.longitude - q.longitude) * m_lng;
+                                let dy = (p.latitude - q.latitude) * 111_000.0;
+                                dx * dx + dy * dy <= 60.0 * 60.0
+                            })
+                        }) {
+                            covered += 1;
+                        }
+                    }
+                }
+                if total > 0 {
+                    covered as f64 / total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            // Jackknife: drop every 10th activity (deterministic).
+            let jk: Vec<(String, Vec<GpsPoint>)> = full_tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % 10 != 0)
+                .map(|(_, t)| t.clone())
+                .collect();
+            let jk_sections = detect(&jk);
+            let jk_persist = persistence(&jk_sections);
+
+            // Chronological prefixes (activities are date-sorted).
+            let prefix = |frac: f64| -> Vec<(String, Vec<GpsPoint>)> {
+                let k = ((full_tracks.len() as f64) * frac).round() as usize;
+                full_tracks[..k.max(1)].to_vec()
+            };
+            let half = detect(&prefix(0.5));
+            let three_q = detect(&prefix(0.75));
+            // Growth stability: what fraction of the half-corpus catalogue
+            // still exists (per containment) in the full catalogue?
+            let growth_half = {
+                if half.is_empty() {
+                    1.0
+                } else {
+                    let half_rs = resample_all(&half);
+                    let survived = half_rs
+                        .iter()
+                        .filter(|h| full_rs.iter().any(|f| containment(h, f, 60.0) >= 0.5))
+                        .count();
+                    survived as f64 / half_rs.len() as f64
+                }
+            };
+
+            // Core catalogue: sections with real support. Marginal
+            // sections legitimately vanish when 10% of the corpus does;
+            // the core must not.
+            let core: Vec<&FrequentSection> =
+                full.iter().filter(|s| s.visit_count >= 5).collect();
+            let core_persist = {
+                let jk_rs = resample_all(&jk_sections);
+                let core_rs: Vec<Vec<GpsPoint>> = core
+                    .iter()
+                    .map(|s| {
+                        let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+                        resample_route(&s.polyline, t)
+                    })
+                    .collect();
+                if core_rs.is_empty() {
+                    1.0
+                } else {
+                    core_rs
+                        .iter()
+                        .filter(|c| jk_rs.iter().any(|o| containment(c, o, 60.0) >= 0.5))
+                        .count() as f64
+                        / core_rs.len() as f64
+                }
+            };
+            println!();
+            println!(
+                "[stability {}] core (≥5 visits) {} sections, {:.0}% persist under jackknife",
+                sport,
+                core.len(),
+                core_persist * 100.0
+            );
+            println!(
+                "[stability {}] full {} | jackknife-90%: {} sections, {:.0}% persist 1:1, \
+                 {:.0}% ground retained | 50% corpus: {} sections ({:.0}% persist into full) | \
+                 75% corpus: {}",
+                sport,
+                full.len(),
+                jk_sections.len(),
+                jk_persist * 100.0,
+                ground(&jk_sections) * 100.0,
+                half.len(),
+                growth_half * 100.0,
+                three_q.len(),
+            );
+        }
+    }
+
+    println!();
+    println!("Peak RSS: {:.0} MB", peak_rss_mb());
+}
