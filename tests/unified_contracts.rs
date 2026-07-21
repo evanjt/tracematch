@@ -1,0 +1,640 @@
+//! Executable contracts for the unified section detector.
+//!
+//! Each test pins a rule or a locked invariant of the algorithm
+//! (`src/sections/unified.rs`) on deterministic synthetic ground, so a
+//! behaviour change that breaks a ruling fails CI instead of waiting for
+//! a corpus review. The assumption register mapping v1 failure modes to
+//! these tests lives in `tests/ASSUMPTIONS.md`.
+
+mod shapes;
+
+use std::collections::HashMap;
+use tracematch::geo_utils::haversine_distance;
+use tracematch::{Direction, FrequentSection, GpsPoint, SectionConfig, detect_sections_unified};
+
+fn config() -> SectionConfig {
+    SectionConfig::default()
+}
+
+fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Vec<FrequentSection> {
+    detect_sections_unified(tracks, &shapes::pooled(tracks), &config())
+}
+
+// ------------------------------------------------------------- helpers
+
+fn min_dist(p: &GpsPoint, line: &[GpsPoint]) -> f64 {
+    line.iter()
+        .map(|q| haversine_distance(p, q))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Share of `samples` lying within `tol` of any section polyline.
+fn coverage(samples: &[GpsPoint], sections: &[FrequentSection], tol: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let hit = samples
+        .iter()
+        .filter(|p| sections.iter().any(|s| min_dist(p, &s.polyline) < tol))
+        .count();
+    hit as f64 / samples.len() as f64
+}
+
+/// Share of a polyline's points that revisit ground the same polyline
+/// already covered (index gap > 15, within 20 m, same elevation level).
+/// Single-passed real traces stay near zero; a laps-included cut does
+/// not. The elevation guard mirrors the detector's pass rule so hairpin
+/// legs stacked in plan do not read as re-passes.
+fn self_overlap_frac(polyline: &[GpsPoint]) -> f64 {
+    if polyline.len() < 20 {
+        return 0.0;
+    }
+    let mut overlapping = 0usize;
+    let mut total = 0usize;
+    for i in (0..polyline.len()).step_by(3) {
+        total += 1;
+        let p = &polyline[i];
+        let near = polyline.iter().enumerate().any(|(j, q)| {
+            if (j as i64 - i as i64).abs() <= 15 || haversine_distance(p, q) >= 20.0 {
+                return false;
+            }
+            match (p.elevation, q.elevation) {
+                (Some(a), Some(b)) => (a - b).abs() < 15.0,
+                _ => true,
+            }
+        });
+        if near {
+            overlapping += 1;
+        }
+    }
+    overlapping as f64 / total.max(1) as f64
+}
+
+/// One line per section on stderr: visible only when a test fails.
+fn dump(sections: &[FrequentSection]) {
+    for s in sections {
+        let a = s.polyline.first().map(|p| (p.latitude, p.longitude));
+        eprintln!(
+            "  {}  {:.0} m  visits {}  rep {}  anchor {:?}",
+            s.id, s.distance_meters, s.visit_count, s.representative_activity_id, a
+        );
+    }
+}
+
+fn metre_samples(waypoints: &[(f64, f64)], step: f64) -> Vec<GpsPoint> {
+    let dense = shapes::densify(waypoints);
+    let stride = (step / shapes::SPACING_M).round().max(1.0) as usize;
+    dense
+        .iter()
+        .step_by(stride)
+        .map(|&(x, y)| shapes::to_gps(x, y))
+        .collect()
+}
+
+/// Invariants that hold for every catalogue on every shape:
+/// real-trace geometry (rule 5), single-passed geometry, and
+/// corridor-disjointness at the backoff tolerance (rule 6).
+fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[FrequentSection]) {
+    let by_id: HashMap<&str, &Vec<GpsPoint>> =
+        tracks.iter().map(|(id, pts)| (id.as_str(), pts)).collect();
+    for s in sections {
+        assert!(!s.polyline.is_empty(), "{}: empty polyline", s.id);
+        assert!(s.distance_meters > 0.0, "{}: no length", s.id);
+        let rep = by_id
+            .get(s.representative_activity_id.as_str())
+            .unwrap_or_else(|| panic!("{}: representative not an input track", s.id));
+        let worst = s
+            .polyline
+            .iter()
+            .map(|p| min_dist(p, rep))
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 25.0,
+            "{}: polyline strays {:.0} m from its representative trace — geometry must be a real single cutout, never synthesised",
+            s.id,
+            worst
+        );
+        let so = self_overlap_frac(&s.polyline);
+        assert!(
+            so < 0.25,
+            "{}: self-overlap {:.2} — geometry must be single-passed",
+            s.id,
+            so
+        );
+    }
+    for a in sections {
+        for b in sections {
+            if a.id >= b.id {
+                continue;
+            }
+            let within = a
+                .polyline
+                .iter()
+                .step_by(3)
+                .filter(|p| min_dist(p, &b.polyline) < 100.0)
+                .count() as f64
+                / a.polyline.iter().step_by(3).count().max(1) as f64;
+            assert!(
+                within < 0.9,
+                "{} vs {}: {:.0}% shared corridor — near-duplicates must back off, not co-exist",
+                a.id,
+                b.id,
+                within * 100.0
+            );
+        }
+    }
+}
+
+/// Order-insensitive catalogue identity: everything that defines the
+/// catalogue as a pure function of the activity set.
+fn normalise(sections: &[FrequentSection]) -> String {
+    let mut rows: Vec<String> = sections
+        .iter()
+        .map(|s| {
+            let coords: Vec<(i64, i64)> = s
+                .polyline
+                .iter()
+                .map(|p| {
+                    (
+                        (p.latitude * 1e6).round() as i64,
+                        (p.longitude * 1e6).round() as i64,
+                    )
+                })
+                .collect();
+            let mut acts = s.activity_ids.clone();
+            acts.sort();
+            acts.dedup();
+            format!(
+                "{}|{}|{}|{}|{:.0}|{:?}",
+                s.id,
+                s.representative_activity_id,
+                s.visit_count,
+                acts.join(","),
+                s.distance_meters,
+                coords
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.join("\n")
+}
+
+// ------------------------------------------------- rule 4: boundaries
+
+#[test]
+fn oval_and_stem_split_at_the_usage_change() {
+    // Scenario: stem to an oval, three laps, stem home. The stem is
+    // passed twice per outing, the oval three times.
+    // Expected behaviour: the pass-class change at the entrance is the
+    // boundary; the oval's geometry is one lap, never three.
+    let tracks = shapes::oval_stem(6);
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 2, "expected stem + oval");
+
+    let centre = shapes::to_gps(800.0, 0.0);
+    let on_oval = |s: &FrequentSection| {
+        let mid: f64 = s
+            .polyline
+            .iter()
+            .map(|p| haversine_distance(p, &centre))
+            .sum::<f64>()
+            / s.polyline.len() as f64;
+        (140.0..260.0).contains(&mid)
+    };
+    let oval = sections.iter().find(|s| on_oval(s)).expect("oval section");
+    assert!(
+        (900.0..1600.0).contains(&oval.distance_meters),
+        "oval length {:.0} m should be one lap (~1250 m)",
+        oval.distance_meters
+    );
+    let stem = sections.iter().find(|s| !on_oval(s)).expect("stem section");
+    assert!(
+        (400.0..850.0).contains(&stem.distance_meters),
+        "stem length {:.0} m should be one pass (~600 m)",
+        stem.distance_meters
+    );
+
+    let stem_mid = shapes::to_gps(300.0, 0.0);
+    let oval_east = shapes::to_gps(1000.0, 0.0);
+    for s in &sections {
+        let both =
+            min_dist(&stem_mid, &s.polyline) < 100.0 && min_dist(&oval_east, &s.polyline) < 100.0;
+        assert!(!both, "{}: spans the stem-oval boundary", s.id);
+    }
+}
+
+#[test]
+fn lollipop_splits_at_the_mouth() {
+    // Stick passed twice per outing, head once: the mouth is a visible
+    // usage boundary and the stick's geometry is one pass, not two.
+    let tracks = shapes::lollipop(6);
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 2, "expected stick + head");
+
+    let centre = shapes::to_gps(950.0, 0.0);
+    let head = sections
+        .iter()
+        .find(|s| {
+            s.polyline
+                .iter()
+                .all(|p| (90.0..230.0).contains(&haversine_distance(p, &centre)))
+        })
+        .expect("head section");
+    assert!((650.0..1250.0).contains(&head.distance_meters));
+    let stick = sections.iter().find(|s| s.id != head.id).unwrap();
+    assert!(
+        (500.0..1000.0).contains(&stick.distance_meters),
+        "stick length {:.0} m should be one pass (~800 m)",
+        stick.distance_meters
+    );
+}
+
+// ----------------------------------- v1 assumption: whole-track pooling
+
+#[test]
+fn deviation_emerges_from_unique_outings() {
+    // Eight globally distinct activities share only one straight. v1
+    // pooled whole activities, so shared portions inside unique rides
+    // never surfaced. The straight must emerge on its own.
+    let tracks = shapes::deviation_straight(8);
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!(!sections.is_empty(), "shared straight must emerge");
+    assert!(sections.len() <= 2, "one corridor, got {}", sections.len());
+    let straight = metre_samples(&[(50.0, 0.0), (1150.0, 0.0)], 50.0);
+    assert!(
+        coverage(&straight, &sections, 120.0) >= 0.8,
+        "straight under-covered"
+    );
+    for s in &sections {
+        for p in s.polyline.iter().step_by(5) {
+            let x_ok = min_dist(p, &metre_samples(&[(-300.0, 0.0), (1500.0, 0.0)], 25.0)) < 350.0;
+            assert!(
+                x_ok,
+                "{}: section ground far from the shared straight",
+                s.id
+            );
+        }
+    }
+}
+
+// ------------------------------- rules 5+6: real geometry, never merged
+
+#[test]
+fn braid_variants_read_as_real_lines_not_a_midline() {
+    // Two lanes 30 m apart, every outing rides both. Whatever extent is
+    // emitted, its points must lie on one real lane at a time — a
+    // consensus midline (~15 m from both) is the banned v1 geometry.
+    let tracks = shapes::parallel_variants(6, 30.0);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!(!sections.is_empty());
+    let lane_a = metre_samples(&[(0.0, -30.0), (0.0, 730.0)], 5.0);
+    let lane_b = metre_samples(&[(30.0, -30.0), (30.0, 730.0)], 5.0);
+    for s in &sections {
+        let on_lane = s
+            .polyline
+            .iter()
+            .filter(|p| min_dist(p, &lane_a).min(min_dist(p, &lane_b)) < 9.0)
+            .count() as f64
+            / s.polyline.len() as f64;
+        assert!(
+            on_lane >= 0.85,
+            "{}: only {:.0}% of points sit on a real lane",
+            s.id,
+            on_lane * 100.0
+        );
+    }
+}
+
+#[test]
+fn separated_variants_stay_distinct_ground() {
+    // The same circuit with the lanes 180 m apart: both lines are real,
+    // visible ground. They may emit as one circuit or two lines, but
+    // never as an averaged midline and never with a bank missing.
+    let tracks = shapes::parallel_variants(6, 180.0);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!((1..=2).contains(&sections.len()), "got {}", sections.len());
+    let lane_a = metre_samples(&[(0.0, -30.0), (0.0, 730.0)], 5.0);
+    let lane_b = metre_samples(&[(180.0, -30.0), (180.0, 730.0)], 5.0);
+    let links = metre_samples(&[(-20.0, 700.0), (200.0, 700.0)], 5.0)
+        .into_iter()
+        .chain(metre_samples(&[(200.0, 0.0), (-20.0, 0.0)], 5.0))
+        .collect::<Vec<_>>();
+    assert!(coverage(&lane_a, &sections, 100.0) >= 0.6, "west lane lost");
+    assert!(coverage(&lane_b, &sections, 100.0) >= 0.6, "east lane lost");
+    for s in &sections {
+        let real = s
+            .polyline
+            .iter()
+            .filter(|p| {
+                min_dist(p, &lane_a)
+                    .min(min_dist(p, &lane_b))
+                    .min(min_dist(p, &links))
+                    < 12.0
+            })
+            .count() as f64
+            / s.polyline.len() as f64;
+        assert!(
+            real >= 0.85,
+            "{}: {:.0}% of points off every real line — midline geometry",
+            s.id,
+            real * 100.0
+        );
+    }
+}
+
+// ------------------------------------- rule 1: elevation-aware passes
+
+#[test]
+fn switchback_climb_survives_as_one_section() {
+    // Hairpin legs 30 m apart in plan revisit coarse cells, but at
+    // elevation levels 25 m apart — beyond the 15 m tolerance, so the
+    // single-pass walk must not cut the climb into legs.
+    let tracks = shapes::switchback_climb(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    let climb_samples: Vec<GpsPoint> = (0..8)
+        .flat_map(|leg| {
+            let y = 30.0 * leg as f64 + 15.0;
+            (0..=3).map(move |k| shapes::to_gps(50.0 * k as f64, y))
+        })
+        .collect();
+    let climb = sections
+        .iter()
+        .find(|s| {
+            let c = climb_samples
+                .iter()
+                .filter(|p| min_dist(p, &s.polyline) < 100.0)
+                .count() as f64
+                / climb_samples.len() as f64;
+            c >= 0.7
+        })
+        .expect("switchback climb missing from the catalogue");
+    assert!(
+        climb.distance_meters >= 1000.0,
+        "climb cut down to {:.0} m — legs must not fragment",
+        climb.distance_meters
+    );
+}
+
+// --------------------------------- rule 3+5: floors and fork boundaries
+
+#[test]
+fn grid_city_respects_floors_and_forks() {
+    // Eight staircase commutes across a street grid. Minority branches
+    // sit below their floors, so they are not section-worthy and their
+    // fork boundaries dissolve: the corridor follows the through-flow
+    // and its geometry is one real commute. What must hold: the shared
+    // terminal blocks are represented, once-visited streets never
+    // appear, and the count stays sane for eight overlapping routes.
+    let tracks = shapes::grid_city();
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!(
+        (1..=6).contains(&sections.len()),
+        "got {} sections",
+        sections.len()
+    );
+
+    let covered = [
+        shapes::to_gps(125.0, 0.0),   // start block, all eight routes
+        shapes::to_gps(750.0, 690.0), // NE funnel block, all eight routes
+    ];
+    for p in &covered {
+        assert!(
+            sections.iter().any(|s| min_dist(p, &s.polyline) < 130.0),
+            "shared terminal ground missing from the catalogue"
+        );
+    }
+    let silent = [
+        shapes::to_gps(625.0, 0.0),   // 1 visit: never hot ground
+        shapes::to_gps(250.0, 625.0), // 1 visit
+    ];
+    for p in &silent {
+        assert!(
+            sections.iter().all(|s| min_dist(p, &s.polyline) > 130.0),
+            "once-visited ground appeared in a section"
+        );
+    }
+}
+
+// ------------------------------------------- rule 2: lift exclusion
+
+#[test]
+fn lift_ground_forms_no_section_but_the_piste_does() {
+    // A cable-smooth straight 25% ascent, only ever ridden uphill, next
+    // to a winding human descent. The lift line is ineligible ground;
+    // the piste is a section.
+    let tracks = shapes::lift_piste(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    let view: Vec<(&str, &[GpsPoint])> = tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+    eprintln!(
+        "  confirmed lift spans: {:?}",
+        tracematch::confirmed_lift_spans(&view)
+    );
+    assert_catalogue_invariants(&tracks, &sections);
+    let lift_line = metre_samples(&[(0.0, 0.0), (0.0, 900.0)], 25.0);
+    for s in &sections {
+        let on_lift = s
+            .polyline
+            .iter()
+            .filter(|p| min_dist(p, &lift_line) < 80.0)
+            .count() as f64
+            / s.polyline.len() as f64;
+        assert!(
+            on_lift < 0.3,
+            "{}: {:.0}% of its ground runs up the lift line",
+            s.id,
+            on_lift * 100.0
+        );
+    }
+    let piste_samples: Vec<GpsPoint> = (0..=20)
+        .map(|s| {
+            let t = s as f64 / 20.0;
+            shapes::to_gps(
+                300.0 + 130.0 * (t * 5.5 * std::f64::consts::PI).sin(),
+                900.0 * (1.0 - t),
+            )
+        })
+        .collect();
+    assert!(
+        coverage(&piste_samples, &sections, 120.0) >= 0.6,
+        "the human piste should be a section"
+    );
+}
+
+// ----------------------------------------------------------- personas
+
+#[test]
+fn persona_casual_produces_no_sections() {
+    // Eight one-off loops with no shared ground: nothing repeats, so
+    // nothing may be invented.
+    let tracks = shapes::persona_casual();
+    let sections = detect(&tracks);
+    assert!(
+        sections.is_empty(),
+        "one-off ground produced {} sections",
+        sections.len()
+    );
+}
+
+#[test]
+fn persona_weekender_finds_only_the_favourite_loop() {
+    let tracks = shapes::persona_weekender();
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!((1..=3).contains(&sections.len()), "got {}", sections.len());
+    let loop_samples: Vec<GpsPoint> = (0..24)
+        .map(|k| {
+            let a = std::f64::consts::PI + k as f64 / 24.0 * 2.0 * std::f64::consts::PI;
+            shapes::to_gps(900.0 + 500.0 * a.cos(), 500.0 * a.sin())
+        })
+        .collect();
+    assert!(
+        coverage(&loop_samples, &sections, 120.0) >= 0.6,
+        "favourite loop missing"
+    );
+    let one_off_samples = metre_samples(&[(-2500.0, 2000.0), (-2200.0, 2600.0)], 60.0);
+    assert!(
+        coverage(&one_off_samples, &sections, 120.0) < 0.2,
+        "one-off ground must stay silent"
+    );
+}
+
+#[test]
+fn persona_commuter_is_one_unfragmented_corridor() {
+    // Twelve traversals of the same two-corner road, half in each
+    // direction. No fork, no usage change, no support edge: no reason
+    // for any internal boundary the athlete could see.
+    let tracks = shapes::persona_commuter();
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 1, "commute fragmented");
+    let s = &sections[0];
+    assert!(
+        (1500.0..2200.0).contains(&s.distance_meters),
+        "corridor length {:.0} m",
+        s.distance_meters
+    );
+    let mut same = 0;
+    let mut reverse = 0;
+    for (_, pts) in &tracks {
+        for (_, _, dir) in tracematch::find_all_track_portions(pts, &s.polyline, 200.0) {
+            match dir {
+                Direction::Same => same += 1,
+                Direction::Reverse => reverse += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        same >= 4 && reverse >= 4,
+        "both directions must match one section (same {}, reverse {})",
+        same,
+        reverse
+    );
+}
+
+#[test]
+fn persona_racer_hill_is_single_passed() {
+    // Four hill repeats per outing: eight passes of the same 400 m.
+    // The hill is a section once; laps are traversals, not geometry.
+    let tracks = shapes::persona_racer();
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    let hill_mid = shapes::to_gps(700.0, 0.0);
+    let hill = sections
+        .iter()
+        .find(|s| min_dist(&hill_mid, &s.polyline) < 100.0)
+        .expect("hill section missing");
+    assert!(
+        hill.distance_meters <= 700.0,
+        "hill geometry {:.0} m — repeats leaked into the cut",
+        hill.distance_meters
+    );
+    let approach_mid = shapes::to_gps(250.0, 0.0);
+    for s in &sections {
+        let both = min_dist(&approach_mid, &s.polyline) < 100.0
+            && min_dist(&hill_mid, &s.polyline) < 100.0;
+        assert!(!both, "{}: spans the approach-hill usage boundary", s.id);
+    }
+}
+
+// ------------------------------------------- invariant 4: order-free
+
+#[test]
+fn catalogue_is_a_pure_function_of_the_activity_set() {
+    // The same activity set in three arrival orders must produce the
+    // identical catalogue — ids, geometry, everything. This is the
+    // parity spec the incremental path must meet. The three shape
+    // families sit on disjoint ground so each keeps its own topology.
+    let mut tracks = shapes::grid_city();
+    tracks.extend(shapes::shift_east(shapes::persona_commuter(), 20_000.0));
+    tracks.extend(shapes::shift_east(shapes::persona_weekender(), 40_000.0));
+
+    let base = normalise(&detect(&tracks));
+
+    let mut reversed = tracks.clone();
+    reversed.reverse();
+    assert_eq!(
+        base,
+        normalise(&detect(&reversed)),
+        "catalogue depends on arrival order (reversed)"
+    );
+
+    let n = tracks.len();
+    let shuffled: Vec<_> = (0..n).map(|i| tracks[(i * 7) % n].clone()).collect();
+    assert_eq!(shuffled.len(), n, "stride shuffle must be a permutation");
+    assert_eq!(
+        base,
+        normalise(&detect(&shuffled)),
+        "catalogue depends on arrival order (shuffled)"
+    );
+}
+
+// --------------------------------- invariant 6: evidence and deletion
+
+#[test]
+fn deleting_activities_is_the_only_way_evidence_leaves() {
+    // Remove five of the six favourite-loop outings: the loop falls
+    // below its floor and vanishes. Restore them: the catalogue is
+    // byte-identical to the original. Deletion removes evidence;
+    // nothing else is remembered or invented.
+    let tracks = shapes::persona_weekender();
+    let full = normalise(&detect(&tracks));
+
+    let culled: Vec<_> = tracks
+        .iter()
+        .filter(|(id, _)| !id.starts_with("wkd_loop_") || id.ends_with("_0"))
+        .cloned()
+        .collect();
+    let after_cull = detect(&culled);
+    let loop_samples: Vec<GpsPoint> = (0..24)
+        .map(|k| {
+            let a = std::f64::consts::PI + k as f64 / 24.0 * 2.0 * std::f64::consts::PI;
+            shapes::to_gps(900.0 + 500.0 * a.cos(), 500.0 * a.sin())
+        })
+        .collect();
+    assert!(
+        coverage(&loop_samples, &after_cull, 120.0) < 0.2,
+        "single-visit loop must fall below the floor"
+    );
+
+    assert_eq!(
+        full,
+        normalise(&detect(&tracks)),
+        "restoring the activity set must restore the catalogue exactly"
+    );
+}
