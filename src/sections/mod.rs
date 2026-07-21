@@ -28,6 +28,7 @@ mod consensus;
 mod corridor;
 mod density_grid;
 mod flow_graph;
+mod unified;
 pub mod incremental;
 mod medoid;
 pub mod optimized;
@@ -60,6 +61,7 @@ pub use consensus::{
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
+pub use unified::detect_sections_unified;
 pub(crate) use portions::{compute_activity_portions, compute_portions_for_activities};
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub use postprocess::{
@@ -134,6 +136,9 @@ pub enum DetectionMethod {
     /// Junction detection from directed GPS flow.
     /// Sections are edges between divergence points.
     FlowGraph,
+    /// Coverage grid → same-traffic supernodes → junction-anchored
+    /// chains → medoid + consensus geometry.
+    Unified,
 }
 
 impl DetectionMethod {
@@ -142,6 +147,7 @@ impl DetectionMethod {
             DetectionMethod::Corridor => "corridor",
             DetectionMethod::DensityGrid => "density_grid",
             DetectionMethod::FlowGraph => "flow_graph",
+            DetectionMethod::Unified => "unified",
         }
     }
 }
@@ -159,6 +165,7 @@ impl std::str::FromStr for DetectionMethod {
             "corridor" => Ok(DetectionMethod::Corridor),
             "density_grid" | "densitygrid" | "density" => Ok(DetectionMethod::DensityGrid),
             "flow_graph" | "flowgraph" | "flow" => Ok(DetectionMethod::FlowGraph),
+            "unified" => Ok(DetectionMethod::Unified),
             _ => Ok(DetectionMethod::Corridor),
         }
     }
@@ -828,6 +835,7 @@ pub fn detect_sections(
         DetectionMethod::DensityGrid => {
             detect_sections_multiscale(tracks, sport_types, groups, config).sections
         }
+        DetectionMethod::Unified => detect_sections_unified(tracks, sport_types, config),
     }
 }
 

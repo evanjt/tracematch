@@ -1294,7 +1294,7 @@ pub fn split_high_variance_sections(
 /// thresholds to avoid drowning in noise — but the bonus is intentionally
 /// modest so a user with 500 activities doesn't have all their valid
 /// sections filtered away.
-fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+pub(super) fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
     // Softened from the 43a39da bonus of (0 / +1 / +2): the +2 tier was
     // filtering out genuine sections for users with many activities. The
     // base thresholds (2-6) already encode noise rejection per length tier.
