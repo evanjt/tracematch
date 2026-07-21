@@ -210,6 +210,26 @@ pub fn parallel_variants(outings: usize, offset: f64) -> Vec<(String, Vec<GpsPoi
         .collect()
 }
 
+/// A shared trunk splitting into two worthy branches: half the outings
+/// take each. Point-to-point, one pass everywhere, so the only boundary
+/// mechanism available at the join is the fork.
+pub fn fork_y(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let branch_end = if i % 2 == 0 {
+                (-600.0, 1800.0)
+            } else {
+                (600.0, 1800.0)
+            };
+            let path = densify(&[(0.0, 0.0), (0.0, 1000.0), branch_end]);
+            (
+                format!("fork_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
 /// Zigzag climb: 8 hairpin legs 30 m apart in plan, 25 m of gain each,
 /// so one coarse cell holds several legs at distinct elevation levels.
 /// Return leg is a detached road well east of the climb.
