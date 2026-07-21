@@ -530,10 +530,11 @@ struct RankFeatures {
     /// |same - reverse| / traversals. Descents and circuits read one-way.
     oneway: f64,
     /// Days from the section's newest visit to the corpus's newest
-    /// activity. Always reported; joins the score with --rank-recency.
+    /// activity. Stale ground reads as history, not signature, so
+    /// freshness carries score weight like any other feature.
     recency_days: f64,
-    /// Equal-weight mean of the feature percentile ranks within the
-    /// catalogue (six features; recency joins under --rank-recency).
+    /// Equal-weight mean of the seven feature percentile ranks within
+    /// the catalogue.
     score: f64,
 }
 
@@ -642,7 +643,6 @@ fn rank_sections(
     sections: &[FrequentSection],
     by_id: &HashMap<&str, &Activity>,
     proximity: f64,
-    rank_recency: bool,
 ) -> Vec<(String, RankFeatures)> {
     // "Now" is the corpus head, not the wall clock: a static corpus must
     // not go stale by being analysed later.
@@ -787,18 +787,16 @@ fn rank_sections(
     // ties get their average rank.
     let n = feats.len();
     if n > 1 {
-        let mut cols: Vec<fn(&RankFeatures) -> f64> = vec![
+        let cols: Vec<fn(&RankFeatures) -> f64> = vec![
             |f| f.apex,
             |f| f.grade,
             |f| f.months as f64,
             |f| f.sinuosity,
             |f| f.converge,
             |f| f.oneway,
-        ];
-        if rank_recency {
             // Fresher ranks higher: percentile of the negated staleness.
-            cols.push(|f| -f.recency_days);
-        }
+            |f| -f.recency_days,
+        ];
         let n_cols = cols.len() as f64;
         let mut pct_sum = vec![0.0f64; n];
         for col in cols {
@@ -843,25 +841,19 @@ fn write_ranking_md(
     sport: &str,
     ranked: &[(String, RankFeatures)],
     sections: &[FrequentSection],
-    rank_recency: bool,
 ) {
     let by_id: HashMap<&str, &FrequentSection> =
         sections.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut out = String::new();
     out.push_str(&format!("# Interestingness ranking: {}\n\n", sport));
-    out.push_str(if rank_recency {
-        "Score = equal-weight mean of seven percentile-normalised features\n\
-         (recency included).\n"
-    } else {
-        "Score = equal-weight mean of six percentile-normalised features\n\
-         (recency reported but not scored).\n"
-    });
+    out.push_str("Score = equal-weight mean of seven percentile-normalised features.\n");
     out.push_str(
         "apex: share of outing roam at the section (was it the point of the ride).\n\
          grade: max sustained gradient over 300 m. months: distinct visit months.\n\
          sinu: 1 - chord/arc. conv: effective approach directions, counting only\n\
          outings not based within two matching tolerances of the section.\n\
-         1way: direction purity. rec: days from last visit to the corpus head.\n\n",
+         1way: direction purity. rec: days from last visit to the corpus head\n\
+         (fresher ranks higher).\n\n",
     );
     out.push_str(
         "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way | rec d |\n",
@@ -947,7 +939,6 @@ fn main() {
     let mut stability = false;
     let mut windows = false;
     let mut sweep = false;
-    let mut rank_recency = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -977,10 +968,6 @@ fn main() {
             }
             "--sweep" => {
                 sweep = true;
-                i += 1;
-            }
-            "--rank-recency" => {
-                rank_recency = true;
                 i += 1;
             }
             _ => i += 1,
@@ -1177,7 +1164,6 @@ fn main() {
                         &sections,
                         &activities_by_id,
                         section_config.proximity_threshold,
-                        rank_recency,
                     );
                     for (i, (id, r)) in ranked.iter().take(10).enumerate() {
                         let len_m = sections
@@ -1204,7 +1190,7 @@ fn main() {
                     if let Some(ref out) = out_dir {
                         std::fs::create_dir_all(out).ok();
                         let path = out.join(format!("{}_ranking.md", sport.to_lowercase()));
-                        write_ranking_md(&path, sport, &ranked, &sections, rank_recency);
+                        write_ranking_md(&path, sport, &ranked, &sections);
                         println!("            ranking → {}", path.display());
                     }
                     Some(ranked.into_iter().collect())
