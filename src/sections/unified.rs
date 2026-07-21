@@ -94,6 +94,236 @@ struct PassScratch {
     levels: Vec<(Option<f64>, u8)>,
 }
 
+/// Ineligible ground: lift-carried spans (cable cars, chairlifts,
+/// funiculars) detected from geometry alone.
+///
+/// The separator is straightness at window scale, not grade: measured
+/// on the validation corpora, lift windows at climbing grades run
+/// station-to-station straight (median chord/arc 0.996) while
+/// self-powered steep ground winds (median 0.73, p90 0.894). Grade
+/// alone cannot separate: typical chairlifts climb at 17-34%, inside
+/// the steep-hiking range. A window qualifies when it sustains at
+/// least `LIFT_MIN_GRADE` ascent over `LIFT_SPAN_M` while staying
+/// straighter than `LIFT_MIN_STRAIGHT`; overlapping qualifying windows
+/// merge into spans. A span must then survive two vetoes: real net rise
+/// (guards barometric drift), and low micro-jitter. Jitter is the raw
+/// arc over the smoothed arc: a cabin glides (measured lift median
+/// 1.02, p95 1.065) while a walker on steep ground wobbles (every
+/// walked steep-straight climb measured, across four countries, sits at
+/// 1.053 or higher, and bootpack ascents inside snowboard days land in
+/// the same band). Jitter depends on device sampling, so the constant
+/// is device-sensitive; the app-side speed check is the eventual robust
+/// signal. Marked spans contribute no evidence to the coverage grid, so
+/// lift ground never becomes a section and never bridges the runs it
+/// connects. A descending lift ride is geometrically indistinguishable
+/// from a steep descent and is also left to the app-side speed check.
+/// Constants queued for the plateau sweep (REPORT.md, A1).
+pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
+    const LIFT_SPAN_M: f64 = 300.0;
+    const LIFT_MIN_GRADE: f64 = 0.22;
+    const LIFT_MIN_STRAIGHT: f64 = 0.975;
+    const JITTER_HUMAN_MIN: f64 = 1.05;
+
+    let n = pts.len();
+    if n < 3 || pts.iter().filter(|p| p.elevation.is_some()).count() < 2 {
+        return Vec::new();
+    }
+    // All window geometry runs on a lightly smoothed track: slow lifts
+    // sample GPS jitter comparable to the point spacing, which inflates
+    // the raw arc and hides the line's straightness. Smoothing at ±2
+    // points is far below a switchback's wavelength, so winding ground
+    // stays winding.
+    let sp: Vec<GpsPoint> = (0..n)
+        .map(|i| {
+            let lo = i.saturating_sub(2);
+            let hi = (i + 2).min(n - 1);
+            let c = (hi - lo + 1) as f64;
+            GpsPoint::new(
+                pts[lo..=hi].iter().map(|p| p.latitude).sum::<f64>() / c,
+                pts[lo..=hi].iter().map(|p| p.longitude).sum::<f64>() / c,
+            )
+        })
+        .collect();
+    let mut cum = vec![0.0f64; n];
+    let mut cum_raw = vec![0.0f64; n];
+    for i in 1..n {
+        cum[i] = cum[i - 1] + crate::geo_utils::haversine_distance(&sp[i - 1], &sp[i]);
+        cum_raw[i] = cum_raw[i - 1] + crate::geo_utils::haversine_distance(&pts[i - 1], &pts[i]);
+    }
+    // Light smoothing so one elevation spike cannot fake a grade.
+    let smooth: Vec<Option<f64>> = (0..n)
+        .map(|i| {
+            let lo = i.saturating_sub(1);
+            let hi = (i + 1).min(n - 1);
+            let (mut s, mut c) = (0.0, 0u32);
+            for p in &pts[lo..=hi] {
+                if let Some(e) = p.elevation {
+                    s += e;
+                    c += 1;
+                }
+            }
+            if c > 0 { Some(s / f64::from(c)) } else { None }
+        })
+        .collect();
+
+    let mut marked = vec![false; n];
+    let mut j = 0usize;
+    for i in 0..n {
+        if j < i {
+            j = i;
+        }
+        while j + 1 < n && cum[j] - cum[i] < LIFT_SPAN_M {
+            j += 1;
+        }
+        let run = cum[j] - cum[i];
+        if run < LIFT_SPAN_M {
+            break;
+        }
+        let (Some(a), Some(b)) = (smooth[i], smooth[j]) else {
+            continue;
+        };
+        if (b - a) / run < LIFT_MIN_GRADE {
+            continue;
+        }
+        let chord = crate::geo_utils::haversine_distance(&sp[i], &sp[j]);
+        if chord / run < LIFT_MIN_STRAIGHT {
+            continue;
+        }
+        for m in &mut marked[i..=j] {
+            *m = true;
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut push_span = |s: usize, e: usize| {
+        let rise = match (smooth[e], smooth[s]) {
+            (Some(top), Some(bot)) => top - bot,
+            _ => 0.0,
+        };
+        if rise < LIFT_SPAN_M * LIFT_MIN_GRADE * 0.5 {
+            return;
+        }
+        let smooth_arc = (cum[e] - cum[s]).max(1.0);
+        let jitter = (cum_raw[e] - cum_raw[s]) / smooth_arc;
+        if jitter < JITTER_HUMAN_MIN {
+            spans.push((s, e));
+        }
+    };
+    let mut start: Option<usize> = None;
+    for (i, &m) in marked.iter().enumerate() {
+        match (m, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                push_span(s, i - 1);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        push_span(s, n - 1);
+    }
+    spans
+}
+
+/// Corpus confirmation for lift candidates: carried ground is ground
+/// nobody ever comes straight down under their own power.
+///
+/// A steep straight walked climb (vineyard stairs, a fall-line path) is
+/// geometrically identical to a chairlift line, but its climbers retrace
+/// it downhill, near-straight, on the same or another outing. A lift
+/// line is only ever descended by riders weaving under it, whose own
+/// paths are anything but straight. A candidate span is therefore
+/// rescued when any track descends most of its rise along its line with
+/// a near-straight path of its own.
+pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, usize)>> {
+    const LIFT_MIN_STRAIGHT: f64 = 0.975;
+    const DESCENT_MATCH_M: f64 = 60.0;
+
+    let candidates: Vec<Vec<(usize, usize)>> =
+        tracks.iter().map(|(_, pts)| lift_spans(pts)).collect();
+    if candidates.iter().all(|c| c.is_empty()) {
+        return candidates;
+    }
+
+    let bboxes: Vec<(f64, f64, f64, f64)> = tracks
+        .iter()
+        .map(|(_, pts)| {
+            let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for p in pts.iter() {
+                bb.0 = bb.0.min(p.latitude);
+                bb.1 = bb.1.max(p.latitude);
+                bb.2 = bb.2.min(p.longitude);
+                bb.3 = bb.3.max(p.longitude);
+            }
+            bb
+        })
+        .collect();
+    let pad = DESCENT_MATCH_M / 111_000.0 * 2.0;
+
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(ti, spans)| {
+            let pts = tracks[ti].1;
+            spans
+                .iter()
+                .copied()
+                .filter(|&(s, e)| {
+                    let line = &pts[s..=e];
+                    let rise = match (line.last().and_then(|p| p.elevation), line.first().and_then(|p| p.elevation)) {
+                        (Some(top), Some(bot)) => top - bot,
+                        _ => return true,
+                    };
+                    let (mut lat0, mut lat1, mut lng0, mut lng1) =
+                        (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+                    for p in line {
+                        lat0 = lat0.min(p.latitude);
+                        lat1 = lat1.max(p.latitude);
+                        lng0 = lng0.min(p.longitude);
+                        lng1 = lng1.max(p.longitude);
+                    }
+                    let descended_straight = tracks.iter().enumerate().any(|(oi, (_, op))| {
+                        let bb = &bboxes[oi];
+                        if bb.0 > lat1 + pad
+                            || bb.1 < lat0 - pad
+                            || bb.2 > lng1 + pad
+                            || bb.3 < lng0 - pad
+                        {
+                            return false;
+                        }
+                        super::find_all_track_portions(op, line, DESCENT_MATCH_M)
+                            .into_iter()
+                            .any(|(ps, pe, _)| {
+                                let pe = pe.min(op.len() - 1);
+                                if pe <= ps + 2 {
+                                    return false;
+                                }
+                                let (Some(a), Some(b)) =
+                                    (op[ps].elevation, op[pe].elevation)
+                                else {
+                                    return false;
+                                };
+                                if b - a > -rise * 0.5 {
+                                    return false;
+                                }
+                                let seg = &op[ps..=pe];
+                                let arc: f64 = seg
+                                    .windows(2)
+                                    .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
+                                    .sum();
+                                let chord =
+                                    crate::geo_utils::haversine_distance(&seg[0], &seg[seg.len() - 1]);
+                                arc > 1.0 && chord / arc >= LIFT_MIN_STRAIGHT
+                            })
+                    });
+                    !descended_straight
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> CoverageGrid {
     let ref_lat: f64 = {
         let mut sum = 0.0;
@@ -109,6 +339,8 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
     let fine = CellGrid::new(cell_size_m / PASS_SUBGRID, ref_lat);
+
+    let lift = confirmed_lift_spans(tracks);
 
     let mut cell_tracks: HashMap<Cell, HashSet<u32>> = HashMap::new();
     let mut cell_passes: HashMap<Cell, HashMap<u32, u8>> = HashMap::new();
@@ -149,26 +381,49 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
             }
         };
 
-        let mut prev = grid.cell_of(pts[0].latitude, pts[0].longitude);
-        let mut prev_fine = fine.cell_of(pts[0].latitude, pts[0].longitude);
-        cell_tracks.entry(prev).or_default().insert(t);
-        visit_fine(prev_fine, prev, pts[0].elevation, fine_seq);
-        for w in pts.windows(2) {
-            let b = grid.cell_of(w[1].latitude, w[1].longitude);
-            if b != prev {
-                // Bresenham covers GPS gaps that skip cells.
-                for c in bresenham_cells(prev, b).into_iter().skip(1) {
-                    cell_tracks.entry(c).or_default().insert(t);
-                }
-                prev = b;
+        // Lift-carried stretches contribute nothing; each remaining
+        // stretch walks with a fresh cell seed so no evidence bridges
+        // across the skipped ground.
+        let spans = &lift[t_idx];
+        let mut keep: Vec<(usize, usize)> = Vec::new();
+        let mut cursor = 0usize;
+        for &(s, e) in spans {
+            if s > cursor {
+                keep.push((cursor, s - 1));
             }
-            let bf = fine.cell_of(w[1].latitude, w[1].longitude);
-            if bf != prev_fine {
-                for fc in bresenham_cells(prev_fine, bf).into_iter().skip(1) {
-                    fine_seq += 1;
-                    visit_fine(fc, prev, w[1].elevation, fine_seq);
+            cursor = e + 1;
+        }
+        if cursor < pts.len() {
+            keep.push((cursor, pts.len() - 1));
+        }
+
+        for (r_idx, &(rs, re)) in keep.iter().enumerate() {
+            if r_idx > 0 {
+                // A skipped lift stretch always counts as "away".
+                fine_seq += PASS_AWAY_CELLS + 1;
+            }
+            let seg = &pts[rs..=re];
+            let mut prev = grid.cell_of(seg[0].latitude, seg[0].longitude);
+            let mut prev_fine = fine.cell_of(seg[0].latitude, seg[0].longitude);
+            cell_tracks.entry(prev).or_default().insert(t);
+            visit_fine(prev_fine, prev, seg[0].elevation, fine_seq);
+            for w in seg.windows(2) {
+                let b = grid.cell_of(w[1].latitude, w[1].longitude);
+                if b != prev {
+                    // Bresenham covers GPS gaps that skip cells.
+                    for c in bresenham_cells(prev, b).into_iter().skip(1) {
+                        cell_tracks.entry(c).or_default().insert(t);
+                    }
+                    prev = b;
                 }
-                prev_fine = bf;
+                let bf = fine.cell_of(w[1].latitude, w[1].longitude);
+                if bf != prev_fine {
+                    for fc in bresenham_cells(prev_fine, bf).into_iter().skip(1) {
+                        fine_seq += 1;
+                        visit_fine(fc, prev, w[1].elevation, fine_seq);
+                    }
+                    prev_fine = bf;
+                }
             }
         }
 
@@ -1037,4 +1292,103 @@ pub fn detect_sections_unified(
 
     info!("[Unified] {} sections total", all_sections.len());
     all_sections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn climb(step_deg: f64, ele_step: f64, zigzag: bool, n: usize) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| {
+                let lng = if zigzag {
+                    // Alternate heading so the arc far exceeds the chord.
+                    if i % 2 == 0 { 0.0 } else { step_deg * 1.8 }
+                } else {
+                    0.0
+                };
+                GpsPoint::with_elevation(46.0 + step_deg * i as f64, 7.0 + lng, ele_step * i as f64)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn straight_steep_ascent_is_lift() {
+        // ~10m steps north, +5m elevation each: 50% grade, dead straight.
+        let pts = climb(9.0e-5, 5.0, false, 80);
+        let spans = lift_spans(&pts);
+        assert_eq!(spans.len(), 1);
+        let (s, e) = spans[0];
+        assert!(s <= 2 && e >= 75, "span {}..{} should cover the ascent", s, e);
+    }
+
+    #[test]
+    fn winding_climb_is_not_lift() {
+        // Same climb rate per metre of ground but zigzagging: a trail.
+        let pts = climb(9.0e-5, 5.0, true, 80);
+        assert!(lift_spans(&pts).is_empty());
+    }
+
+    #[test]
+    fn straight_steep_descent_is_not_lift() {
+        let mut pts = climb(9.0e-5, 5.0, false, 80);
+        pts.reverse();
+        assert!(lift_spans(&pts).is_empty());
+    }
+
+    #[test]
+    fn straight_chairlift_grade_is_lift() {
+        // 26% sustained and dead straight: a typical chairlift line.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        assert_eq!(lift_spans(&pts).len(), 1);
+    }
+
+    #[test]
+    fn gentle_straight_ascent_is_not_lift() {
+        // 10% sustained: an ordinary straight road climb.
+        let pts = climb(9.0e-5, 1.0, false, 80);
+        assert!(lift_spans(&pts).is_empty());
+    }
+
+    #[test]
+    fn wobbling_stair_climb_is_not_lift() {
+        // A walker's micro-wobble inflates the raw arc over the smoothed
+        // arc; a cabin's track does not.
+        let pts: Vec<GpsPoint> = (0..80)
+            .map(|i| {
+                let lng = 7.0 + if i % 2 == 0 { 5.0e-5 } else { -5.0e-5 };
+                GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, lng, 2.6 * i as f64)
+            })
+            .collect();
+        assert!(lift_spans(&pts).is_empty());
+    }
+
+    #[test]
+    fn straight_retrace_downhill_rescues_stairs() {
+        // Vineyard stairs: climbed straight, walked straight back down.
+        let up = climb(9.0e-5, 2.6, false, 80);
+        let mut down = up.clone();
+        down.reverse();
+        let tracks: Vec<(&str, &[GpsPoint])> =
+            vec![("up", up.as_slice()), ("down", down.as_slice())];
+        let confirmed = confirmed_lift_spans(&tracks);
+        assert!(confirmed.iter().all(|c| c.is_empty()));
+    }
+
+    #[test]
+    fn weaving_descent_does_not_rescue_lift() {
+        // Riders weave under the lift line; the line stays carried ground.
+        let up = climb(9.0e-5, 2.6, false, 80);
+        let down: Vec<GpsPoint> = (0..80)
+            .map(|i| {
+                let t = 79 - i;
+                let lng = 7.0 + if i % 2 == 0 { 2.0e-4 } else { -2.0e-4 };
+                GpsPoint::with_elevation(46.0 + 9.0e-5 * t as f64, lng, 2.6 * t as f64)
+            })
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> =
+            vec![("up", up.as_slice()), ("down", down.as_slice())];
+        let confirmed = confirmed_lift_spans(&tracks);
+        assert_eq!(confirmed[0].len(), 1);
+    }
 }
