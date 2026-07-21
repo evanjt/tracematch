@@ -18,6 +18,7 @@ present. The algorithm and its rules live in `src/sections/unified.rs`.
 | Support floors could be bypassed, or one-off ground invented sections | `grid_city_respects_floors_and_forks`, `persona_casual_produces_no_sections`, `persona_weekender_finds_only_the_favourite_loop` |
 | The catalogue depended on arrival order (the install-window precedent) | `catalogue_is_a_pure_function_of_the_activity_set` |
 | Evidence semantics were unclear on deletion | `deleting_activities_is_the_only_way_evidence_leaves` |
+| One global projection plane serves every continent | `far_ground_changes_nothing_local` |
 
 ## Contracts that land with later tranches
 
@@ -28,7 +29,6 @@ present. The algorithm and its rules live in `src/sections/unified.rs`.
 | A user-disabled section's corridor stays hidden | B-tranche intent-record tests (veloqrs) |
 | A config change never silently no-ops | B1 invalidation contract (veloqrs) |
 | One engine, no cosmetic method selector | C4 deletion, compiler-verified |
-| One degree of longitude is not one of latitude | A6 local-projection gate |
 
 ## Defects these contracts caught at birth (2026-07-21)
 
