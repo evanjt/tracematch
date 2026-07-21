@@ -124,7 +124,7 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
     }
     for a in sections {
         for b in sections {
-            if a.id >= b.id {
+            if a.id == b.id {
                 continue;
             }
             let within = a
@@ -135,8 +135,8 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
                 .count() as f64
                 / a.polyline.iter().step_by(3).count().max(1) as f64;
             assert!(
-                within < 0.9,
-                "{} vs {}: {:.0}% shared corridor — near-duplicates must back off, not co-exist",
+                within < 0.6,
+                "{} vs {}: {:.0}% shared corridor — represented ground must be trimmed, not re-emitted",
                 a.id,
                 b.id,
                 within * 100.0
@@ -234,12 +234,18 @@ fn lollipop_splits_at_the_mouth() {
     assert_eq!(sections.len(), 2, "expected stick + head");
 
     let centre = shapes::to_gps(950.0, 0.0);
+    // The joint snap may extend the head a few points down the stick to
+    // close the mouth seam, so the head is the section MOSTLY on the
+    // circle, not entirely on it.
     let head = sections
         .iter()
         .find(|s| {
-            s.polyline
+            let on_circle = s
+                .polyline
                 .iter()
-                .all(|p| (90.0..230.0).contains(&haversine_distance(p, &centre)))
+                .filter(|p| (90.0..230.0).contains(&haversine_distance(p, &centre)))
+                .count();
+            on_circle * 10 >= s.polyline.len() * 7
         })
         .expect("head section");
     assert!((650.0..1250.0).contains(&head.distance_meters));
@@ -248,6 +254,31 @@ fn lollipop_splits_at_the_mouth() {
         (500.0..1000.0).contains(&stick.distance_meters),
         "stick length {:.0} m should be one pass (~800 m)",
         stick.distance_meters
+    );
+}
+
+#[test]
+fn chain_members_share_one_reference_and_meet_exactly() {
+    // Rule 7: the stick and head tile one physical line and every
+    // outing covers both, so both sections must cut their geometry
+    // from the same activity and their joint must be a shared trace
+    // point — never splices from different days with an offset seam.
+    let tracks = shapes::lollipop(6);
+    let sections = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 2, "expected stick + head");
+    assert_eq!(
+        sections[0].representative_activity_id, sections[1].representative_activity_id,
+        "chain members must share one covering reference"
+    );
+    let ends = |s: &FrequentSection| [*s.polyline.first().unwrap(), *s.polyline.last().unwrap()];
+    let joint = ends(&sections[0])
+        .iter()
+        .flat_map(|a| ends(&sections[1]).map(|b| haversine_distance(a, &b)))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        joint < 0.5,
+        "joint gap {joint:.1} m — chain joints must meet on a shared trace point"
     );
 }
 

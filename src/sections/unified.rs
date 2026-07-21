@@ -36,17 +36,30 @@
 //!    section is always ground someone really covered, never an average
 //!    and never stitched from several activities.
 //! 6. **Selection backoff.** Candidates are emitted best-first (most
-//!    real usage represented) and a candidate whose own geometry mostly
-//!    runs within a cell's width of accepted polylines is not emitted
-//!    at all. Nothing is merged and nothing synthetic is created —
-//!    braid-lane twins simply lose to the better line, and their
-//!    traversals still match it. Under-representing beats scattering
-//!    near-duplicates. "Too close" needs no new constant: laterally it
-//!    is one cell (braid width, proximity/2), and "mostly" is
-//!    `1 − divergence`, the same share that defines same-traffic.
-//!    Geometry against polylines, not cell blobs: a loop or variant
-//!    beside a corridor swings wide of the winner's line and keeps its
-//!    own distinct shape.
+//!    real usage represented) and ground already represented by an
+//!    accepted polyline is never re-emitted: a candidate wholly within
+//!    a cell's width of the accepted catalogue backs off, and a partly
+//!    represented one is trimmed to its longest unrepresented run,
+//!    standing only if that remnant still qualifies on its own
+//!    ([`probe_mask`], [`unrepresented_runs`]). Nothing is merged and
+//!    nothing synthetic is created — braid-lane twins simply lose to
+//!    the better line, and their traversals still match it.
+//!    Under-representing beats scattering near-duplicates. "Too close"
+//!    needs no new constant: it is one cell (braid width, proximity/2),
+//!    and deliberately planimetric — plan cells are atomic in the
+//!    partition, so stacked ground never surfaces as a separate
+//!    candidate here, and cross-day absolute elevation comparison is
+//!    barometric drift, not signal. Geometry against polylines, not
+//!    cell blobs: a loop or variant beside a corridor swings wide of
+//!    the winner's line and keeps its own distinct shape.
+//! 7. **Chain-coherent references.** Sections that tile one physical
+//!    line (endpoints within two cells) prefer geometry cut from ONE
+//!    covering activity ([`unify_chain_references`]): a fork-cut chain
+//!    renders as consecutive ranges of a single real trace, joints
+//!    meeting on a shared trace point instead of splices from
+//!    different days. Boundaries, visits, and evidence are untouched —
+//!    only the reference pick is coordinated, and never across ground
+//!    no single pass actually connected.
 
 use super::density_grid::{CellGrid, bresenham_cells, longest_run_in_cells};
 use super::overlap::{FullTrackOverlap, OverlapCluster};
@@ -101,6 +114,12 @@ pub enum BoundaryReason {
         represented: u32,
         probed: u32,
         score_metres: f64,
+    },
+    /// Part of the candidate ran within a cell of the accepted
+    /// catalogue and was cut away; the section stands on the remnant.
+    Trim {
+        kept_metres: f64,
+        dropped_metres: f64,
     },
 }
 
@@ -1482,6 +1501,296 @@ fn geo_clusters(tracks: &[(&str, &[GpsPoint])], gap_m: f64) -> Vec<Vec<usize>> {
     keyed.into_iter().map(|(_, members)| members).collect()
 }
 
+/// Per-point representation mask for the selection backoff: a probe
+/// point is represented when accepted geometry runs within a cell's
+/// width in plan. Deliberately planimetric: plan cells are atomic in
+/// the partition, so truly stacked ground (a balcony path directly
+/// over a road) shares its cells and never surfaces as a separate
+/// candidate here, while comparing absolute elevations across
+/// activities recorded on different days is barometric-drift noise
+/// that makes every trim decision flicker.
+fn probe_mask(
+    probe: &[GpsPoint],
+    accepted: &HashMap<Cell, Vec<GpsPoint>>,
+    grid: &CellGrid,
+    cell_size: f64,
+) -> Vec<bool> {
+    probe
+        .iter()
+        .map(|p| {
+            let c = grid.cell_of(p.latitude, p.longitude);
+            (-1..=1i32).any(|dy| {
+                (-1..=1i32).any(|dx| {
+                    accepted.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
+                        v.iter()
+                            .any(|q| crate::geo_utils::haversine_distance(p, q) < cell_size)
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+/// Maximal unrepresented runs of a probe, as half-open index ranges.
+/// Represented islands shorter than `bridge_m` of travel are absorbed
+/// into the surrounding run: crossing the accepted line is incidental
+/// contact, not duplication.
+fn unrepresented_runs(mask: &[bool], cum: &[f64], bridge_m: f64) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < mask.len() {
+        if mask[i] {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < mask.len() && !mask[i] {
+            i += 1;
+        }
+        match runs.last_mut() {
+            Some(last) if cum[s] - cum[last.1 - 1] < bridge_m => last.1 = i,
+            _ => runs.push((s, i)),
+        }
+    }
+    runs
+}
+
+/// Rule 5 corollary: sections that tile one physical line prefer
+/// geometry cut from ONE covering activity, so a chain renders as
+/// consecutive ranges of a single real trace and its joints meet on a
+/// shared trace point instead of splices from different days.
+/// Boundaries, visits, evidence, and — critically — each member's SPAN
+/// are untouched: the covering trace is cut where the member's own
+/// medoid extent projects onto it, so only the source of the pixels
+/// changes and jackknife extent stability is preserved (re-deriving
+/// spans from the cover's portions sheared extents and cost ~20 points
+/// of core persistence when probed). Assignment is a deterministic
+/// greedy cover: the activity with a portion in the most
+/// still-unassigned members wins (ties: most metres it already
+/// represents, most portion metres, then activity id), so a Y-joint
+/// unifies each limb pair that a real pass actually connects and never
+/// invents a through-line no one rode.
+fn unify_chain_references(
+    sections: &mut [FrequentSection],
+    portions: &[Vec<Portion>],
+    sport_tracks: &[(&str, &[GpsPoint])],
+    cell_size: f64,
+    divergence: f64,
+) {
+    let n = sections.len();
+    if n < 2 {
+        return;
+    }
+    let link_tol = 2.0 * cell_size;
+    let ends: Vec<Option<[GpsPoint; 2]>> = sections
+        .iter()
+        .map(|s| match (s.polyline.first(), s.polyline.last()) {
+            (Some(a), Some(b)) => Some([*a, *b]),
+            _ => None,
+        })
+        .collect();
+
+    let mut uf: UnionFind<usize> = UnionFind::with_capacity(n);
+    for i in 0..n {
+        uf.make_set(i);
+    }
+    let mut links: Vec<(usize, usize)> = Vec::new();
+    for (i, ea) in ends.iter().enumerate() {
+        let Some(ea) = ea else { continue };
+        for (j, eb) in ends.iter().enumerate().skip(i + 1) {
+            let Some(eb) = eb else { continue };
+            let close = ea.iter().any(|a| {
+                eb.iter()
+                    .any(|b| crate::geo_utils::haversine_distance(a, b) <= link_tol)
+            });
+            if close {
+                links.push((i, j));
+                uf.union(&i, &j);
+            }
+        }
+    }
+    if links.is_empty() {
+        return;
+    }
+    let mut components: Vec<Vec<usize>> = uf.groups().into_values().collect();
+    components.sort();
+
+    // member → (track index, start, end) once a covering activity wins it
+    let mut chosen: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+    for members in &components {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut cand: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &m in members {
+            for &(t, ..) in &portions[m] {
+                cand.entry(t).or_default().push(m);
+            }
+        }
+        let mut ts: Vec<usize> = cand.keys().copied().collect();
+        ts.sort_by(|&a, &b| sport_tracks[a].0.cmp(sport_tracks[b].0));
+        let mut unassigned: HashSet<usize> = members.iter().copied().collect();
+        let mut banned: HashSet<usize> = HashSet::new();
+        loop {
+            let mut pick: Option<(usize, f64, f64, usize)> = None;
+            for &t in &ts {
+                if banned.contains(&t) {
+                    continue;
+                }
+                let ms: Vec<usize> = cand[&t]
+                    .iter()
+                    .copied()
+                    .filter(|m| unassigned.contains(m))
+                    .collect();
+                if ms.len() < 2 {
+                    continue;
+                }
+                let rep_m: f64 = ms
+                    .iter()
+                    .filter(|&&m| sections[m].representative_activity_id == sport_tracks[t].0)
+                    .map(|&m| sections[m].distance_meters)
+                    .sum();
+                let tot_m: f64 = ms
+                    .iter()
+                    .map(|&m| {
+                        portions[m]
+                            .iter()
+                            .find(|p| p.0 == t)
+                            .map(|p| p.3)
+                            .unwrap_or(0.0)
+                    })
+                    .sum();
+                let better = match pick {
+                    None => true,
+                    Some((c, r, tm, _)) => {
+                        ms.len() > c || (ms.len() == c && (rep_m > r || (rep_m == r && tot_m > tm)))
+                    }
+                };
+                if better {
+                    pick = Some((ms.len(), rep_m, tot_m, t));
+                }
+            }
+            let Some((_, _, _, t)) = pick else { break };
+            // Extent-preserving re-cut: the member keeps the span its
+            // medoid machinery chose (that span is what jackknife
+            // stability rests on); only the source trace changes.
+            // Project the current polyline's ends onto t's portion and
+            // cut there. The cover must run the member's own line, not
+            // a braid twin or a shortcut through the same corridor:
+            // both ends and the whole body must sit within half a cell
+            // of the cut, or the member keeps its own reference.
+            let half = 0.5 * cell_size;
+            let mut assigned_any = false;
+            for &m in &cand[&t] {
+                if !unassigned.contains(&m) {
+                    continue;
+                }
+                let Some(&(_, s, e, _)) = portions[m].iter().find(|p| p.0 == t) else {
+                    continue;
+                };
+                let pts = sport_tracks[t].1;
+                let g = &sections[m].polyline;
+                let (Some(gf), Some(gl)) = (g.first(), g.last()) else {
+                    continue;
+                };
+                let nearest = |target: &GpsPoint| -> (usize, f64) {
+                    let mut best = (s, f64::INFINITY);
+                    for (k, p) in pts.iter().enumerate().take(e).skip(s) {
+                        let d = crate::geo_utils::haversine_distance(p, target);
+                        if d < best.1 {
+                            best = (k, d);
+                        }
+                    }
+                    best
+                };
+                let (i0, d0) = nearest(gf);
+                let (i1, d1) = nearest(gl);
+                if d0 > half || d1 > half {
+                    continue;
+                }
+                let (lo, hi) = if i0 <= i1 { (i0, i1) } else { (i1, i0) };
+                if hi < lo + 1 {
+                    continue;
+                }
+                let cut = &pts[lo..=hi];
+                let off_line = g
+                    .iter()
+                    .step_by(3)
+                    .filter(|p| {
+                        !cut.iter()
+                            .any(|q| crate::geo_utils::haversine_distance(p, q) < half)
+                    })
+                    .count();
+                if off_line * 20 > g.len().div_ceil(3) {
+                    continue;
+                }
+                // A shallow shortcut can hide inside the lateral
+                // envelope (a hairpin bulge adds path without leaving
+                // it); the cut must also match the member's length
+                // within the divergence share.
+                let cut_m = crate::matching::calculate_route_distance(cut);
+                if (cut_m - sections[m].distance_meters).abs()
+                    > divergence * sections[m].distance_meters
+                {
+                    continue;
+                }
+                chosen.insert(m, (t, lo, hi + 1));
+                unassigned.remove(&m);
+                assigned_any = true;
+            }
+            if !assigned_any {
+                banned.insert(t);
+            }
+        }
+    }
+    if chosen.is_empty() {
+        return;
+    }
+
+    // Joint snap: linked pairs now cut from the same trace meet at a
+    // shared trace point. A gap wider than the link tolerance is real
+    // unrepresented ground and stays open.
+    for &(i, j) in &links {
+        let (Some(&(ti, si, ei)), Some(&(tj, sj, ej))) = (chosen.get(&i), chosen.get(&j)) else {
+            continue;
+        };
+        if ti != tj {
+            continue;
+        }
+        let pts = sport_tracks[ti].1;
+        let (ma, sa, ea, mb, sb, eb) = if si <= sj {
+            (i, si, ei, j, sj, ej)
+        } else {
+            (j, sj, ej, i, si, ei)
+        };
+        if ea < sb {
+            let gap_m: f64 = (ea..=sb)
+                .map(|k| crate::geo_utils::haversine_distance(&pts[k - 1], &pts[k]))
+                .sum();
+            if gap_m > link_tol {
+                continue;
+            }
+        }
+        let mid = (ea + sb) / 2;
+        if mid <= sa || mid + 2 > eb {
+            continue;
+        }
+        chosen.insert(ma, (ti, sa, mid + 1));
+        chosen.insert(mb, (ti, mid, eb));
+    }
+
+    for (&m, &(t, s, e)) in &chosen {
+        let pts = sport_tracks[t].1;
+        let e = e.min(pts.len());
+        if e < s + 2 {
+            continue;
+        }
+        sections[m].polyline = pts[s..e].to_vec();
+        sections[m].distance_meters = crate::matching::calculate_route_distance(&pts[s..e]);
+        sections[m].representative_activity_id = sport_tracks[t].0.to_string();
+    }
+}
+
 /// Detect sections for one sport's tracks via the unified pipeline.
 ///
 /// Tracks split into geographic clusters first and the pipeline runs
@@ -1639,55 +1948,124 @@ fn detect_for_cluster(
 
     let backoff_grid = CellGrid::new(cell_size, coverage.ref_lat);
     let mut accepted_pts: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
+    let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
     for (n_idx, portions, score) in candidates {
         let node = &supernodes[n_idx];
-        let approx_len = node.cells.len() as f64 * cell_size;
-        // Selection backoff (rule 6): a candidate whose own geometry
-        // mostly runs within a cell's width (braid width, proximity/2)
-        // of accepted polylines is not emitted — the better line
-        // already represents this way and the candidate's traversals
-        // still match it. Geometry against polylines, not cell blobs:
-        // a braid twin hugs the winner point for point, while a loop or
-        // variant beside a corridor swings wide of it and keeps its own
-        // distinct shape.
-        let probe = portions
+        // Selection backoff (rule 6): ground already represented by an
+        // accepted polyline is never re-emitted. The probe walks the
+        // candidate's best portion; representation means accepted
+        // geometry within a cell's width (braid width, proximity/2) in
+        // plan at the same elevation level — a balcony path above an
+        // accepted road is distinct ground, not a duplicate. A wholly
+        // represented candidate backs off; a partly represented one is
+        // trimmed to its longest unrepresented run and stands only if
+        // the remnant still qualifies on its own. Geometry against
+        // polylines, not cell blobs: a braid twin hugs the winner
+        // point for point, while a loop or variant beside a corridor
+        // swings wide of it and keeps its own distinct shape.
+        let Some(&(pt_idx, ps, pe, _)) = portions
             .iter()
             .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|&(t, s, e, _)| &sport_tracks[t].1[s..e]);
-        let mut near = 0usize;
-        let mut total = 0usize;
-        if let Some(probe) = probe {
-            for p in probe.iter().step_by(5) {
-                total += 1;
-                let c = backoff_grid.cell_of(p.latitude, p.longitude);
-                let hit = (-1..=1i32).any(|dy| {
-                    (-1..=1i32).any(|dx| {
-                        accepted_pts.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
-                            v.iter()
-                                .any(|q| crate::geo_utils::haversine_distance(p, q) < cell_size)
-                        })
-                    })
-                });
-                if hit {
-                    near += 1;
-                }
+        else {
+            continue;
+        };
+        let probe = &sport_tracks[pt_idx].1[ps..pe];
+        let mask = probe_mask(probe, &accepted_pts, &backoff_grid, cell_size);
+        let near = mask.iter().filter(|&&m| m).count();
+        let (portions, approx_len, was_trimmed) = if near == 0 {
+            (portions, node.cells.len() as f64 * cell_size, false)
+        } else {
+            let mut cum = Vec::with_capacity(probe.len());
+            let mut acc = 0.0;
+            cum.push(0.0);
+            for w in probe.windows(2) {
+                acc += crate::geo_utils::haversine_distance(&w[0], &w[1]);
+                cum.push(acc);
             }
-        }
-        if total > 0 && near as f64 >= same_traffic * total as f64 {
-            if let Some(probe) = probe {
+            let runs = unrepresented_runs(&mask, &cum, cell_size);
+            let kept = runs
+                .iter()
+                .copied()
+                .max_by(|&(s0, e0), &(s1, e1)| {
+                    (cum[e0 - 1] - cum[s0])
+                        .partial_cmp(&(cum[e1 - 1] - cum[s1]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .filter(|&(s, e)| cum[e - 1] - cum[s] >= config.min_section_length);
+            let Some((rs, re)) = kept else {
                 let mid = probe[probe.len() / 2];
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
                     reason: BoundaryReason::Backoff {
                         represented: near as u32,
-                        probed: total as u32,
+                        probed: mask.len() as u32,
                         score_metres: score,
                     },
                 });
+                continue;
+            };
+            if re - rs == probe.len() {
+                (portions, node.cells.len() as f64 * cell_size, false)
+            } else {
+                // One ring of dilation keeps the corridor's full lane
+                // width: the probe is a single track's line, and
+                // co-travellers one braid row over must not fall out of
+                // the reduced core (that collapses their portions and
+                // kills support for ground that was never represented).
+                let kept_cells: HashSet<Cell> = probe[rs..re]
+                    .iter()
+                    .flat_map(|p| {
+                        let c = coverage.grid.cell_of(p.latitude, p.longitude);
+                        (-1..=1i32)
+                            .flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
+                    })
+                    .collect();
+                let reduced = Supernode {
+                    cells: node
+                        .cells
+                        .iter()
+                        .copied()
+                        .filter(|c| kept_cells.contains(c))
+                        .collect(),
+                    tracks: node.tracks.clone(),
+                };
+                let approx = reduced.cells.len() as f64 * cell_size;
+                let trimmed =
+                    portions_for(&reduced, &coverage, sport_tracks, config, cell_size, tun);
+                if reduced.cells.is_empty()
+                    || trimmed.is_empty()
+                    || !has_support(&trimmed, approx, config, opportunity(&reduced, &coverage))
+                {
+                    let mid = probe[probe.len() / 2];
+                    records.push(BoundaryRecord {
+                        latitude: mid.latitude,
+                        longitude: mid.longitude,
+                        reason: BoundaryReason::Backoff {
+                            represented: near as u32,
+                            probed: mask.len() as u32,
+                            score_metres: score,
+                        },
+                    });
+                    continue;
+                }
+                let kept_m = cum[re - 1] - cum[rs];
+                for cut in [(rs > 0).then_some(rs), (re < probe.len()).then_some(re - 1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    records.push(BoundaryRecord {
+                        latitude: probe[cut].latitude,
+                        longitude: probe[cut].longitude,
+                        reason: BoundaryReason::Trim {
+                            kept_metres: kept_m,
+                            dropped_metres: acc - kept_m,
+                        },
+                    });
+                }
+                (trimmed, approx, true)
             }
-            continue;
-        }
+        };
 
         // Synthesise an OverlapCluster (anchor-paired) for process_cluster.
         let anchor = portions[0];
@@ -1747,12 +2125,29 @@ fn detect_for_cluster(
             // as metadata (confidence, spread, density). The app's
             // reference-activity model (set reference, trim/extend)
             // builds on exactly this guarantee.
-            if let Some(&(t_idx, s, e, dist)) = portions
-                .iter()
-                .find(|&&(t_idx, ..)| sport_tracks[t_idx].0 == section.representative_activity_id)
-            {
+            //
+            // A trimmed candidate renders from its longest portion
+            // instead: remnant portions mix full coverers with corner
+            // clips, and the medoid's average-minimum-distance has a
+            // subset bias — a short central fragment is near every
+            // longer trace, wins the medoid, and collapses the section
+            // to itself. The longest portion is also the most stable
+            // render under jackknife (median and closest-to-remnant
+            // picks were probed and both jitter as the portion set
+            // shifts). Visits still count every contributor.
+            let render = if was_trimmed {
+                portions
+                    .iter()
+                    .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+            } else {
+                portions.iter().find(|&&(t_idx, ..)| {
+                    sport_tracks[t_idx].0 == section.representative_activity_id
+                })
+            };
+            if let Some(&(t_idx, s, e, dist)) = render {
                 section.polyline = sport_tracks[t_idx].1[s..e].to_vec();
                 section.distance_meters = dist;
+                section.representative_activity_id = sport_tracks[t_idx].0.to_string();
             }
             info!(
                 "[Unified]   node cell0={:?} cells={} approx_len={:.0} portions={} → {} len={:.0} visits={}",
@@ -1772,8 +2167,17 @@ fn detect_for_cluster(
                     .push(*p);
             }
             sections.push(section);
+            emitted_portions.push(portions);
         }
     }
+
+    unify_chain_references(
+        &mut sections,
+        &emitted_portions,
+        sport_tracks,
+        cell_size,
+        divergence,
+    );
 
     sections
 }
@@ -2028,5 +2432,49 @@ mod tests {
             *s += 240.0;
         }
         assert_eq!(lift_spans(&pts, Some(&secs)).len(), 1);
+    }
+
+    /// A line of points heading north at ~10 m spacing, offset east.
+    fn row(east_m: f64, n: usize) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| GpsPoint::new(46.0 + 9.0e-5 * i as f64, 7.0 + east_m / 77_000.0))
+            .collect()
+    }
+
+    fn accept(line: &[GpsPoint], grid: &CellGrid) -> HashMap<Cell, Vec<GpsPoint>> {
+        let mut map: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
+        for p in line {
+            map.entry(grid.cell_of(p.latitude, p.longitude))
+                .or_default()
+                .push(*p);
+        }
+        map
+    }
+
+    #[test]
+    fn probe_beside_accepted_line_is_represented() {
+        let grid = CellGrid::new(100.0, 46.0);
+        let accepted = accept(&row(0.0, 100), &grid);
+        let mask = probe_mask(&row(30.0, 100), &accepted, &grid, 100.0);
+        assert!(mask.iter().all(|&m| m), "30 m offset is braid width");
+        let mask = probe_mask(&row(300.0, 100), &accepted, &grid, 100.0);
+        assert!(mask.iter().all(|&m| !m), "300 m offset is distinct ground");
+    }
+
+    #[test]
+    fn crossing_islands_bridge_but_long_overlap_splits() {
+        // 10 m point spacing: cum[i] = 10 * i.
+        let cum: Vec<f64> = (0..40).map(|i| 10.0 * i as f64).collect();
+        let mut mask = vec![false; 40];
+        for m in mask.iter_mut().skip(18).take(3) {
+            *m = true; // 30 m contact: an incidental crossing
+        }
+        let runs = unrepresented_runs(&mask, &cum, 100.0);
+        assert_eq!(runs, vec![(0, 40)], "short island bridges");
+        for m in mask.iter_mut().skip(18).take(15) {
+            *m = true; // 150 m of real duplication
+        }
+        let runs = unrepresented_runs(&mask, &cum, 100.0);
+        assert_eq!(runs, vec![(0, 18), (33, 40)], "long overlap splits runs");
     }
 }
