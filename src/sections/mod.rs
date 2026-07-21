@@ -61,7 +61,7 @@ pub use consensus::{
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
-pub use unified::detect_sections_unified;
+pub use unified::{confirmed_lift_spans, detect_sections_unified, lift_spans};
 pub(crate) use portions::{compute_activity_portions, compute_portions_for_activities};
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub use postprocess::{

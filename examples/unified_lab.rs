@@ -843,6 +843,48 @@ fn main() {
     sport_list.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     println!("Sports: {:?}", sport_list);
 
+    // Lift-carried spans (corpus-confirmed), rendered so the exclusion
+    // rule can be eyeballed.
+    if let Some(ref out) = out_dir {
+        std::fs::create_dir_all(out).ok();
+        let track_view: Vec<(&str, &[GpsPoint])> = activities
+            .iter()
+            .map(|a| (a.id.as_str(), a.points.as_slice()))
+            .collect();
+        let confirmed = tracematch::confirmed_lift_spans(&track_view);
+        let mut feats: Vec<serde_json::Value> = Vec::new();
+        for (a, spans) in activities.iter().zip(&confirmed) {
+            for &(s, e) in spans {
+                let coords: Vec<[f64; 2]> = a.points[s..=e]
+                    .iter()
+                    .map(|p| [p.longitude, p.latitude])
+                    .collect();
+                let rise = match (a.points[e].elevation, a.points[s].elevation) {
+                    (Some(top), Some(bot)) => top - bot,
+                    _ => 0.0,
+                };
+                feats.push(serde_json::json!({
+                    "type": "Feature",
+                    "geometry": { "type": "LineString", "coordinates": coords },
+                    "properties": {
+                        "activity": a.id,
+                        "points": e - s + 1,
+                        "rise_m": rise.round(),
+                        "start_idx": s,
+                        "end_idx": e,
+                    },
+                }));
+            }
+        }
+        if !feats.is_empty() {
+            let n_feats = feats.len();
+            let fc = serde_json::json!({ "type": "FeatureCollection", "features": feats });
+            let path = out.join("lift_spans.geojson");
+            std::fs::write(&path, serde_json::to_string(&fc).unwrap()).ok();
+            println!("Lift spans: {} flagged → {}", n_feats, path.display());
+        }
+    }
+
     // Pooled pass: the ground is sport-agnostic — a trace is a trace.
     // "All" detects over every activity; sport filtering belongs to the
     // comparison layer, not to detection.
