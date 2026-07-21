@@ -28,7 +28,6 @@ mod consensus;
 mod corridor;
 mod density_grid;
 mod flow_graph;
-mod unified;
 pub mod incremental;
 mod medoid;
 pub mod optimized;
@@ -38,6 +37,7 @@ mod postprocess;
 pub mod progress;
 mod rtree;
 mod traces;
+mod unified;
 
 use crate::matching::calculate_route_distance;
 use crate::{GpsPoint, RouteGroup};
@@ -61,7 +61,6 @@ pub use consensus::{
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
-pub use unified::{confirmed_lift_spans, detect_sections_unified, lift_spans};
 pub(crate) use portions::{compute_activity_portions, compute_portions_for_activities};
 pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
 pub use postprocess::{
@@ -73,6 +72,10 @@ pub(crate) use postprocess::{
 };
 pub use rtree::{IndexedPoint, build_rtree};
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
+pub use unified::{
+    Tunables, confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections_unified,
+    detect_sections_unified_tuned, lift_spans, lift_spans_tuned,
+};
 
 // Re-export single-route section utilities (find/split known sections).
 pub use optimized::{
