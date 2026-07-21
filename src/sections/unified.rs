@@ -138,7 +138,13 @@ pub struct Tunables {
     /// overlaps the same range, which is why grade alone never
     /// classifies (straightness and jitter do). Working band measured
     /// at 0.18-0.26; at 0.30 the floor exceeds real lift grades and
-    /// cable-car ground resurfaces.
+    /// cable-car ground resurfaces. 0.18 was probed against 0.22: it
+    /// flags 29 more spans (mostly real 18-21% lift rides) but its
+    /// only catalogue effect is losing a real winding piste section
+    /// to collateral span growth, and a straightness-by-grade scan
+    /// shows the 0.22 catalogue holds no lift-like section anyway.
+    /// The floor only marks ascending ground; lift lines are only
+    /// ever ascended, and their sub-floor evidence forms no section.
     pub lift_min_grade: f64,
     /// Lift exclusion: minimum chord/arc straightness, for qualifying
     /// windows and for the descent-retrace rescue path. Measured lift
