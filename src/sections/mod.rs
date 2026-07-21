@@ -839,7 +839,7 @@ pub fn detect_sections(
         DetectionMethod::DensityGrid => {
             detect_sections_multiscale(tracks, sport_types, groups, config).sections
         }
-        DetectionMethod::Unified => detect_sections_unified(tracks, sport_types, config),
+        DetectionMethod::Unified => detect_sections_unified(tracks, &[], sport_types, config),
     }
 }
 
