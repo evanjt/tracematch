@@ -59,24 +59,133 @@ use std::collections::{HashMap, HashSet};
 
 type Cell = (i32, i32);
 
+/// One contributing activity's single-pass portion through a component:
+/// (track index, start point, end point, metres).
+type Portion = (usize, usize, usize, f64);
+
 /// Pass class: how many times one track passes through one cell.
 /// Saturates at 3 — an oval lapped 4 or 12 times reads the same.
 const PASS_CLASS_MAX: u8 = 3;
-/// A re-arrival only counts as a new pass after this many distinct cell
-/// events away: a wiggly line re-clipping a cell corner is one pass, a
-/// lap or a return leg is not.
-const PASS_AWAY_CELLS: usize = 5;
-/// Re-arrivals at a different elevation level are new ground stacked
-/// vertically (switchback legs), never a repeat pass.
-const PASS_ELE_TOL_M: f64 = 15.0;
-/// Passes are counted on a subgrid this many times finer than the
-/// partition grid. Corridor cells must be coarse so lateral GPS
-/// braiding stays one corridor, but at that size a small loop's laps
-/// re-touch each cell within the away-gap and are invisible. Counting
-/// on the fine grid and aggregating each track's fine-cell classes to
-/// the partition cell by mode answers both questions at their natural
-/// scale.
-const PASS_SUBGRID: f64 = 3.0;
+
+/// The detector's free constants, each documented with its meaning and
+/// the evidence behind its default. Production always runs
+/// [`Tunables::DEFAULT`]; [`detect_sections_unified_tuned`] exists so
+/// the validation lab can sweep each value one at a time and verify the
+/// defaults sit on plateaus rather than on peaks fitted to one
+/// athlete's corpus (plateau tables: unified-lab REPORT.md, A1).
+#[derive(Clone, Copy, Debug)]
+pub struct Tunables {
+    /// A re-arrival only counts as a new pass after this many distinct
+    /// fine-cell events away: a wiggly line re-clipping a cell corner
+    /// is one pass, a lap or a return leg is not. Must exceed the
+    /// couple of events a wobbled line spends around one corner while
+    /// staying far below a lap's event count. Plateau: catalogue
+    /// byte-stable across 3-8 on both corpora.
+    pub pass_away_cells: usize,
+    /// Elevation separation that makes ground a different level.
+    /// Re-arrivals beyond it are switchback legs stacked vertically
+    /// (new ground, never a repeat pass); the single-pass cut uses the
+    /// same tolerance to keep hairpin climbs uncut. Sits between GPS
+    /// elevation noise (under ~10 m) and the vertical gap of stacked
+    /// switchback legs (20-40 m on the validation corpora). Plateau:
+    /// 10-25 m within a few points on every metric, both corpora.
+    pub ele_level_tol_m: f64,
+    /// Passes are counted on a subgrid this many times finer than the
+    /// partition grid. Corridor cells must be coarse so lateral GPS
+    /// braiding stays one corridor, but at that size a small loop's
+    /// laps re-touch each cell within the away-gap and are invisible.
+    /// Counting on the fine grid and aggregating each track's
+    /// fine-cell classes to the partition cell by mode answers both
+    /// questions at their natural scale. A resolution, not a free
+    /// knob: fine cells are cell/3 ≈ 33 m at default proximity,
+    /// between GPS braid noise (subgrid 4 over-cuts, stability −12
+    /// points on Sion) and small-feature scale (subgrid 2
+    /// under-resolves laps on Sion, over-fragments the full corpus).
+    /// 3 is the value that behaves on both corpora.
+    pub pass_subgrid: f64,
+    /// Single-pass cut: a re-entry only counts against ground last
+    /// touched more than this many cell events ago, so wobbling along
+    /// a cell boundary never looks like a return. Derived as
+    /// `pass_window + 1`: no event inside the decision window can arm
+    /// its own trigger. Plateau: 4-10 moves the catalogue ≤4% on both
+    /// corpora.
+    pub dwell_events: usize,
+    /// Single-pass cut: how many recent cell events are inspected...
+    pub pass_window: usize,
+    /// ...and how many of them must be re-entries before the portion
+    /// is cut where the re-covering began. A majority-of-recent rule;
+    /// the swept combinations (2-of-4 through 4-of-6) are flat on both
+    /// corpora.
+    pub pass_needed: usize,
+    /// Single-pass cut: neighbourhood reach in fine cells. Reach, not
+    /// cell coarseness, supplies the lateral tolerance for GPS
+    /// braiding, so small features still produce enough events to be
+    /// seen. One fine cell ≈ braid width (proximity/6); the minimum
+    /// that absorbs braid. Reach 2 triples the lateral reach and costs
+    /// 16-18% of catalogue ground on both corpora.
+    pub reach: i32,
+    /// Lift exclusion: window length over which ascent and
+    /// straightness must be sustained. The climb-convention sustain
+    /// scale (a climb, not a spike). Calibrated, with measured failure
+    /// on each side: at 200 m merged spans absorb approach wobble and
+    /// a cable car reads human (the 82% section resurfaces) while the
+    /// steep-walk anchor is excluded; at 400 m the steep-walk anchor
+    /// is lost on both corpora. Residual risk is why the app-side
+    /// speed check remains the eventual robust signal.
+    pub lift_span_m: f64,
+    /// Lift exclusion: minimum sustained ascent grade for a window.
+    /// Measured chairlifts climb at 17-34%; steep walked ground
+    /// overlaps the same range, which is why grade alone never
+    /// classifies (straightness and jitter do). Working band measured
+    /// at 0.18-0.26; at 0.30 the floor exceeds real lift grades and
+    /// cable-car ground resurfaces.
+    pub lift_min_grade: f64,
+    /// Lift exclusion: minimum chord/arc straightness, for qualifying
+    /// windows and for the descent-retrace rescue path. Measured lift
+    /// windows: median 0.996; self-powered steep ground: median 0.73,
+    /// p90 0.894. Calibrated between them: at 0.96 spans merge wobbly
+    /// connectors and dilute the glide signature, at 0.985 spans trim
+    /// to straight cores that dodge the jitter veto; both lose the
+    /// steep-walk anchor on both corpora.
+    pub lift_min_straight: f64,
+    /// Lift exclusion: raw arc over smoothed arc at and above which a
+    /// span moves like a human. Cabins glide (measured median 1.02,
+    /// p95 1.065); every walked steep-straight climb measured, across
+    /// four countries, sits at 1.053 or higher. Deliberately the
+    /// highest safe value: 1.065+ starts eating real climbs on both
+    /// corpora, while the cable-car gate holds all the way down to
+    /// 1.02. Device-sensitive; the app-side speed check is the
+    /// eventual robust signal.
+    pub jitter_human_min: f64,
+    /// Lift exclusion: matching tolerance when hunting a straight
+    /// descent along a lift candidate's own line (the rescue for
+    /// stairs and fall-line paths that people also walk down).
+    /// Plateau: 40-80 m byte-flat on both corpora.
+    pub descent_match_m: f64,
+}
+
+impl Tunables {
+    pub const DEFAULT: Tunables = Tunables {
+        pass_away_cells: 5,
+        ele_level_tol_m: 15.0,
+        pass_subgrid: 3.0,
+        dwell_events: 6,
+        pass_window: 5,
+        pass_needed: 3,
+        reach: 1,
+        lift_span_m: 300.0,
+        lift_min_grade: 0.22,
+        lift_min_straight: 0.975,
+        jitter_human_min: 1.05,
+        descent_match_m: 60.0,
+    };
+}
+
+impl Default for Tunables {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// Per-sport coverage grid: unique tracks per cell, plus each track's
 /// pass class per cell.
@@ -117,13 +226,13 @@ struct PassScratch {
 /// lift ground never becomes a section and never bridges the runs it
 /// connects. A descending lift ride is geometrically indistinguishable
 /// from a steep descent and is also left to the app-side speed check.
-/// Constants queued for the plateau sweep (REPORT.md, A1).
+/// Constants live in [`Tunables`] with their measured envelopes.
 pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
-    const LIFT_SPAN_M: f64 = 300.0;
-    const LIFT_MIN_GRADE: f64 = 0.22;
-    const LIFT_MIN_STRAIGHT: f64 = 0.975;
-    const JITTER_HUMAN_MIN: f64 = 1.05;
+    lift_spans_tuned(pts, &Tunables::DEFAULT)
+}
 
+/// [`lift_spans`] with explicit [`Tunables`], for the lab's sweeps.
+pub fn lift_spans_tuned(pts: &[GpsPoint], tun: &Tunables) -> Vec<(usize, usize)> {
     let n = pts.len();
     if n < 3 || pts.iter().filter(|p| p.elevation.is_some()).count() < 2 {
         return Vec::new();
@@ -172,21 +281,21 @@ pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
         if j < i {
             j = i;
         }
-        while j + 1 < n && cum[j] - cum[i] < LIFT_SPAN_M {
+        while j + 1 < n && cum[j] - cum[i] < tun.lift_span_m {
             j += 1;
         }
         let run = cum[j] - cum[i];
-        if run < LIFT_SPAN_M {
+        if run < tun.lift_span_m {
             break;
         }
         let (Some(a), Some(b)) = (smooth[i], smooth[j]) else {
             continue;
         };
-        if (b - a) / run < LIFT_MIN_GRADE {
+        if (b - a) / run < tun.lift_min_grade {
             continue;
         }
         let chord = crate::geo_utils::haversine_distance(&sp[i], &sp[j]);
-        if chord / run < LIFT_MIN_STRAIGHT {
+        if chord / run < tun.lift_min_straight {
             continue;
         }
         for m in &mut marked[i..=j] {
@@ -200,12 +309,12 @@ pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
             (Some(top), Some(bot)) => top - bot,
             _ => 0.0,
         };
-        if rise < LIFT_SPAN_M * LIFT_MIN_GRADE * 0.5 {
+        if rise < tun.lift_span_m * tun.lift_min_grade * 0.5 {
             return;
         }
         let smooth_arc = (cum[e] - cum[s]).max(1.0);
         let jitter = (cum_raw[e] - cum_raw[s]) / smooth_arc;
-        if jitter < JITTER_HUMAN_MIN {
+        if jitter < tun.jitter_human_min {
             spans.push((s, e));
         }
     };
@@ -237,11 +346,19 @@ pub fn lift_spans(pts: &[GpsPoint]) -> Vec<(usize, usize)> {
 /// rescued when any track descends most of its rise along its line with
 /// a near-straight path of its own.
 pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, usize)>> {
-    const LIFT_MIN_STRAIGHT: f64 = 0.975;
-    const DESCENT_MATCH_M: f64 = 60.0;
+    confirmed_lift_spans_tuned(tracks, &Tunables::DEFAULT)
+}
 
-    let candidates: Vec<Vec<(usize, usize)>> =
-        tracks.iter().map(|(_, pts)| lift_spans(pts)).collect();
+/// [`confirmed_lift_spans`] with explicit [`Tunables`], for the lab's
+/// sweeps.
+pub fn confirmed_lift_spans_tuned(
+    tracks: &[(&str, &[GpsPoint])],
+    tun: &Tunables,
+) -> Vec<Vec<(usize, usize)>> {
+    let candidates: Vec<Vec<(usize, usize)>> = tracks
+        .iter()
+        .map(|(_, pts)| lift_spans_tuned(pts, tun))
+        .collect();
     if candidates.iter().all(|c| c.is_empty()) {
         return candidates;
     }
@@ -259,7 +376,7 @@ pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, u
             bb
         })
         .collect();
-    let pad = DESCENT_MATCH_M / 111_000.0 * 2.0;
+    let pad = tun.descent_match_m / 111_000.0 * 2.0;
 
     candidates
         .iter()
@@ -271,7 +388,10 @@ pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, u
                 .copied()
                 .filter(|&(s, e)| {
                     let line = &pts[s..=e];
-                    let rise = match (line.last().and_then(|p| p.elevation), line.first().and_then(|p| p.elevation)) {
+                    let rise = match (
+                        line.last().and_then(|p| p.elevation),
+                        line.first().and_then(|p| p.elevation),
+                    ) {
                         (Some(top), Some(bot)) => top - bot,
                         _ => return true,
                     };
@@ -292,15 +412,14 @@ pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, u
                         {
                             return false;
                         }
-                        super::find_all_track_portions(op, line, DESCENT_MATCH_M)
+                        super::find_all_track_portions(op, line, tun.descent_match_m)
                             .into_iter()
                             .any(|(ps, pe, _)| {
                                 let pe = pe.min(op.len() - 1);
                                 if pe <= ps + 2 {
                                     return false;
                                 }
-                                let (Some(a), Some(b)) =
-                                    (op[ps].elevation, op[pe].elevation)
+                                let (Some(a), Some(b)) = (op[ps].elevation, op[pe].elevation)
                                 else {
                                     return false;
                                 };
@@ -312,9 +431,11 @@ pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, u
                                     .windows(2)
                                     .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
                                     .sum();
-                                let chord =
-                                    crate::geo_utils::haversine_distance(&seg[0], &seg[seg.len() - 1]);
-                                arc > 1.0 && chord / arc >= LIFT_MIN_STRAIGHT
+                                let chord = crate::geo_utils::haversine_distance(
+                                    &seg[0],
+                                    &seg[seg.len() - 1],
+                                );
+                                arc > 1.0 && chord / arc >= tun.lift_min_straight
                             })
                     });
                     !descended_straight
@@ -324,7 +445,11 @@ pub fn confirmed_lift_spans(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, u
         .collect()
 }
 
-fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> CoverageGrid {
+fn build_coverage_grid(
+    tracks: &[(&str, &[GpsPoint])],
+    cell_size_m: f64,
+    tun: &Tunables,
+) -> CoverageGrid {
     let ref_lat: f64 = {
         let mut sum = 0.0;
         let mut n = 0usize;
@@ -338,9 +463,9 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
     };
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
-    let fine = CellGrid::new(cell_size_m / PASS_SUBGRID, ref_lat);
+    let fine = CellGrid::new(cell_size_m / tun.pass_subgrid, ref_lat);
 
-    let lift = confirmed_lift_spans(tracks);
+    let lift = confirmed_lift_spans_tuned(tracks, tun);
 
     let mut cell_tracks: HashMap<Cell, HashSet<u32>> = HashMap::new();
     let mut cell_passes: HashMap<Cell, HashMap<u32, u8>> = HashMap::new();
@@ -354,13 +479,13 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
         // partition cell it first appeared in.
         let mut scratch: HashMap<Cell, (Cell, PassScratch)> = HashMap::new();
         let mut fine_seq = 0usize;
-        let mut visit_fine = |fc: Cell, pc: Cell, ele: Option<f64>, seq: usize| {
-            match scratch.entry(fc) {
+        let mut visit_fine =
+            |fc: Cell, pc: Cell, ele: Option<f64>, seq: usize| match scratch.entry(fc) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
                     let (_, sc) = e.get_mut();
-                    if seq - sc.last_seq > PASS_AWAY_CELLS {
+                    if seq - sc.last_seq > tun.pass_away_cells {
                         match sc.levels.iter_mut().find(|(lvl, _)| match (*lvl, ele) {
-                            (Some(a), Some(b)) => (a - b).abs() < PASS_ELE_TOL_M,
+                            (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
                             _ => true,
                         }) {
                             Some((_, n)) => *n = (*n + 1).min(PASS_CLASS_MAX),
@@ -378,8 +503,7 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
                         },
                     ));
                 }
-            }
-        };
+            };
 
         // Lift-carried stretches contribute nothing; each remaining
         // stretch walks with a fresh cell seed so no evidence bridges
@@ -400,7 +524,7 @@ fn build_coverage_grid(tracks: &[(&str, &[GpsPoint])], cell_size_m: f64) -> Cove
         for (r_idx, &(rs, re)) in keep.iter().enumerate() {
             if r_idx > 0 {
                 // A skipped lift stretch always counts as "away".
-                fine_seq += PASS_AWAY_CELLS + 1;
+                fine_seq += tun.pass_away_cells + 1;
             }
             let seg = &pts[rs..=re];
             let mut prev = grid.cell_of(seg[0].latitude, seg[0].longitude);
@@ -518,13 +642,7 @@ fn pass_classes_agree(coverage: &CoverageGrid, a: Cell, b: Cell, divergence: f64
 /// component starts on the loop itself: a lapped oval cuts at the start
 /// of lap two (one closed revolution) and a loop route only re-enters
 /// covered ground back at its closing point.
-fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid) -> (usize, usize) {
-    const DWELL_EVENTS: usize = 6;
-    const ELE_TOL_M: f64 = 15.0;
-    const WINDOW: usize = 5;
-    const NEEDED: usize = 3;
-    const REACH: i32 = 1;
-
+fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> (usize, usize) {
     if pts.len() < 4 {
         return (0, pts.len());
     }
@@ -533,12 +651,12 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid) -> (usize, usize) {
     let mut visited: HashMap<Cell, Vec<(usize, Option<f64>)>> = HashMap::new();
     let mut prev_cell: Option<Cell> = None;
     let mut evt = 0usize;
-    // Point index of each re-entry among the last WINDOW cell events.
+    // Point index of each re-entry among the last pass_window cell events.
     let mut recent: std::collections::VecDeque<Option<usize>> =
-        std::collections::VecDeque::with_capacity(WINDOW + 1);
+        std::collections::VecDeque::with_capacity(tun.pass_window + 1);
 
     let same_level = |a: Option<f64>, b: Option<f64>| match (a, b) {
-        (Some(a), Some(b)) => (a - b).abs() < ELE_TOL_M,
+        (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
         _ => true,
     };
 
@@ -551,11 +669,11 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid) -> (usize, usize) {
         evt += 1;
 
         let mut reentry = false;
-        for dy in -REACH..=REACH {
-            for dx in -REACH..=REACH {
+        for dy in -tun.reach..=tun.reach {
+            for dx in -tun.reach..=tun.reach {
                 if let Some(levels) = visited.get(&(c.0 + dy, c.1 + dx))
                     && levels.iter().any(|&(last, ele)| {
-                        evt - last > DWELL_EVENTS && same_level(ele, p.elevation)
+                        evt - last > tun.dwell_events && same_level(ele, p.elevation)
                     })
                 {
                     reentry = true;
@@ -564,10 +682,10 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid) -> (usize, usize) {
         }
 
         recent.push_back(reentry.then_some(i));
-        if recent.len() > WINDOW {
+        if recent.len() > tun.pass_window {
             recent.pop_front();
         }
-        if recent.iter().flatten().count() >= NEEDED {
+        if recent.iter().flatten().count() >= tun.pass_needed {
             let cut = recent.iter().flatten().next().copied().unwrap_or(i);
             return (0, cut);
         }
@@ -591,19 +709,14 @@ struct Supernode {
     tracks: HashSet<u32>,
 }
 
-
-
 /// Partition hot cells into same-traffic components.
 fn partition_supernodes(
     hot_cells: &[Cell],
     coverage: &CoverageGrid,
     same_traffic: f64,
 ) -> Vec<Supernode> {
-    let index_of: HashMap<Cell, usize> = hot_cells
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (*c, i))
-        .collect();
+    let index_of: HashMap<Cell, usize> =
+        hot_cells.iter().enumerate().map(|(i, c)| (*c, i)).collect();
     let mut uf: UnionFind<usize> = UnionFind::with_capacity(hot_cells.len());
 
     for (i, cell) in hot_cells.iter().enumerate() {
@@ -690,7 +803,11 @@ fn pair_boundaries(
                     if let Some(&j) = owner.get(&n)
                         && j != i
                     {
-                        let (key, pair) = if i < j { ((i, j), (*c, n)) } else { ((j, i), (n, *c)) };
+                        let (key, pair) = if i < j {
+                            ((i, j), (*c, n))
+                        } else {
+                            ((j, i), (n, *c))
+                        };
                         boundary.entry(key).or_default().push(pair);
                     }
                 }
@@ -872,7 +989,10 @@ fn merge_non_fork_boundaries(
             .filter(|&&n| section_worthy[n])
             .map(|&n| {
                 (
-                    supernodes[f].tracks.intersection(&supernodes[n].tracks).count(),
+                    supernodes[f]
+                        .tracks
+                        .intersection(&supernodes[n].tracks)
+                        .count(),
                     std::cmp::Reverse(n),
                 )
             })
@@ -897,7 +1017,8 @@ fn portions_for(
     sport_tracks: &[(&str, &[GpsPoint])],
     config: &SectionConfig,
     cell_size: f64,
-) -> Vec<(usize, usize, usize, f64)> {
+    tun: &Tunables,
+) -> Vec<Portion> {
     let core: HashSet<Cell> = node.cells.iter().copied().collect();
     let mut cell_set: HashSet<Cell> = HashSet::with_capacity(node.cells.len() * 9);
     for c in &node.cells {
@@ -908,11 +1029,11 @@ fn portions_for(
         }
     }
 
-    let pass_grid = CellGrid::new(cell_size / PASS_SUBGRID, coverage.ref_lat);
+    let pass_grid = CellGrid::new(cell_size / tun.pass_subgrid, coverage.ref_lat);
     let mut t_indices: Vec<u32> = node.tracks.iter().copied().collect();
     t_indices.sort_unstable();
 
-    let mut portions: Vec<(usize, usize, usize, f64)> = Vec::new();
+    let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
         let pts = sport_tracks[t_idx as usize].1;
         let Some((mut s, mut e, _)) = longest_run_in_cells(pts, &cell_set, &coverage.grid) else {
@@ -921,7 +1042,12 @@ fn portions_for(
         while s < e && !core.contains(&coverage.grid.cell_of(pts[s].latitude, pts[s].longitude)) {
             s += 1;
         }
-        while e > s && !core.contains(&coverage.grid.cell_of(pts[e - 1].latitude, pts[e - 1].longitude))
+        while e > s
+            && !core.contains(
+                &coverage
+                    .grid
+                    .cell_of(pts[e - 1].latitude, pts[e - 1].longitude),
+            )
         {
             e -= 1;
         }
@@ -930,7 +1056,7 @@ fn portions_for(
         }
         // Single pass only: laps, return legs, and loop stems are
         // traversals, not section geometry.
-        let (ps, pe) = simple_pass_range(&pts[s..e], &pass_grid);
+        let (ps, pe) = simple_pass_range(&pts[s..e], &pass_grid, tun);
         let limit = e;
         e = s + pe;
         s += ps;
@@ -951,8 +1077,7 @@ fn portions_for(
             let mut travelled = 0.0;
             let mut j = e;
             while j < limit && travelled < 1.5 * cell_size {
-                travelled +=
-                    crate::geo_utils::haversine_distance(&pts[j - 1], &pts[j]);
+                travelled += crate::geo_utils::haversine_distance(&pts[j - 1], &pts[j]);
                 let d = crate::geo_utils::haversine_distance(&pts[j], &pts[s]);
                 if d < best {
                     best = d;
@@ -994,7 +1119,7 @@ fn opportunity(node: &Supernode, coverage: &CoverageGrid) -> usize {
 /// Support test: enough activities traverse this stretch for it to be a
 /// section, with the visit floor scaling by length and opportunity.
 fn has_support(
-    portions: &[(usize, usize, usize, f64)],
+    portions: &[Portion],
     fallback_len: f64,
     config: &SectionConfig,
     corpus: usize,
@@ -1013,11 +1138,12 @@ fn section_worthiness(
     sport_tracks: &[(&str, &[GpsPoint])],
     config: &SectionConfig,
     cell_size: f64,
+    tun: &Tunables,
 ) -> Vec<bool> {
     supernodes
         .iter()
         .map(|n| {
-            let portions = portions_for(n, coverage, sport_tracks, config, cell_size);
+            let portions = portions_for(n, coverage, sport_tracks, config, cell_size, tun);
             has_support(
                 &portions,
                 n.cells.len() as f64 * cell_size,
@@ -1033,6 +1159,7 @@ fn detect_for_sport(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
     config: &SectionConfig,
+    tun: &Tunables,
     section_idx: &mut usize,
 ) -> Vec<FrequentSection> {
     if sport_tracks.len() < config.min_activities as usize {
@@ -1040,7 +1167,7 @@ fn detect_for_sport(
     }
 
     let cell_size = (config.proximity_threshold * 0.5).clamp(50.0, 150.0);
-    let coverage = build_coverage_grid(sport_tracks, cell_size);
+    let coverage = build_coverage_grid(sport_tracks, cell_size, tun);
 
     // Hot cells: adaptive floor, never an absolute constant.
     let hot_min = (config.min_activities as usize).max(2);
@@ -1069,7 +1196,8 @@ fn detect_for_sport(
     // Absorbing and merging can promote a component, so iterate.
     for _ in 0..5 {
         let before = supernodes.len();
-        let worthy = section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size);
+        let worthy =
+            section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
         supernodes = merge_non_fork_boundaries(
             supernodes,
             &coverage,
@@ -1081,7 +1209,6 @@ fn detect_for_sport(
             break;
         }
     }
-
 
     let mut sn_sizes: Vec<usize> = supernodes.iter().map(|s| s.cells.len()).collect();
     sn_sizes.sort_unstable();
@@ -1102,7 +1229,7 @@ fn detect_for_sport(
 
     // Candidates that could stand as sections, scored by the real usage
     // they represent (total portion metres).
-    let mut candidates: Vec<(usize, Vec<(usize, usize, usize, f64)>, f64)> = Vec::new();
+    let mut candidates: Vec<(usize, Vec<Portion>, f64)> = Vec::new();
     for (n_idx, node) in supernodes.iter().enumerate() {
         // Rough length from core cell count (cells are ~square).
         let approx_len = node.cells.len() as f64 * cell_size;
@@ -1110,7 +1237,7 @@ fn detect_for_sport(
             continue;
         }
 
-        let portions = portions_for(node, &coverage, sport_tracks, config, cell_size);
+        let portions = portions_for(node, &coverage, sport_tracks, config, cell_size, tun);
         if portions.is_empty()
             || !has_support(&portions, approx_len, config, opportunity(node, &coverage))
         {
@@ -1269,6 +1396,18 @@ pub fn detect_sections_unified(
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
+    detect_sections_unified_tuned(tracks, sport_types, config, &Tunables::DEFAULT)
+}
+
+/// [`detect_sections_unified`] with explicit [`Tunables`]. The
+/// validation lab's plateau sweeps run through here; production never
+/// passes anything but [`Tunables::DEFAULT`].
+pub fn detect_sections_unified_tuned(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+    tun: &Tunables,
+) -> Vec<FrequentSection> {
     // Partition tracks per sport; sections never span sports.
     let mut by_sport: HashMap<&str, Vec<(&str, &[GpsPoint])>> = HashMap::new();
     for (id, pts) in tracks {
@@ -1286,7 +1425,7 @@ pub fn detect_sections_unified(
     for sport in sport_names {
         let sport_tracks = &by_sport[sport];
         let mut idx = 0usize;
-        let sections = detect_for_sport(sport, sport_tracks, config, &mut idx);
+        let sections = detect_for_sport(sport, sport_tracks, config, tun, &mut idx);
         all_sections.extend(sections);
     }
 
@@ -1319,7 +1458,12 @@ mod tests {
         let spans = lift_spans(&pts);
         assert_eq!(spans.len(), 1);
         let (s, e) = spans[0];
-        assert!(s <= 2 && e >= 75, "span {}..{} should cover the ascent", s, e);
+        assert!(
+            s <= 2 && e >= 75,
+            "span {}..{} should cover the ascent",
+            s,
+            e
+        );
     }
 
     #[test]

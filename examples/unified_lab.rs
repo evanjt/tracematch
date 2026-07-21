@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use tracematch::{
     DetectionProgressCallback, Direction, FrequentSection, GpsPoint, MatchConfig, RouteSignature,
-    SectionConfig, geo_utils::haversine_distance, matching::resample_route,
+    SectionConfig, Tunables, geo_utils::haversine_distance, matching::resample_route,
 };
 
 #[path = "common/corpus.rs"]
@@ -64,7 +64,8 @@ fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, String) {
             if let Some((lat, lon)) = pending.take() {
                 points.push(GpsPoint::new(lat, lon));
             }
-            if let (Some(lat_start), Some(lon_start)) = (trimmed.find("lat=\""), trimmed.find("lon=\""))
+            if let (Some(lat_start), Some(lon_start)) =
+                (trimmed.find("lat=\""), trimmed.find("lon=\""))
                 && let (Some(lat_end), Some(lon_end)) = (
                     trimmed[lat_start + 5..].find('"'),
                     trimmed[lon_start + 5..].find('"'),
@@ -165,7 +166,11 @@ fn load_corpus(dir: &Path) -> Vec<Activity> {
         let (sport, date) = match meta.get(aid) {
             Some((bucket, meta_date)) => (
                 bucket.clone(),
-                if meta_date.is_empty() { date } else { meta_date.clone() },
+                if meta_date.is_empty() {
+                    date
+                } else {
+                    meta_date.clone()
+                },
             ),
             None => (sport_from_name(&name).to_string(), date),
         };
@@ -217,6 +222,81 @@ fn containment(a: &[GpsPoint], b: &[GpsPoint], threshold_m: f64) -> f64 {
         }
     }
     hits as f64 / a.len() as f64
+}
+
+/// Point cloud of a whole catalogue's polylines in a hash grid, for
+/// corridor-level coverage queries.
+///
+/// Corridor persistence asks the detector's own backoff question (rule
+/// 6): is this way already represented by the other catalogue's
+/// polylines, at the backoff's lateral tolerance of one partition
+/// cell? The 1:1 identity test undercounts stability wherever the
+/// winner among twin candidates flips between runs, or a corridor is
+/// re-cut into different pieces; the ground is still on the map either
+/// way. Both numbers are reported: identity stability matters for
+/// hysteresis, corridor coverage for black spots.
+struct CorridorGrid {
+    cells: HashMap<(i32, i32), Vec<(f64, f64)>>,
+    tol_m: f64,
+    m_lng: f64,
+}
+
+const M_PER_DEG_LAT: f64 = 111_000.0;
+
+impl CorridorGrid {
+    fn build(catalogue: &[Vec<GpsPoint>], tol_m: f64) -> CorridorGrid {
+        let ref_lat = catalogue
+            .iter()
+            .flat_map(|s| s.first())
+            .map(|p| p.latitude)
+            .next()
+            .unwrap_or(0.0);
+        let m_lng = M_PER_DEG_LAT * ref_lat.to_radians().cos();
+        let mut cells: HashMap<(i32, i32), Vec<(f64, f64)>> = HashMap::new();
+        for s in catalogue {
+            for p in s {
+                let c = (
+                    (p.latitude * M_PER_DEG_LAT / tol_m).floor() as i32,
+                    (p.longitude * m_lng / tol_m).floor() as i32,
+                );
+                cells.entry(c).or_default().push((p.latitude, p.longitude));
+            }
+        }
+        CorridorGrid {
+            cells,
+            tol_m,
+            m_lng,
+        }
+    }
+
+    fn point_covered(&self, p: &GpsPoint) -> bool {
+        let tol2 = self.tol_m * self.tol_m;
+        let c = (
+            (p.latitude * M_PER_DEG_LAT / self.tol_m).floor() as i32,
+            (p.longitude * self.m_lng / self.tol_m).floor() as i32,
+        );
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if let Some(v) = self.cells.get(&(c.0 + dy, c.1 + dx))
+                    && v.iter().any(|&(lat, lng)| {
+                        let ddx = (p.longitude - lng) * self.m_lng;
+                        let ddy = (p.latitude - lat) * M_PER_DEG_LAT;
+                        ddx * ddx + ddy * ddy <= tol2
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn covered_share(&self, sec: &[GpsPoint]) -> f64 {
+        if sec.is_empty() {
+            return 0.0;
+        }
+        sec.iter().filter(|p| self.point_covered(p)).count() as f64 / sec.len() as f64
+    }
 }
 
 /// Fraction of a polyline's length that re-covers ground it already
@@ -502,7 +582,10 @@ fn max_sustained_grade(polyline: &[GpsPoint]) -> f64 {
     let smooth: Vec<Option<f64>> = (0..n)
         .map(|i| {
             let (mut s, mut c) = (0.0, 0u32);
-            for e in ele[i.saturating_sub(1)..=(i + 1).min(n - 1)].iter().flatten() {
+            for e in ele[i.saturating_sub(1)..=(i + 1).min(n - 1)]
+                .iter()
+                .flatten()
+            {
                 s += e;
                 c += 1;
             }
@@ -706,8 +789,12 @@ fn write_ranking_md(
          grade: max sustained gradient over 300 m. months: distinct visit months.\n\
          sinu: 1 - chord/arc. conv: effective approach directions. 1way: direction purity.\n\n",
     );
-    out.push_str("| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way |\n");
-    out.push_str("|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|\n");
+    out.push_str(
+        "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way |\n",
+    );
+    out.push_str(
+        "|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|\n",
+    );
     for (i, (id, r)) in ranked.iter().enumerate() {
         let (len_m, visits) = by_id
             .get(id.as_str())
@@ -784,6 +871,7 @@ fn main() {
     let mut divergence: Option<f64> = None;
     let mut stability = false;
     let mut windows = false;
+    let mut sweep = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -809,6 +897,10 @@ fn main() {
             }
             "--windows" => {
                 windows = true;
+                i += 1;
+            }
+            "--sweep" => {
+                sweep = true;
                 i += 1;
             }
             _ => i += 1,
@@ -1089,9 +1181,7 @@ fn main() {
         for (label, days) in spans {
             let tracks: Vec<(String, Vec<GpsPoint>)> = activities
                 .iter()
-                .filter(|a| {
-                    days == i64::MAX || day_of(&a.date).is_some_and(|d| newest - d < days)
-                })
+                .filter(|a| days == i64::MAX || day_of(&a.date).is_some_and(|d| newest - d < days))
                 .map(|a| (a.id.clone(), a.points.clone()))
                 .collect();
             let types: HashMap<String, String> = tracks
@@ -1102,8 +1192,10 @@ fn main() {
             let sections = tracematch::detect_sections_unified(&tracks, &types, &section_config);
             runs.push((label, tracks.len(), sections, t.elapsed().as_millis()));
         }
-        let rs_all: Vec<Vec<Vec<GpsPoint>>> =
-            runs.iter().map(|(_, _, s, _)| resample_sections(s)).collect();
+        let rs_all: Vec<Vec<Vec<GpsPoint>>> = runs
+            .iter()
+            .map(|(_, _, s, _)| resample_sections(s))
+            .collect();
         let survival = |from: &[Vec<GpsPoint>], into: &[Vec<GpsPoint>]| -> f64 {
             if from.is_empty() {
                 return 1.0;
@@ -1114,6 +1206,12 @@ fn main() {
                 / from.len() as f64
         };
         let last = runs.len() - 1;
+        // Corridor coverage against the final catalogue: identity churn
+        // between horizons (winner flips, re-cuts) does not count as
+        // loss when the ground stays represented.
+        let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
+        let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
+        let full_grid = CorridorGrid::build(&rs_all[last], cell_m);
         for (i, (label, n_acts, sections, ms)) in runs.iter().enumerate() {
             let into_next = if i < last {
                 survival(&rs_all[i], &rs_all[i + 1])
@@ -1122,15 +1220,25 @@ fn main() {
             };
             let into_full = survival(&rs_all[i], &rs_all[last]);
             let of_full = survival(&rs_all[last], &rs_all[i]);
+            let corr_full = if rs_all[i].is_empty() {
+                1.0
+            } else {
+                rs_all[i]
+                    .iter()
+                    .filter(|s| full_grid.covered_share(s) >= same_traffic)
+                    .count() as f64
+                    / rs_all[i].len() as f64
+            };
             println!(
                 "  {:<4} {:>5} acts  {:>4} sections  {:>7}  survive→next {:>3.0}%  \
-                 survive→full {:>3.0}%  of-final-already-present {:>3.0}%",
+                 survive→full {:>3.0}%  corridor→full {:>3.0}%  of-final-already-present {:>3.0}%",
                 label,
                 n_acts,
                 sections.len(),
                 fmt_ms(*ms),
                 into_next * 100.0,
                 into_full * 100.0,
+                corr_full * 100.0,
                 of_full * 100.0,
             );
         }
@@ -1181,6 +1289,255 @@ fn main() {
                 },
                 med * 100.0,
             );
+        }
+    }
+
+    // --- Constants plateau sweep (pooled, one factor at a time) ---------
+    // Each Tunables field is varied around Tunables::DEFAULT while every
+    // other field stays at its default. A defensible default sits on a
+    // plateau: catalogue shape and stability barely move across the
+    // neighbouring values. A peak (quality degrading on both sides of
+    // the default) means the value is fitted and must be re-derived.
+    if sweep {
+        let tracks: Vec<(String, Vec<GpsPoint>)> = activities
+            .iter()
+            .map(|a| (a.id.clone(), a.points.clone()))
+            .collect();
+        let types: HashMap<String, String> = tracks
+            .iter()
+            .map(|(id, _)| (id.clone(), "All".to_string()))
+            .collect();
+        let jk_tracks: Vec<(String, Vec<GpsPoint>)> = tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 10 != 0)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let track_view: Vec<(&str, &[GpsPoint])> = activities
+            .iter()
+            .map(|a| (a.id.as_str(), a.points.as_slice()))
+            .collect();
+        let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
+        let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
+
+        // pass_window_needed values are encoded as window * 10 + needed.
+        type Setter = fn(&mut Tunables, f64);
+        let axes: Vec<(&str, Vec<f64>, Setter)> = vec![
+            (
+                "pass_away_cells",
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                |t, v| t.pass_away_cells = v as usize,
+            ),
+            ("ele_level_tol_m", vec![10.0, 15.0, 20.0, 25.0], |t, v| {
+                t.ele_level_tol_m = v
+            }),
+            ("pass_subgrid", vec![2.0, 3.0, 4.0], |t, v| {
+                t.pass_subgrid = v
+            }),
+            ("dwell_events", vec![4.0, 5.0, 6.0, 8.0, 10.0], |t, v| {
+                t.dwell_events = v as usize
+            }),
+            (
+                "pass_window_needed",
+                vec![42.0, 53.0, 63.0, 64.0],
+                |t, v| {
+                    t.pass_window = (v / 10.0) as usize;
+                    t.pass_needed = v as usize % 10;
+                },
+            ),
+            ("reach", vec![1.0, 2.0], |t, v| t.reach = v as i32),
+            ("lift_span_m", vec![200.0, 300.0, 400.0], |t, v| {
+                t.lift_span_m = v
+            }),
+            ("lift_min_grade", vec![0.18, 0.22, 0.26, 0.30], |t, v| {
+                t.lift_min_grade = v
+            }),
+            ("lift_min_straight", vec![0.96, 0.975, 0.985], |t, v| {
+                t.lift_min_straight = v
+            }),
+            (
+                "jitter_human_min",
+                vec![1.02, 1.035, 1.05, 1.065, 1.08],
+                |t, v| t.jitter_human_min = v,
+            ),
+            ("descent_match_m", vec![40.0, 60.0, 80.0], |t, v| {
+                t.descent_match_m = v
+            }),
+        ];
+
+        let bbox = |pts: &[GpsPoint]| -> (f64, f64, f64, f64) {
+            let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for p in pts {
+                bb.0 = bb.0.min(p.latitude);
+                bb.1 = bb.1.max(p.latitude);
+                bb.2 = bb.2.min(p.longitude);
+                bb.3 = bb.3.max(p.longitude);
+            }
+            bb
+        };
+
+        println!();
+        println!(
+            "=== Constants sweep (pooled, {} acts, jackknife 90%) ===",
+            tracks.len()
+        );
+        let mut md = String::from(
+            "# Constants plateau sweep (pooled)\n\n\
+             One factor at a time around `Tunables::DEFAULT`. Columns: catalogue\n\
+             size and shape, overlapping pairs (>30% containment at 60 m), core\n\
+             (>=5 visits) persistence under a 90% jackknife as 1:1 identity and\n\
+             as corridor coverage (rule 6 backoff tolerance), ground retained\n\
+             (60 m), lift spans excluded, sections holding >=40% sustained\n\
+             grade, and combined full+jackknife detect time.\n",
+        );
+        for (name, values, set) in &axes {
+            md.push_str(&format!(
+                "\n## {}\n\n\
+                 | value | sections | med m | total km | ovl pairs | core | 1:1 % | corridor % | ground % | lift spans | steep >=40% | detect |\n\
+                 |------:|---------:|------:|---------:|----------:|-----:|------:|-----------:|---------:|-----------:|-------------|-------:|\n",
+                name
+            ));
+            for &v in values {
+                let mut tun = Tunables::DEFAULT;
+                set(&mut tun, v);
+                let t0 = Instant::now();
+                let full = tracematch::detect_sections_unified_tuned(
+                    &tracks,
+                    &types,
+                    &section_config,
+                    &tun,
+                );
+                let jk = tracematch::detect_sections_unified_tuned(
+                    &jk_tracks,
+                    &types,
+                    &section_config,
+                    &tun,
+                );
+                let ms = t0.elapsed().as_millis();
+
+                let full_rs = resample_sections(&full);
+                let jk_rs = resample_sections(&jk);
+                let mut lens: Vec<f64> = full.iter().map(|s| s.distance_meters).collect();
+                lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let total_km = lens.iter().sum::<f64>() / 1000.0;
+
+                let bbs: Vec<(f64, f64, f64, f64)> = full_rs.iter().map(|s| bbox(s)).collect();
+                let pad = 60.0 / M_PER_DEG_LAT;
+                let mut ovl = 0usize;
+                for i in 0..full_rs.len() {
+                    for j in (i + 1)..full_rs.len() {
+                        let (a, b) = (&bbs[i], &bbs[j]);
+                        if a.0 > b.1 + pad || a.1 < b.0 - pad || a.2 > b.3 + pad || a.3 < b.2 - pad
+                        {
+                            continue;
+                        }
+                        if containment(&full_rs[i], &full_rs[j], 60.0) > 0.3
+                            || containment(&full_rs[j], &full_rs[i], 60.0) > 0.3
+                        {
+                            ovl += 1;
+                        }
+                    }
+                }
+
+                let core_idx: Vec<usize> = full
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.visit_count >= 5)
+                    .map(|(i, _)| i)
+                    .collect();
+                let jk_grid = CorridorGrid::build(&jk_rs, cell_m);
+                let (mut c11, mut ccorr) = (0usize, 0usize);
+                for &i in &core_idx {
+                    if jk_rs
+                        .iter()
+                        .any(|o| containment(&full_rs[i], o, 60.0) >= 0.5)
+                    {
+                        c11 += 1;
+                    }
+                    if jk_grid.covered_share(&full_rs[i]) >= same_traffic {
+                        ccorr += 1;
+                    }
+                }
+                let pct = |n: usize, d: usize| {
+                    if d == 0 {
+                        100.0
+                    } else {
+                        n as f64 / d as f64 * 100.0
+                    }
+                };
+
+                let g_grid = CorridorGrid::build(&jk_rs, 60.0);
+                let (mut gc, mut gt) = (0usize, 0usize);
+                for f in &full_rs {
+                    for p in f {
+                        gt += 1;
+                        if g_grid.point_covered(p) {
+                            gc += 1;
+                        }
+                    }
+                }
+
+                let lift = tracematch::confirmed_lift_spans_tuned(&track_view, &tun);
+                let n_lift: usize = lift.iter().map(|s| s.len()).sum();
+
+                let steep: Vec<String> = full
+                    .iter()
+                    .filter_map(|s| {
+                        let g = max_sustained_grade(&s.polyline);
+                        (g >= 40.0).then(|| format!("{} {:.0}%/{}v", s.id, g, s.visit_count))
+                    })
+                    .collect();
+                let steep_txt = if steep.is_empty() {
+                    "-".to_string()
+                } else {
+                    steep.join(", ")
+                };
+
+                let label = if *name == "pass_window_needed" {
+                    format!("{}of{}", v as usize % 10, (v / 10.0) as usize)
+                } else {
+                    format!("{}", v)
+                };
+                println!(
+                    "  {:<17} {:>6}  {:>4} sections  med {:>5.0}m  {:>6.0}km  ovl {:>3}  \
+                     core {:>3}  1:1 {:>3.0}%  corr {:>3.0}%  ground {:>3.0}%  lift {:>3}  \
+                     steep [{}]  {}",
+                    name,
+                    label,
+                    full.len(),
+                    percentile(&lens, 0.5),
+                    total_km,
+                    ovl,
+                    core_idx.len(),
+                    pct(c11, core_idx.len()),
+                    pct(ccorr, core_idx.len()),
+                    pct(gc, gt),
+                    n_lift,
+                    steep_txt,
+                    fmt_ms(ms),
+                );
+                md.push_str(&format!(
+                    "| {} | {} | {:.0} | {:.0} | {} | {} | {:.0} | {:.0} | {:.0} | {} | {} | {} |\n",
+                    label,
+                    full.len(),
+                    percentile(&lens, 0.5),
+                    total_km,
+                    ovl,
+                    core_idx.len(),
+                    pct(c11, core_idx.len()),
+                    pct(ccorr, core_idx.len()),
+                    pct(gc, gt),
+                    n_lift,
+                    steep_txt,
+                    fmt_ms(ms),
+                ));
+            }
+        }
+        if let Some(ref out) = out_dir {
+            std::fs::create_dir_all(out).ok();
+            let path = out.join("sweep.md");
+            std::fs::write(&path, &md).ok();
+            println!("  sweep table → {}", path.display());
         }
     }
 
@@ -1303,35 +1660,53 @@ fn main() {
 
             // Core catalogue: sections with real support. Marginal
             // sections legitimately vanish when 10% of the corpus does;
-            // the core must not.
-            let core: Vec<&FrequentSection> =
-                full.iter().filter(|s| s.visit_count >= 5).collect();
-            let core_persist = {
-                let jk_rs = resample_all(&jk_sections);
-                let core_rs: Vec<Vec<GpsPoint>> = core
+            // the core must not. Persistence is reported both ways:
+            // 1:1 identity (some single section contains ≥50% of me
+            // within 60 m) and corridor coverage (rule 6's backoff
+            // tolerance, one partition cell, against the whole other
+            // catalogue) which is immune to winner flips and re-cuts.
+            let jk_rs = resample_all(&jk_sections);
+            let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
+            let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
+            let jk_grid = CorridorGrid::build(&jk_rs, cell_m);
+            println!();
+            for min_visits in [5u32, 10] {
+                let core_rs: Vec<Vec<GpsPoint>> = full
                     .iter()
+                    .filter(|s| s.visit_count >= min_visits)
                     .map(|s| {
                         let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
                         resample_route(&s.polyline, t)
                     })
                     .collect();
-                if core_rs.is_empty() {
-                    1.0
+                let (core_persist, core_corridor, core_either) = if core_rs.is_empty() {
+                    (1.0, 1.0, 1.0)
                 } else {
-                    core_rs
-                        .iter()
-                        .filter(|c| jk_rs.iter().any(|o| containment(c, o, 60.0) >= 0.5))
-                        .count() as f64
-                        / core_rs.len() as f64
-                }
-            };
-            println!();
-            println!(
-                "[stability {}] core (≥5 visits) {} sections, {:.0}% persist under jackknife",
-                sport,
-                core.len(),
-                core_persist * 100.0
-            );
+                    let one_to_one =
+                        |c: &Vec<GpsPoint>| jk_rs.iter().any(|o| containment(c, o, 60.0) >= 0.5);
+                    let corridor = |c: &Vec<GpsPoint>| jk_grid.covered_share(c) >= same_traffic;
+                    let n = core_rs.len() as f64;
+                    (
+                        core_rs.iter().filter(|c| one_to_one(c)).count() as f64 / n,
+                        core_rs.iter().filter(|c| corridor(c)).count() as f64 / n,
+                        core_rs
+                            .iter()
+                            .filter(|c| one_to_one(c) || corridor(c))
+                            .count() as f64
+                            / n,
+                    )
+                };
+                println!(
+                    "[stability {}] core (≥{} visits) {} sections under jackknife: {:.0}% persist \
+                     1:1, {:.0}% corridor-covered, {:.0}% represented either way",
+                    sport,
+                    min_visits,
+                    core_rs.len(),
+                    core_persist * 100.0,
+                    core_corridor * 100.0,
+                    core_either * 100.0
+                );
+            }
             println!(
                 "[stability {}] full {} | jackknife-90%: {} sections, {:.0}% persist 1:1, \
                  {:.0}% ground retained | 50% corpus: {} sections ({:.0}% persist into full) | \
