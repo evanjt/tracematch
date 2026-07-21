@@ -200,6 +200,11 @@ struct CoverageGrid {
     ref_lat: f64,
     cell_tracks: HashMap<Cell, HashSet<u32>>,
     cell_passes: HashMap<Cell, HashMap<u32, u8>>,
+    /// Per track, the index ranges that remain once lift-carried spans
+    /// are removed. Geometry cuts walk these ranges and nothing else, so
+    /// a portion can never bridge across excluded ground that happens to
+    /// touch the component at both ends (base station and summit do).
+    keep: Vec<Vec<(usize, usize)>>,
 }
 
 /// Per-track scratch while counting passes through one cell.
@@ -457,21 +462,43 @@ fn build_coverage_grid(
     tun: &Tunables,
 ) -> CoverageGrid {
     let ref_lat: f64 = {
-        let mut sum = 0.0;
-        let mut n = 0usize;
-        for (_, pts) in tracks {
-            for p in pts.iter().step_by(50) {
-                sum += p.latitude;
-                n += 1;
-            }
+        // Summed in sorted order: float addition is not permutation
+        // stable, and the catalogue must not depend on arrival order
+        // even at the last bit of a cell boundary.
+        let mut lats: Vec<f64> = tracks
+            .iter()
+            .flat_map(|(_, pts)| pts.iter().step_by(50).map(|p| p.latitude))
+            .collect();
+        lats.sort_unstable_by(f64::total_cmp);
+        if lats.is_empty() {
+            0.0
+        } else {
+            lats.iter().sum::<f64>() / lats.len() as f64
         }
-        if n == 0 { 0.0 } else { sum / n as f64 }
     };
     let grid = CellGrid::new(cell_size_m, ref_lat);
 
     let fine = CellGrid::new(cell_size_m / tun.pass_subgrid, ref_lat);
 
     let lift = confirmed_lift_spans_tuned(tracks, tun);
+    let keep: Vec<Vec<(usize, usize)>> = tracks
+        .iter()
+        .enumerate()
+        .map(|(t_idx, (_, pts))| {
+            let mut k: Vec<(usize, usize)> = Vec::new();
+            let mut cursor = 0usize;
+            for &(s, e) in &lift[t_idx] {
+                if s > cursor {
+                    k.push((cursor, s - 1));
+                }
+                cursor = e + 1;
+            }
+            if cursor < pts.len() {
+                k.push((cursor, pts.len() - 1));
+            }
+            k
+        })
+        .collect();
 
     let mut cell_tracks: HashMap<Cell, HashSet<u32>> = HashMap::new();
     let mut cell_passes: HashMap<Cell, HashMap<u32, u8>> = HashMap::new();
@@ -514,20 +541,7 @@ fn build_coverage_grid(
         // Lift-carried stretches contribute nothing; each remaining
         // stretch walks with a fresh cell seed so no evidence bridges
         // across the skipped ground.
-        let spans = &lift[t_idx];
-        let mut keep: Vec<(usize, usize)> = Vec::new();
-        let mut cursor = 0usize;
-        for &(s, e) in spans {
-            if s > cursor {
-                keep.push((cursor, s - 1));
-            }
-            cursor = e + 1;
-        }
-        if cursor < pts.len() {
-            keep.push((cursor, pts.len() - 1));
-        }
-
-        for (r_idx, &(rs, re)) in keep.iter().enumerate() {
+        for (r_idx, &(rs, re)) in keep[t_idx].iter().enumerate() {
             if r_idx > 0 {
                 // A skipped lift stretch always counts as "away".
                 fine_seq += tun.pass_away_cells + 1;
@@ -581,6 +595,7 @@ fn build_coverage_grid(
         ref_lat,
         cell_tracks,
         cell_passes,
+        keep,
     }
 }
 
@@ -1036,13 +1051,27 @@ fn portions_for(
     }
 
     let pass_grid = CellGrid::new(cell_size / tun.pass_subgrid, coverage.ref_lat);
+    // Canonical portion order: by activity id, never by arrival index.
+    // The anchor and every tie-break downstream inherit this order, so
+    // the catalogue stays a pure function of the activity set.
     let mut t_indices: Vec<u32> = node.tracks.iter().copied().collect();
-    t_indices.sort_unstable();
+    t_indices.sort_unstable_by(|&a, &b| sport_tracks[a as usize].0.cmp(sport_tracks[b as usize].0));
 
     let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
         let pts = sport_tracks[t_idx as usize].1;
-        let Some((mut s, mut e, _)) = longest_run_in_cells(pts, &cell_set, &coverage.grid) else {
+        // Walk each lift-free range on its own: excluded ground is not
+        // usable geometry even when the component touches both of its
+        // ends (a base station and a summit do exactly that).
+        let mut best: Option<(usize, usize, f64)> = None;
+        for &(rs, re) in &coverage.keep[t_idx as usize] {
+            if let Some((s, e, d)) = longest_run_in_cells(&pts[rs..=re], &cell_set, &coverage.grid)
+                && best.as_ref().is_none_or(|b| d > b.2)
+            {
+                best = Some((rs + s, rs + e, d));
+            }
+        }
+        let Some((mut s, mut e, _)) = best else {
             continue;
         };
         while s < e && !core.contains(&coverage.grid.cell_of(pts[s].latitude, pts[s].longitude)) {
