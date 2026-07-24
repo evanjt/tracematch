@@ -28,6 +28,9 @@ use tracematch::{
 mod corpus;
 use corpus::{PhaseTimer, fmt_ms};
 
+#[path = "common/geolife.rs"]
+mod geolife;
+
 // ---------------------------------------------------------------- loading
 
 struct Activity {
@@ -216,6 +219,58 @@ fn load_corpus(dir: &Path) -> Vec<Activity> {
     // Chronological, so incremental experiments can replay history.
     activities.sort_by(|a, b| a.date.cmp(&b.date));
     activities
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Load the GeoLife public-corpus subset and map it into the lab's `Activity`
+/// shape, so every instrument below runs on it unchanged. Prints the subset
+/// rule and exactly what was kept or dropped, so nothing is silently truncated.
+fn load_geolife_activities(root: &Path, max_users: usize, max_per_user: usize) -> Vec<Activity> {
+    let (trajectories, s) = geolife::load_geolife(root, max_users, max_per_user);
+    println!(
+        "GeoLife corpus: {} → {} self-powered trajectories from {} users \
+         (walk {}, bike {}, run {})",
+        root.display(),
+        trajectories.len(),
+        s.users_loaded,
+        s.walk,
+        s.bike,
+        s.run,
+    );
+    println!(
+        "  subset rule: labelled users sorted by id, first {} with self-powered data \
+         ({} labelled users seen); <= {} earliest trajectories/user; per-trajectory dominant \
+         labelled mode by time overlap; walk->Walk bike->Ride run->Run, motorised excluded; \
+         points 50..={}",
+        max_users,
+        s.users_with_labels,
+        max_per_user,
+        geolife::DEFAULT_MAX_POINTS,
+    );
+    println!(
+        "  dropped: {} short (<50 pts), {} huge (>{} pts), {} unlabelled span, {} motorised",
+        s.skipped_short,
+        s.skipped_huge,
+        geolife::DEFAULT_MAX_POINTS,
+        s.skipped_unlabelled,
+        s.skipped_motorised,
+    );
+    trajectories
+        .into_iter()
+        .map(|t| Activity {
+            id: t.id,
+            sport: t.sport,
+            date: t.date,
+            points: t.points,
+            seconds: t.seconds,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- metrics
@@ -977,13 +1032,43 @@ fn main() {
         }
     }
 
-    if !dir.exists() {
-        eprintln!("Directory not found: {}", dir.display());
-        return;
+    // GeoLife public-data battery. When LAB_GEOLIFE_DIR points at an existing
+    // GeoLife 1.3 Data root it becomes the activity source, so every instrument
+    // below runs on trajectories that are not the author's own data. Unset or
+    // absent, the positional GPX corpus is used exactly as before.
+    let geolife_dir = std::env::var("LAB_GEOLIFE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let use_geolife = geolife_dir.as_ref().is_some_and(|g| {
+        let ok = g.exists();
+        if !ok {
+            println!(
+                "GeoLife skipped (LAB_GEOLIFE_DIR set but path not found: {})",
+                g.display()
+            );
+        }
+        ok
+    });
+    if !use_geolife {
+        if geolife_dir.is_none() {
+            println!("GeoLife skipped (LAB_GEOLIFE_DIR unset); using positional corpus.");
+        }
+        if !dir.exists() {
+            eprintln!("Directory not found: {}", dir.display());
+            return;
+        }
     }
 
     let t_load = Instant::now();
-    let activities = load_corpus(&dir);
+    let activities = if use_geolife {
+        let g = geolife_dir.as_ref().unwrap();
+        let max_users = env_usize("LAB_GEOLIFE_MAX_USERS", 15);
+        let max_per_user = env_usize("LAB_GEOLIFE_MAX_PER_USER", 25);
+        load_geolife_activities(g, max_users, max_per_user)
+    } else {
+        load_corpus(&dir)
+    };
     println!(
         "Loaded {} activities in {} ({} points, elevation on {:.0}%)",
         activities.len(),
