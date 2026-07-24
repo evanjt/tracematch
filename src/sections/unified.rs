@@ -1547,6 +1547,151 @@ fn has_support(
     portions.len() >= required.max(config.min_activities as usize)
 }
 
+/// A fine-resolution spatial index of every contributing portion's
+/// points, keyed on a `cell_m` grid and carrying the track index and
+/// coordinates. Built once per candidate so the representative choice
+/// can ask, at metre resolution, how many distinct contributors run
+/// near any point of a rendered line — a question the coarse coverage
+/// grid (cell = proximity/2) cannot answer, because its one-ring
+/// tolerance leaks a junction's through-traffic onto a branch that
+/// diverges from it.
+fn portion_point_index(
+    portions: &[Portion],
+    sport_tracks: &[(&str, &[GpsPoint])],
+    ref_lat: f64,
+    cell_m: f64,
+) -> HashMap<Cell, Vec<(u32, f64, f64)>> {
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let mut idx: HashMap<Cell, Vec<(u32, f64, f64)>> = HashMap::new();
+    for &(t, s, e, _) in portions {
+        for p in &sport_tracks[t].1[s..e] {
+            let c = (
+                (p.latitude * 111_132.0 / cell_m).floor() as i32,
+                (p.longitude * m_lng / cell_m).floor() as i32,
+            );
+            idx.entry(c)
+                .or_default()
+                .push((t as u32, p.latitude, p.longitude));
+        }
+    }
+    idx
+}
+
+/// The point-index range of a rendered line that keeps only its
+/// commonly-traversed body, clipping a minority branch behind a cliff
+/// at either end. The line is sampled every ~20 m; each sample's
+/// support is the count of distinct contributors within `near_m`
+/// (metre resolution, so a junction's through-traffic that diverges
+/// from a branch does not prop the branch up the way the coarse
+/// coverage grid's one-ring tolerance would). An end run is clipped
+/// only when it is a genuine BRANCH, not a taper or a low-traffic
+/// continuation:
+///   * short — under [`BRANCH_MAX_M`] and a third of the line, so a
+///     section with a genuinely lower-traffic half or a long tapering
+///     end (uneven but legitimate support) is left whole;
+///   * under half the line's median support, sustained past a lone
+///     staggered-ending sample; and
+///   * behind a cliff — the body sample adjoining the run carries at
+///     least double it, so a gradual taper (which never doubles across
+///     one step) is not read as a branch.
+///
+/// The drop is a wrong-way turn at a junction that most of the
+/// section's traffic skips; it leaves the DISPLAY only. The extent,
+/// counts, and occupied footprint keep the full portion.
+fn minority_end_clip(
+    line: &[GpsPoint],
+    index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
+    ref_lat: f64,
+    near_m: f64,
+    cell_m: f64,
+) -> (usize, usize) {
+    const STEP_M: f64 = 20.0;
+    const MIN_RUN: usize = 3;
+    const BRANCH_MAX_M: f64 = 300.0;
+    const MIN_MEDIAN: u32 = 8;
+    if line.len() < 6 {
+        return (0, line.len());
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let reach = (near_m / cell_m).ceil() as i32;
+    let mut samples: Vec<(usize, u32)> = Vec::new();
+    let mut acc = 0.0;
+    let mut last = -STEP_M;
+    for (i, p) in line.iter().enumerate() {
+        if i > 0 {
+            acc += crate::geo_utils::haversine_distance(&line[i - 1], p);
+        }
+        if acc - last < STEP_M && i + 1 < line.len() {
+            continue;
+        }
+        last = acc;
+        let c = (
+            (p.latitude * m_lat / cell_m).floor() as i32,
+            (p.longitude * m_lng / cell_m).floor() as i32,
+        );
+        let mut near: HashSet<u32> = HashSet::new();
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                if let Some(v) = index.get(&(c.0 + dy, c.1 + dx)) {
+                    for &(t, la, ln) in v {
+                        if f64::hypot((p.latitude - la) * m_lat, (p.longitude - ln) * m_lng)
+                            < near_m
+                        {
+                            near.insert(t);
+                        }
+                    }
+                }
+            }
+        }
+        samples.push((i, near.len() as u32));
+    }
+    let n = samples.len();
+    if n < 2 * MIN_RUN + 1 {
+        return (0, line.len());
+    }
+    let mut sorted: Vec<u32> = samples.iter().map(|s| s.1).collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    if median < MIN_MEDIAN {
+        return (0, line.len());
+    }
+    let max_run = (BRANCH_MAX_M / STEP_M) as usize;
+    let frac_cap = n / 3;
+    let minor = |k: usize| samples[k].1 * 2 < median;
+    let mut lead = 0;
+    while lead < n && minor(lead) {
+        lead += 1;
+    }
+    let mut trail = 0;
+    while trail < n && minor(n - 1 - trail) {
+        trail += 1;
+    }
+    // A run is a clipped branch only if it is short, sustained, and its
+    // highest sample is at most half the body sample abutting it (the
+    // cliff): a gradual taper never doubles across one step, so it is
+    // left whole.
+    let lead_run_max = (0..lead).map(|k| samples[k].1).max().unwrap_or(0);
+    let trail_run_max = (0..trail).map(|k| samples[n - 1 - k].1).max().unwrap_or(0);
+    let lead_ok = lead >= MIN_RUN
+        && lead <= max_run
+        && lead <= frac_cap
+        && lead < n
+        && samples[lead].1 >= 2 * lead_run_max.max(1);
+    let trail_ok = trail >= MIN_RUN
+        && trail <= max_run
+        && trail <= frac_cap
+        && lead + trail < n
+        && samples[n - 1 - trail].1 >= 2 * trail_run_max.max(1);
+    let start = if lead_ok { samples[lead].0 } else { 0 };
+    let end = if trail_ok {
+        samples[n - trail].0
+    } else {
+        line.len()
+    };
+    (start.min(end.saturating_sub(2)), end)
+}
+
 /// Distinct contributors with a qualifying pass over each cell of a
 /// candidate's ground, one ring of tolerance so a co-traveller a braid
 /// row over still lends the lane support. A pass is a maximal stretch
@@ -2523,8 +2668,32 @@ fn detect_for_cluster(
                 continue;
             };
             let (t_idx, s, e, dist) = portions[i];
-            section.polyline = sport_tracks[t_idx].1[s..e].to_vec();
-            section.distance_meters = dist;
+            // Trim a minority end-branch off the DISPLAY: a stretch at
+            // one end that most of the section's own traffic skips (a
+            // wrong-way turn at a junction) reads thin at metre
+            // resolution while the body stays busy. The drawn line is
+            // still one real single pass — a sub-range of the same
+            // trace — and the extent, counts, and occupied footprint
+            // below keep the full portion, so nothing downstream shifts.
+            let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
+            let (cs, ce) =
+                minority_end_clip(&sport_tracks[t_idx].1[s..e], &fine, coverage.ref_lat, 25.0, 25.0);
+            let (rs, re) = if cs > 0 || ce < e - s {
+                let kept = &sport_tracks[t_idx].1[s + cs..s + ce];
+                if crate::matching::calculate_route_distance(kept) >= config.min_section_length {
+                    (s + cs, s + ce)
+                } else {
+                    (s, e)
+                }
+            } else {
+                (s, e)
+            };
+            section.polyline = sport_tracks[t_idx].1[rs..re].to_vec();
+            section.distance_meters = if (rs, re) == (s, e) {
+                dist
+            } else {
+                crate::matching::calculate_route_distance(&section.polyline)
+            };
             section.representative_activity_id = sport_tracks[t_idx].0.to_string();
             info!(
                 "[Unified]   node cell0={:?} cells={} approx_len={:.0} portions={} → {} len={:.0} visits={}",
@@ -2940,6 +3109,57 @@ mod tests {
             .grid
             .cell_of(with_tail[100].latitude, with_tail[100].longitude);
         assert_eq!(support[&tail], 1, "a tail is its one rider's alone");
+    }
+
+    #[test]
+    fn a_minority_branch_behind_a_cliff_clips_but_a_taper_does_not() {
+        // Twenty tracks run a 600 m body east; only two turn north for a
+        // 200 m branch. The branch is short, thin, and behind a cliff, so
+        // it leaves the display; a body that instead tapers gradually to
+        // the same thinness keeps its full length.
+        let east = |m: f64| -> Vec<GpsPoint> {
+            let n = (m / 10.0) as usize;
+            (0..=n)
+                .map(|i| GpsPoint::new(46.0, 7.0 + i as f64 * 10.0 / 77_000.0))
+                .collect()
+        };
+        let end_lng = 7.0 + 600.0 / 77_000.0;
+        let mut branch = east(600.0);
+        branch.extend((1..=20).map(|i| GpsPoint::new(46.0 + i as f64 * 10.0 / 111_132.0, end_lng)));
+        let mut tracks: Vec<Vec<GpsPoint>> = (0..20).map(|_| east(600.0)).collect();
+        tracks[0] = branch.clone();
+        tracks[1] = branch.clone();
+        let views: Vec<(&str, &[GpsPoint])> = tracks.iter().map(|t| ("", t.as_slice())).collect();
+        let portions: Vec<Portion> = tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i, 0, t.len(), 0.0))
+            .collect();
+        let index = portion_point_index(&portions, &views, 46.0, 25.0);
+        let (s, e) = minority_end_clip(&branch, &index, 46.0, 25.0, 25.0);
+        let kept = crate::matching::calculate_route_distance(&branch[s..e]);
+        assert_eq!(s, 0, "the busy body start is kept");
+        assert!(
+            (540.0..=680.0).contains(&kept),
+            "the north branch is clipped back to the ~600 m body, got {kept:.0}"
+        );
+
+        // Gradual taper: twenty bodies, each 20 m shorter than the last,
+        // so support falls one track per step. No cliff — kept whole.
+        let taper: Vec<Vec<GpsPoint>> = (0..20).map(|i| east(600.0 - i as f64 * 20.0)).collect();
+        let tviews: Vec<(&str, &[GpsPoint])> = taper.iter().map(|t| ("", t.as_slice())).collect();
+        let tportions: Vec<Portion> = taper
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i, 0, t.len(), 0.0))
+            .collect();
+        let tindex = portion_point_index(&tportions, &tviews, 46.0, 25.0);
+        let n = taper[0].len();
+        assert_eq!(
+            minority_end_clip(&taper[0], &tindex, 46.0, 25.0, 25.0),
+            (0, n),
+            "a gradual taper is not a branch"
+        );
     }
 
     #[test]
