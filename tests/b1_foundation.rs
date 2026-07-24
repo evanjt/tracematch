@@ -881,6 +881,84 @@ fn cached_single_cluster_cost_curve_is_linear() {
     );
 }
 
+/// COLD-COST gate. A cold (empty) cache — every app start before the cache is
+/// persisted, and every bulk window-expand — receiving N brand-new activities in
+/// ONE call must cost ~LINEAR in N, not quadratic. The two-phase
+/// route-then-recompute rebuilds each touched cluster ONCE over its final
+/// membership, so a cold detect over N is O(sum of touched clusters) = O(N),
+/// comparable to (and it also warms the cache from) a plain
+/// `detect_sections_unified(N)`. The earlier recompute-per-activity shape was
+/// O(N²): a cold/bulk add did k recomputes of a growing cluster — SLOWER than
+/// the single batch it replaced. Uses one growing home cluster: the WORST case
+/// for the old bug (every activity lands in the one cluster).
+#[test]
+fn gate_cached_cold_cache_cost_is_linear() {
+    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+
+    let cfg = SectionConfig::default();
+    let corpus = corpus_with_bucket_a(80);
+    let tracks = corpus.tracks_through_e();
+    let sports = corpus.sport_map_through_e();
+
+    // Cold detect over the first n activities: empty cache, all n are new in one
+    // call. Also time the plain batch over the same n, for the comparability note.
+    let cold = |n: usize| -> (u128, u128) {
+        let prefix: Vec<(String, Vec<GpsPoint>)> = tracks[..n.min(tracks.len())].to_vec();
+        let new_ids: Vec<&str> = prefix.iter().map(|(id, _)| id.as_str()).collect();
+        let mut cache = SectionEvidenceCache::new();
+        let t0 = Instant::now();
+        let _ = detect_sections_unified_incremental_cached(
+            &mut cache, &[], &prefix, &new_ids, &[], &sports, &cfg,
+        );
+        let cached = t0.elapsed().as_micros();
+        let t1 = Instant::now();
+        let _ = detect_sections_unified(&prefix, &[], &sports, &cfg);
+        let batch = t1.elapsed().as_micros();
+        (cached, batch)
+    };
+    let (c20, b20) = cold(20);
+    let (c40, b40) = cold(40);
+    let (c80, b80) = cold(80);
+
+    println!("\n================ PART C: COLD-cache detect cost (debug, must be O(N)) ================");
+    println!("(empty cache, all N new in one call — the app-start / bulk-expand path)");
+    println!(
+        "  cold cached  N=20 {c20:>8}us   N=40 {c40:>8}us (x{:.2})   N=80 {c80:>8}us (x{:.2})",
+        safe_ratio(c40 as f64, c20 as f64),
+        safe_ratio(c80 as f64, c20 as f64),
+    );
+    println!(
+        "  plain batch  N=20 {b20:>8}us   N=40 {b40:>8}us (x{:.2})   N=80 {b80:>8}us (x{:.2})",
+        safe_ratio(b40 as f64, b20 as f64),
+        safe_ratio(b80 as f64, b20 as f64),
+    );
+    println!("--------------------------------------------------------------------------------------");
+    println!(
+        "READ: cold cached TRACKS the plain batch — same cost and same growth — because it\n\
+         recomputes each touched cluster ONCE over its final membership, which IS the batch's\n\
+         per-cluster detect. The recompute-per-activity shape did k growing recomputes = O(N²),\n\
+         ~4x steeper than the batch. (The batch is itself super-linear on ONE cluster: geo_clusters\n\
+         and the lift veto are O(N²); the cache inherits that, it does not add to it.)\n"
+    );
+
+    assert!(c20 > 0 && c80 > 0, "cost samples must be non-zero");
+    // The gate: a cold pass must TRACK the plain batch it replaces at every size
+    // — recompute-once == the batch's per-cluster detect. The old O(N²)-per-add
+    // shape would be several times the batch at N=80. (A raw "linear in N" bound
+    // would be wrong here: the batch itself is super-linear on one cluster.)
+    for (c, b, n) in [(c20, b20, 20), (c40, b40, 40), (c80, b80, 80)] {
+        assert!(
+            (c as f64) < 1.6 * b as f64,
+            "cold-cache detect at N={n} ({c}us) must track the plain batch ({b}us), not O(N²)-per-add",
+        );
+    }
+    // And its growth must not outrun the batch's growth (excludes the quadratic).
+    assert!(
+        safe_ratio(c80 as f64, c20 as f64) < 1.5 * safe_ratio(b80 as f64, b20 as f64),
+        "cold-cache growth must track the batch's, not the O(N²)-per-add's ~4x-steeper curve",
+    );
+}
+
 fn safe_ratio(a: f64, b: f64) -> f64 {
     if b > 0.0 { a / b } else { 0.0 }
 }

@@ -3096,6 +3096,12 @@ struct ClusterEvidence {
     /// The cluster's last-emitted sections, reused verbatim whenever an add does
     /// not touch this cluster.
     sections: Vec<FrequentSection>,
+    /// Set whenever the membership changed this call (an add or a bridge merge)
+    /// so the recompute pass rebuilds this cluster exactly ONCE over its FINAL
+    /// membership, not once per new activity. Transient (never persisted): the
+    /// recompute pass clears it before the call returns.
+    #[serde(skip)]
+    dirty: bool,
 }
 
 impl ClusterEvidence {
@@ -3106,10 +3112,12 @@ impl ClusterEvidence {
             union_bbox: (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
             ref_lat: 0.0,
             sections: Vec::new(),
+            dirty: false,
         }
     }
 
-    /// Add a member, keeping the union bbox current.
+    /// Add a member, keeping the union bbox current and marking the cluster for
+    /// recompute.
     fn push_member(&mut self, id: &str, bbox: (f64, f64, f64, f64)) {
         self.member_ids.push(id.to_string());
         self.member_bboxes.push(bbox);
@@ -3118,6 +3126,7 @@ impl ClusterEvidence {
         u.1 = u.1.max(bbox.1);
         u.2 = u.2.min(bbox.2);
         u.3 = u.3.max(bbox.3);
+        self.dirty = true;
     }
 
     /// South-west corner `(min lat, min lng)` over member boxes, the key
@@ -3173,8 +3182,10 @@ pub fn detect_sections_unified_incremental_cached(
         })
         .collect();
 
-    // Route each new activity into its sport's clusters, recomputing the touched
-    // cluster as we go.
+    // Phase 1 — ROUTE every new activity into its sport's clusters, marking each
+    // touched cluster dirty. Routing stays per-id and ordered because routing a
+    // later activity can bridge clusters an earlier one just formed. NO detection
+    // runs here: only membership + bridges are updated.
     for &new_id in new_activity_ids {
         let Some((new_pts, _)) = lookup.get(new_id).copied() else {
             continue; // a named new id not present in the pool: nothing to route
@@ -3183,7 +3194,21 @@ pub fn detect_sections_unified_incremental_cached(
             .get(new_id)
             .map(|s| s.as_str())
             .unwrap_or("Unknown");
-        route_and_recompute(cache, sport, new_id, new_pts, &lookup, config, cell_size, &tun);
+        route_only(cache, sport, new_id, new_pts, &tun);
+    }
+
+    // Phase 2 — RECOMPUTE each touched cluster exactly ONCE, over its FINAL
+    // membership. This is what makes a cold cache or a bulk window-expand O(sum
+    // of touched clusters) = O(N), not the O(N²) of recomputing per new activity.
+    // Recompute-once over the final membership equals the batch's per-cluster
+    // detect, so `cached == batch` is preserved (the oracle guards it).
+    for (sport, clusters) in cache.sports.iter_mut() {
+        for c in clusters.iter_mut() {
+            if c.dirty {
+                recompute_cluster(c, sport, &lookup, config, cell_size, &tun);
+                c.dirty = false;
+            }
+        }
     }
 
     // Assemble the catalogue from every cluster, renumbering section ids
@@ -3258,18 +3283,15 @@ fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
     a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3
 }
 
-/// Route a new activity into the cache: append it to the single cluster it
-/// touches and recompute that cluster, seed a new singleton if it touches none,
-/// or bridge (merge and recompute) the clusters it connects.
-#[allow(clippy::too_many_arguments)]
-fn route_and_recompute(
+/// Route a new activity into the cache's clusters (Phase 1): append it to the
+/// single cluster it touches, seed a new singleton if it touches none, or bridge
+/// (merge) the clusters it connects. Marks every touched cluster dirty and does
+/// NOT recompute — the recompute pass does that once, after all routing.
+fn route_only(
     cache: &mut SectionEvidenceCache,
     sport: &str,
     new_id: &str,
     new_pts: &[GpsPoint],
-    lookup: &HashMap<&str, (&[GpsPoint], &[f64])>,
-    config: &SectionConfig,
-    cell_size: f64,
     tun: &Tunables,
 ) {
     let gap = tun.cluster_gap_m;
@@ -3295,37 +3317,24 @@ fn route_and_recompute(
         [] => {
             let mut c = ClusterEvidence::empty();
             c.push_member(new_id, new_bbox);
-            recompute_cluster(&mut c, sport, lookup, config, cell_size, tun);
             clusters.push(c);
         }
         [i] => {
-            let c = &mut clusters[*i];
-            c.push_member(new_id, new_bbox);
-            recompute_cluster(c, sport, lookup, config, cell_size, tun);
+            clusters[*i].push_member(new_id, new_bbox);
         }
-        _ => {
-            bridge_clusters(
-                clusters, &touched, new_id, new_bbox, sport, lookup, config, cell_size, tun,
-            );
-        }
+        _ => bridge_only(clusters, &touched, new_id, new_bbox),
     }
 }
 
 /// Merge every cluster a bridging activity touches, plus the activity itself,
-/// into one cluster and recompute it over the union. The connected-component
-/// result matches the batch's [`geo_clusters`] union-find. Bounded by the merged
-/// size, and rare (a genuinely new connecting route).
-#[allow(clippy::too_many_arguments)]
-fn bridge_clusters(
+/// into one cluster (marked dirty). The connected-component result matches the
+/// batch's [`geo_clusters`] union-find. Bounded by the merged size, and rare (a
+/// genuinely new connecting route). The recompute pass rebuilds the union once.
+fn bridge_only(
     clusters: &mut Vec<ClusterEvidence>,
     touched: &[usize],
     new_id: &str,
     new_bbox: (f64, f64, f64, f64),
-    sport: &str,
-    lookup: &HashMap<&str, (&[GpsPoint], &[f64])>,
-    config: &SectionConfig,
-    cell_size: f64,
-    tun: &Tunables,
 ) {
     // Remove touched clusters high-index first so earlier indices stay valid,
     // then restore ascending order so members keep their arrival sequence.
@@ -3341,8 +3350,6 @@ fn bridge_clusters(
         }
     }
     merged.push_member(new_id, new_bbox);
-
-    recompute_cluster(&mut merged, sport, lookup, config, cell_size, tun);
     clusters.push(merged);
 }
 
