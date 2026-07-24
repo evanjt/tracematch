@@ -782,3 +782,49 @@ fn deleting_activities_is_the_only_way_evidence_leaves() {
         "restoring the activity set must restore the catalogue exactly"
     );
 }
+
+// ------------------------- rule 5: support binds along the length
+
+#[test]
+fn one_off_tail_is_cut_where_its_own_support_ends() {
+    // One outing takes a wrong turn off a busy corridor and rides a
+    // tail nobody else traverses end to end. Peel-off traffic thins one
+    // track per cell, so the tail welds onto the corridor through the
+    // one-missing-track rule and short stray strands keep its cells
+    // hot. Support must bind everywhere, not just in total: the deep
+    // tail is one outing's private ground, cut with a low-support
+    // record, while the corridor keeps all five contributors.
+    use tracematch::{BoundaryReason, Tunables, detect_sections_unified_explained};
+
+    let tracks = shapes::welded_tail();
+    let out = detect_sections_unified_explained(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    dump(&out.sections);
+    assert_catalogue_invariants(&tracks, &out.sections);
+
+    let corridor: Vec<GpsPoint> = (2..=13).map(|i| shapes::to_gps(i as f64 * 100.0, 0.0)).collect();
+    assert!(
+        coverage(&corridor, &out.sections, 130.0) >= 0.9,
+        "the corridor itself must survive"
+    );
+    for y in [700.0, 800.0, 900.0] {
+        let p = shapes::to_gps(1500.0, y);
+        assert!(
+            out.sections.iter().all(|s| min_dist(&p, &s.polyline) > 130.0),
+            "one outing's tail ground appeared in a section at y={y}"
+        );
+    }
+    let cut_line = shapes::to_gps(0.0, 500.0).latitude;
+    assert!(
+        out.boundaries.iter().any(|r| {
+            matches!(r.reason, BoundaryReason::LowSupport { .. }) && r.latitude > cut_line
+        }),
+        "no low-support record on the tail: {:?}",
+        out.boundaries
+    );
+}
