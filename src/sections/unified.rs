@@ -2808,6 +2808,115 @@ pub fn detect_sections_unified_explained(
     }
 }
 
+/// The outcome of folding one activity into an existing catalogue: the
+/// full converged catalogue plus the delta a persistence layer applies.
+///
+/// The batch catalogue is legitimately NON-MONOTONE — sections dissolve
+/// and reform as evidence accumulates (measured: section count walks a
+/// path like `.. 3, 3, 2, 2, 3 ..` over a growing pool, never a
+/// superset of an earlier step). So an incremental that only ever ADDED
+/// would drift away from the batch. `dissolved` is how a fold retires
+/// ground that no longer qualifies; `added` is genuinely new ground.
+/// Damping this churn into a stable, believable view (assign-once
+/// identity, hysteresis) is the engine layer's job, not the detector's:
+/// this layer converges to the churny truth, the layer above presents it
+/// calmly.
+pub struct UnifiedIncrementalResult {
+    /// The catalogue after the fold. Converges to [`detect_sections_unified`]
+    /// over `pool` (ground overlap >= 0.95), order-free by construction.
+    pub catalogue: Vec<FrequentSection>,
+    /// Catalogue sections no prior section shares ground with: the
+    /// sections this fold surfaced.
+    pub added: Vec<FrequentSection>,
+    /// Prior sections no catalogue section shares ground with: the
+    /// sections this fold dissolved (the non-monotone case).
+    pub dissolved: Vec<FrequentSection>,
+}
+
+/// Fold one activity into an existing Unified catalogue, order-free and
+/// converging to the [`detect_sections_unified`] batch over the same
+/// pool.
+///
+/// `pool` is the FULL accumulated pool INCLUDING the just-added activity;
+/// `existing` is the catalogue before it. The result carries the new
+/// catalogue plus the add/dissolve delta a persistence layer applies.
+///
+/// # Convergence, not accumulation
+///
+/// Detection is already per-(sport, geo-cluster): the batch is a union
+/// over geographically disjoint clusters of [`detect_for_cluster`], and
+/// each cluster's catalogue is a pure function of that cluster's activity
+/// SET (proven order-free — canonical portion order, sorted grid
+/// accumulation). So the correct incremental only needs to re-run
+/// discovery for the cluster(s) the new activity touches, reuse untouched
+/// clusters verbatim, and it converges to the batch by construction. The
+/// dissolve set falls out naturally: a touched cluster's fresh discovery
+/// replaces its prior sections wholesale.
+///
+/// # This is the NAIVE-CORRECT baseline (B1 anchor)
+///
+/// The body re-batches the WHOLE pool on every call: correct by
+/// construction (the batch IS the convergence target) but O(N) per add,
+/// O(N^2) over a drip. It exists to green the convergence contract
+/// (`gate_unified_incremental_converges_to_batch`) and to hand the engine
+/// layer a passing baseline to optimise UNDER. The optimisation — a
+/// persisted per-cluster evidence grid folded in O(cluster) per add —
+/// keeps this delta contract ([`UnifiedIncrementalResult`]) unchanged;
+/// only the body and an added evidence-cache handle change. Design:
+/// `~/.claude/plans/b1-incremental-design.md`.
+pub fn detect_sections_unified_incremental(
+    existing: &[FrequentSection],
+    pool: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+) -> UnifiedIncrementalResult {
+    let catalogue = detect_sections_unified(pool, seconds, sport_types, config);
+    let added = catalogue
+        .iter()
+        .filter(|c| !existing.iter().any(|e| sections_share_ground(e, c)))
+        .cloned()
+        .collect();
+    let dissolved = existing
+        .iter()
+        .filter(|e| !catalogue.iter().any(|c| sections_share_ground(c, e)))
+        .cloned()
+        .collect();
+    UnifiedIncrementalResult {
+        catalogue,
+        added,
+        dissolved,
+    }
+}
+
+/// Two sections share ground when a majority of either polyline lies
+/// within [`GROUND_TOL_M`] of the other. This is the same ground-overlap
+/// match the convergence gate scores catalogues by, so `added` and
+/// `dissolved` agree with the metric B1 is held to.
+fn sections_share_ground(a: &FrequentSection, b: &FrequentSection) -> bool {
+    const GROUND_TOL_M: f64 = 50.0;
+    const COVERAGE_FRAC: f64 = 0.6;
+    ground_coverage(&a.polyline, &b.polyline, GROUND_TOL_M) >= COVERAGE_FRAC
+        || ground_coverage(&b.polyline, &a.polyline, GROUND_TOL_M) >= COVERAGE_FRAC
+}
+
+/// Fraction of `samples` within `tol_m` of any point on `line`.
+fn ground_coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
+    if samples.is_empty() || line.is_empty() {
+        return 0.0;
+    }
+    let covered = samples
+        .iter()
+        .filter(|s| {
+            line.iter()
+                .map(|p| crate::geo_utils::haversine_distance(s, p))
+                .fold(f64::INFINITY, f64::min)
+                <= tol_m
+        })
+        .count();
+    covered as f64 / samples.len() as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
