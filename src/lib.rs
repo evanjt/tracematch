@@ -90,7 +90,8 @@ pub use sections::{
     detect_sections_unified_explained, detect_sections_unified_tuned, find_all_track_portions,
     find_sections_in_route, incremental::IncrementalResult,
     incremental::detect_sections_incremental, lift_spans, lift_spans_tuned,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    recalculate_section_polyline, self_pass_penalty, split_section_at_index,
+    split_section_at_point,
 };
 
 // ============================================================================

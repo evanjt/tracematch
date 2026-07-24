@@ -334,41 +334,11 @@ impl CorridorGrid {
 /// Fraction of a polyline's length that re-covers ground it already
 /// covered (laps, doubled-back legs). A clean single-pass section ≈ 0.
 fn self_overlap_frac(polyline: &[GpsPoint]) -> f64 {
-    if polyline.len() < 3 {
-        return 0.0;
-    }
-    let target = ((polyline_len(polyline) / 25.0).ceil() as usize).clamp(3, 2000);
-    let pts = resample_route(polyline, target);
-    let ref_lat = pts[0].latitude.to_radians();
-    let m_lat = 111_000.0;
-    let m_lng = 111_000.0 * ref_lat.cos();
-    let cell = 30.0;
-    let mut last_visit: HashMap<(i32, i32), usize> = HashMap::new();
-    let mut dup = 0.0;
-    let mut total = 0.0;
-    for (i, p) in pts.iter().enumerate() {
-        let c = (
-            (p.latitude * m_lat / cell).floor() as i32,
-            (p.longitude * m_lng / cell).floor() as i32,
-        );
-        let seg = if i > 0 {
-            let dx = (p.longitude - pts[i - 1].longitude) * m_lng;
-            let dy = (p.latitude - pts[i - 1].latitude) * m_lat;
-            (dx * dx + dy * dy).sqrt()
-        } else {
-            0.0
-        };
-        total += seg;
-        if matches!(last_visit.get(&c), Some(&j) if i - j > 5) {
-            dup += seg;
-        }
-        last_visit.insert(c, i);
-    }
-    if total > 0.0 { dup / total } else { 0.0 }
-}
-
-fn polyline_len(pts: &[GpsPoint]) -> f64 {
-    tracematch::matching::calculate_route_distance(pts)
+    // The engine's single-pass render guard, so the geojson reports the
+    // same self-revisit share the render decides on (near 20 m, gap
+    // 100 m: the default-proximity corridor scale). The old last-visit
+    // cell metric under-reported a tight spin (125 read 0.00).
+    tracematch::self_pass_penalty(polyline, 20.0, 100.0)
 }
 
 struct MethodReport {

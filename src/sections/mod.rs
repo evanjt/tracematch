@@ -75,7 +75,7 @@ pub use traces::{extract_activity_trace, extract_all_activity_traces};
 pub use unified::{
     BoundaryReason, BoundaryRecord, Tunables, UnifiedDetection, confirmed_lift_spans,
     confirmed_lift_spans_tuned, detect_sections_unified, detect_sections_unified_explained,
-    detect_sections_unified_tuned, lift_spans, lift_spans_tuned,
+    detect_sections_unified_tuned, lift_spans, lift_spans_tuned, self_pass_penalty,
 };
 
 // Re-export single-route section utilities (find/split known sections).

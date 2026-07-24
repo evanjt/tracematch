@@ -121,6 +121,11 @@ pub enum BoundaryReason {
         kept_metres: f64,
         dropped_metres: f64,
     },
+    /// No contributing pass through the ground is a single traversal:
+    /// a junction where every visit mills, or a lone spin with no clean
+    /// line. The candidate backs off; its evidence stays and can
+    /// re-emerge, like any backoff.
+    NoSinglePass { best_penalty: f64, portions: u32 },
 }
 
 /// A detection outcome that carries its explanations.
@@ -271,6 +276,17 @@ pub struct Tunables {
     /// change re-cuts marginals by the same mechanism that makes local
     /// projection necessary in the first place.
     pub cluster_gap_m: f64,
+    /// Single-pass render guard: the largest share of a
+    /// representative's points that may revisit its own earlier ground
+    /// (see [`self_pass_penalty`]) before the render rejects it. The
+    /// default render (longest portion, or the medoid) stands when it
+    /// sits under this floor; above it, the cleanest contributing pass
+    /// is rendered instead, and a candidate with no pass under the
+    /// floor backs off as a junction blob. Wide margin on the review
+    /// corpora: kept single passes and clean laps measure <= 0.14, a
+    /// mid-line spin 0.34, a directionless junction 0.60; the plateau
+    /// sweep lands with A1.
+    pub self_pass_max: f64,
 }
 
 impl Tunables {
@@ -290,6 +306,7 @@ impl Tunables {
         lift_min_climb_mh: 1500.0,
         descent_match_m: 60.0,
         cluster_gap_m: 50_000.0,
+        self_pass_max: 0.25,
     };
 }
 
@@ -1261,6 +1278,130 @@ fn merge_non_fork_boundaries(
     regroup(supernodes, &mut uf)
 }
 
+/// Fraction of a line's points that revisit ground it has already
+/// travelled: a point within `near` metres of an earlier point first
+/// reached at least `gap` arc-metres back, with the opening `gap`
+/// metres exempt so a closed loop's join is not charged as a revisit.
+///
+/// A clean line or a single lap scores ~0; a mid-line spin or a
+/// directionless junction blob scores high. This enforces the
+/// single-pass rule on the rendered representative: the cell-event cut
+/// in [`portions_for`]/[`simple_pass_range`] misses a spin too tight to
+/// dwell between re-entries, so the render guards against it with this.
+/// O(n): earlier points enter a `near`-sized spatial hash on a `gap`
+/// arc-lag, and the opening `gap` never enters, so a query only meets
+/// eligible earlier ground.
+pub fn self_pass_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
+    let xy: Vec<(f64, f64)> = pts
+        .iter()
+        .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
+        .collect();
+    let mut cum = vec![0.0f64; pts.len()];
+    for i in 1..pts.len() {
+        let (dx, dy) = (xy[i].0 - xy[i - 1].0, xy[i].1 - xy[i - 1].1);
+        cum[i] = cum[i - 1] + (dx * dx + dy * dy).sqrt();
+    }
+    if cum[pts.len() - 1] < gap {
+        return 0.0;
+    }
+    let near2 = near * near;
+    let key = |x: f64, y: f64| ((x / near).floor() as i32, (y / near).floor() as i32);
+    let mut grid: HashMap<(i32, i32), Vec<(f64, f64)>> = HashMap::new();
+    let mut lag = 0usize;
+    let mut hits = 0usize;
+    for i in 0..pts.len() {
+        while lag < i && cum[i] - cum[lag] >= gap {
+            if cum[lag] >= gap {
+                let (x, y) = xy[lag];
+                grid.entry(key(x, y)).or_default().push((x, y));
+            }
+            lag += 1;
+        }
+        let (x, y) = xy[i];
+        let (cx, cy) = key(x, y);
+        let revisit = (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                grid.get(&(cx + dx, cy + dy)).is_some_and(|b| {
+                    b.iter()
+                        .any(|&(ex, ey)| (x - ex).powi(2) + (y - ey).powi(2) < near2)
+                })
+            })
+        });
+        if revisit {
+            hits += 1;
+        }
+    }
+    hits as f64 / pts.len() as f64
+}
+
+/// Share of a CLOSED line (endpoints within `CLOSE_FRAC` of its length)
+/// that runs back over its own ground in the opposite direction: a
+/// forward-and-reverse. Only closed lines are scored, so a switchback
+/// climb (which climbs away, endpoints far apart) is never charged for
+/// its antiparallel hairpin legs, and a clean loop scores ~0 (its
+/// ground is travelled once, same sense). Complements
+/// [`self_pass_penalty`], which needs an arc gap and so misses the short
+/// spurs of an out-and-back that returns to its start.
+fn out_and_back_penalty(pts: &[GpsPoint], near: f64) -> f64 {
+    const CLOSE_FRAC: f64 = 0.2;
+    if pts.len() < 5 {
+        return 0.0;
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
+    let xy: Vec<(f64, f64)> = pts
+        .iter()
+        .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
+        .collect();
+    let total: f64 = xy
+        .windows(2)
+        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+        .sum();
+    let last = xy[xy.len() - 1];
+    let end = ((last.0 - xy[0].0).powi(2) + (last.1 - xy[0].1).powi(2)).sqrt();
+    if total <= 0.0 || end > CLOSE_FRAC * total {
+        return 0.0;
+    }
+    let hdg = |i: usize| {
+        let a = xy[i.saturating_sub(1)];
+        let b = xy[(i + 1).min(xy.len() - 1)];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let n = (dx * dx + dy * dy).sqrt().max(1e-9);
+        (dx / n, dy / n)
+    };
+    let hd: Vec<(f64, f64)> = (0..xy.len()).map(hdg).collect();
+    let near2 = near * near;
+    let key = |x: f64, y: f64| ((x / near).floor() as i32, (y / near).floor() as i32);
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, &(x, y)) in xy.iter().enumerate() {
+        grid.entry(key(x, y)).or_default().push(i);
+    }
+    let mut hits = 0usize;
+    for (i, &(x, y)) in xy.iter().enumerate() {
+        let (cx, cy) = key(x, y);
+        let anti = (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                grid.get(&(cx + dx, cy + dy)).is_some_and(|b| {
+                    b.iter().any(|&j| {
+                        (i as i32 - j as i32).abs() >= 4
+                            && (x - xy[j].0).powi(2) + (y - xy[j].1).powi(2) < near2
+                            && hd[i].0 * hd[j].0 + hd[i].1 * hd[j].1 < -0.5
+                    })
+                })
+            })
+        });
+        if anti {
+            hits += 1;
+        }
+    }
+    hits as f64 / xy.len() as f64
+}
+
 /// Every contributing track's single-pass portion through a component.
 ///
 /// The run is found on the dilated cell set (jitter tolerance mid-run),
@@ -2120,35 +2261,81 @@ fn detect_for_cluster(
             None,
         ) {
             // The polyline must be a real trace, never a synthetic
-            // average: replace the consensus geometry with the medoid
-            // activity's actual trimmed portion. Consensus results stay
-            // as metadata (confidence, spread, density). The app's
+            // average: replace the consensus geometry with a real
+            // activity's actual portion. Consensus results stay as
+            // metadata (confidence, spread, density). The app's
             // reference-activity model (set reference, trim/extend)
             // builds on exactly this guarantee.
             //
-            // A trimmed candidate renders from its longest portion
-            // instead: remnant portions mix full coverers with corner
-            // clips, and the medoid's average-minimum-distance has a
-            // subset bias — a short central fragment is near every
-            // longer trace, wins the medoid, and collapses the section
-            // to itself. The longest portion is also the most stable
-            // render under jackknife (median and closest-to-remnant
-            // picks were probed and both jitter as the portion set
-            // shifts). Visits still count every contributor.
-            let render = if was_trimmed {
+            // Rule 6 binds on the render: a section's line is ONE real
+            // single pass. portions_for cuts laps and returns by cell
+            // events, but a spin too tight to dwell between re-entries
+            // slips through, a forward-and-reverse returns over its own
+            // ground, and a junction where every visit mills has no
+            // single traversal at all. The default render (longest
+            // portion when trimmed, else the medoid: remnant portions
+            // mix full coverers with corner clips, and the medoid's
+            // average-minimum-distance has a subset bias — a short
+            // central fragment is near every longer trace) stands when
+            // it is a single pass; above the floor the cleanest
+            // contributing pass is rendered instead, and a candidate
+            // with no single pass backs off as a blob. Longest is the
+            // stable pick under jackknife (median and closest-to-remnant
+            // were probed and both jitter); visits still count everyone.
+            let near = cell_size * 0.2;
+            let gap = cell_size;
+            let pens: Vec<f64> = portions
+                .iter()
+                .map(|&(t, s, e, _)| {
+                    let seg = &sport_tracks[t].1[s..e];
+                    self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near))
+                })
+                .collect();
+            let default_i = if was_trimmed {
+                (0..portions.len()).max_by(|&a, &b| {
+                    portions[a]
+                        .3
+                        .partial_cmp(&portions[b].3)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            } else {
                 portions
                     .iter()
-                    .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
-            } else {
-                portions.iter().find(|&&(t_idx, ..)| {
-                    sport_tracks[t_idx].0 == section.representative_activity_id
-                })
+                    .position(|&(t, ..)| sport_tracks[t].0 == section.representative_activity_id)
             };
-            if let Some(&(t_idx, s, e, dist)) = render {
-                section.polyline = sport_tracks[t_idx].1[s..e].to_vec();
-                section.distance_meters = dist;
-                section.representative_activity_id = sport_tracks[t_idx].0.to_string();
-            }
+            let chosen = match default_i {
+                Some(i) if pens[i] <= tun.self_pass_max => Some(i),
+                _ => (0..portions.len())
+                    .min_by(|&a, &b| {
+                        pens[a]
+                            .partial_cmp(&pens[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(
+                                portions[b]
+                                    .3
+                                    .partial_cmp(&portions[a].3)
+                                    .unwrap_or(std::cmp::Ordering::Equal),
+                            )
+                    })
+                    .filter(|&i| pens[i] <= tun.self_pass_max),
+            };
+            let Some(i) = chosen else {
+                let best = pens.iter().copied().fold(1.0_f64, f64::min);
+                let mid = section.polyline[section.polyline.len() / 2];
+                records.push(BoundaryRecord {
+                    latitude: mid.latitude,
+                    longitude: mid.longitude,
+                    reason: BoundaryReason::NoSinglePass {
+                        best_penalty: best,
+                        portions: portions.len() as u32,
+                    },
+                });
+                continue;
+            };
+            let (t_idx, s, e, dist) = portions[i];
+            section.polyline = sport_tracks[t_idx].1[s..e].to_vec();
+            section.distance_meters = dist;
+            section.representative_activity_id = sport_tracks[t_idx].0.to_string();
             info!(
                 "[Unified]   node cell0={:?} cells={} approx_len={:.0} portions={} → {} len={:.0} visits={}",
                 node.cells[0],
@@ -2476,5 +2663,87 @@ mod tests {
         }
         let runs = unrepresented_runs(&mask, &cum, 100.0);
         assert_eq!(runs, vec![(0, 18), (33, 40)], "long overlap splits runs");
+    }
+
+    #[test]
+    fn straight_line_has_no_self_pass() {
+        let pen = self_pass_penalty(&row(0.0, 100), 20.0, 100.0);
+        assert!(pen < 0.02, "a single straight pass never revisits: {pen}");
+    }
+
+    #[test]
+    fn out_and_back_revisits_its_outbound_leg() {
+        let out = row(0.0, 60);
+        let mut pts = out.clone();
+        pts.extend(out.into_iter().rev().skip(1));
+        let pen = self_pass_penalty(&pts, 20.0, 100.0);
+        // The retracing half scores far above a single pass (~0); the
+        // turnaround and the start-adjacent tail are legitimately exempt.
+        assert!(
+            pen > 0.3,
+            "the return leg retraces the outbound ground: {pen}"
+        );
+    }
+
+    #[test]
+    fn closed_loop_join_is_exempt() {
+        // A square circuit back to the start: each edge is fresh ground
+        // ~300 m from any other, only the final vertex meets the first,
+        // and the opening gap exempts that join.
+        let s = 30i32;
+        let (n, e) = (9.0e-5, 1.3e-4);
+        let mut pts = Vec::new();
+        for i in 0..s {
+            pts.push(GpsPoint::new(46.0 + n * i as f64, 7.0));
+        }
+        for i in 0..s {
+            pts.push(GpsPoint::new(46.0 + n * s as f64, 7.0 + e * i as f64));
+        }
+        for i in 0..s {
+            pts.push(GpsPoint::new(46.0 + n * (s - i) as f64, 7.0 + e * s as f64));
+        }
+        for i in 0..=s {
+            pts.push(GpsPoint::new(46.0, 7.0 + e * (s - i) as f64));
+        }
+        let pen = self_pass_penalty(&pts, 20.0, 100.0);
+        assert!(pen < 0.05, "a clean loop only rejoins at the start: {pen}");
+    }
+
+    #[test]
+    fn out_and_back_scores_high_but_a_through_line_does_not() {
+        // Out along a street and back over it: closed and antiparallel.
+        let out = row(0.0, 50);
+        let mut there_back = out.clone();
+        there_back.extend(out.into_iter().rev().skip(1));
+        assert!(
+            out_and_back_penalty(&there_back, 20.0) > 0.6,
+            "a forward-and-reverse runs back over its own ground"
+        );
+        // A single straight pass ends far from its start: never scored.
+        assert_eq!(out_and_back_penalty(&row(0.0, 50), 20.0), 0.0);
+    }
+
+    #[test]
+    fn switchback_climb_is_not_an_out_and_back() {
+        // Hairpins with antiparallel legs, but the line climbs away and
+        // ends far from its start, so the closed-line gate never fires.
+        let mut pts = Vec::new();
+        for leg in 0..6 {
+            let base = 46.0 + 6.0e-4 * leg as f64;
+            let east = leg % 2 == 0;
+            for i in 0..20 {
+                let lng = if east {
+                    7.0 + 1.3e-4 * i as f64
+                } else {
+                    7.0 + 1.3e-4 * (20 - i) as f64
+                };
+                pts.push(GpsPoint::new(base + 3.0e-5 * i as f64, lng));
+            }
+        }
+        assert_eq!(
+            out_and_back_penalty(&pts, 20.0),
+            0.0,
+            "a switchback climbs away; its hairpins are not a retrace"
+        );
     }
 }
