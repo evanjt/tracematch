@@ -126,6 +126,12 @@ pub enum BoundaryReason {
     /// line. The candidate backs off; its evidence stays and can
     /// re-emerge, like any backoff.
     NoSinglePass { best_penalty: f64, portions: u32 },
+    /// A stretch of the candidate's ground was traversed by fewer of
+    /// its own contributors than the support floor: a one-off spur
+    /// welded to a busy corridor through the traffic gradient at their
+    /// junction. The stretch is cut; the section stands on the
+    /// supported remnant.
+    LowSupport { floor: u32, dropped_cells: u32 },
 }
 
 /// A detection outcome that carries its explanations.
@@ -1541,6 +1547,79 @@ fn has_support(
     portions.len() >= required.max(config.min_activities as usize)
 }
 
+/// Distinct contributors with a qualifying pass over each cell of a
+/// candidate's ground, one ring of tolerance so a co-traveller a braid
+/// row over still lends the lane support. A pass is a maximal stretch
+/// of a contributor's track inside the candidate's cell set at least
+/// `pass_min_m` long in arc: a corner clip or a crossing lends no support,
+/// while every lap and fragment of a genuine traversal does — a
+/// contributor whose selected single pass is a fragment of its outing
+/// must not read as absent from the rest of its loop. Ground a
+/// contributor covers elsewhere in its outing, outside this candidate,
+/// supports nothing: that is what lets a stranger-hot spur read as the
+/// one-rider ground it is. Cost is one linear walk per contributor.
+fn candidate_support(
+    portions: &[Portion],
+    cell_set: &HashSet<Cell>,
+    coverage: &CoverageGrid,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    pass_min_m: f64,
+) -> HashMap<Cell, u32> {
+    let contributors: HashSet<usize> = portions.iter().map(|p| p.0).collect();
+    // Cell bounding box: most of a contributor's outing is nowhere near
+    // the candidate, and four compares are far cheaper than a set probe.
+    let (mut y0, mut y1, mut x0, mut x1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    for c in cell_set {
+        y0 = y0.min(c.0);
+        y1 = y1.max(c.0);
+        x0 = x0.min(c.1);
+        x1 = x1.max(c.1);
+    }
+    let mut support: HashMap<Cell, u32> = HashMap::new();
+    for &t in &contributors {
+        let pts = sport_tracks[t].1;
+        let mut touched: HashSet<Cell> = HashSet::new();
+        for &(rs, re) in &coverage.keep[t] {
+            let seg = &pts[rs..=re];
+            let mut run_cells: Vec<Cell> = Vec::new();
+            let mut run_m = 0.0_f64;
+            let mut in_run = false;
+            for (i, p) in seg.iter().enumerate() {
+                let c = coverage.grid.cell_of(p.latitude, p.longitude);
+                if c.0 >= y0 && c.0 <= y1 && c.1 >= x0 && c.1 <= x1 && cell_set.contains(&c) {
+                    if in_run {
+                        run_m += crate::geo_utils::haversine_distance(&seg[i - 1], p);
+                    }
+                    in_run = true;
+                    if run_cells.last() != Some(&c) {
+                        run_cells.push(c);
+                    }
+                } else {
+                    if in_run && run_m >= pass_min_m {
+                        touched.extend(run_cells.iter().copied());
+                    }
+                    run_cells.clear();
+                    run_m = 0.0;
+                    in_run = false;
+                }
+            }
+            if in_run && run_m >= pass_min_m {
+                touched.extend(run_cells.iter().copied());
+            }
+        }
+        let dilated: HashSet<Cell> = touched
+            .iter()
+            .flat_map(|c| {
+                (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
+            })
+            .collect();
+        for c in dilated {
+            *support.entry(c).or_insert(0) += 1;
+        }
+    }
+    support
+}
+
 /// Which components would survive as sections on their own evidence.
 fn section_worthiness(
     supernodes: &[Supernode],
@@ -2064,7 +2143,7 @@ fn detect_for_cluster(
 
     // Candidates that could stand as sections, scored by the real usage
     // they represent (total portion metres).
-    let mut candidates: Vec<(usize, Vec<Portion>, f64)> = Vec::new();
+    let mut candidates: Vec<(usize, Supernode, Vec<Portion>, f64)> = Vec::new();
     for (n_idx, node) in supernodes.iter().enumerate() {
         // Rough length from core cell count (cells are ~square).
         let approx_len = node.cells.len() as f64 * cell_size;
@@ -2072,17 +2151,104 @@ fn detect_for_cluster(
             continue;
         }
 
-        let portions = portions_for(node, &coverage, sport_tracks, config, cell_size, tun);
+        let mut portions = portions_for(node, &coverage, sport_tracks, config, cell_size, tun);
         if portions.is_empty()
             || !has_support(&portions, approx_len, config, opportunity(node, &coverage))
         {
             continue;
         }
+
+        // Pre-trim score: ordering must not depend on the trim below,
+        // or a trimmed candidate sinks in the backoff queue and every
+        // later candidate's represented-ground trim reshuffles. The
+        // trim corrects a candidate's extent, never its priority.
         let score: f64 = portions.iter().map(|p| p.3).sum();
-        candidates.push((n_idx, portions, score));
+
+        // Support binds along the length, not just in total (rule 5): a
+        // stretch of a candidate's ground traversed by fewer of its OWN
+        // contributors than the floor is not this section's ground,
+        // however hot stranger traffic made its cells. Without this, a
+        // near-private spur welds onto a busy corridor through the
+        // traffic gradient at their junction (adjacent thin cells always
+        // pass the one-missing-track rule), inherits the corridor's
+        // visit count, and can be rendered. The floor is the same bar
+        // the whole section must meet in [`has_support`], fixed from
+        // the pre-trim portions: recomputing it as portions shorten
+        // would ratchet the length tier stricter each round and spiral
+        // a legitimate short section to death. A qualifying pass must
+        // cover two cells of arc, scaled down for candidates shorter
+        // than that so a genuine pass over a short section still
+        // counts. Cells and portions only ever shrink, so the loop
+        // terminates.
+        let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
+        lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_len = lens[lens.len() / 2];
+        let required = required_visits_for_length(median_len, opportunity(node, &coverage)) as usize;
+        let floor = required.max(config.min_activities as usize) as u32;
+        let pass_min_m = (2.0 * cell_size).min(0.5 * median_len);
+        let mut node = Supernode {
+            cells: node.cells.clone(),
+            tracks: node.tracks.clone(),
+        };
+        loop {
+            let cell_set: HashSet<Cell> = node
+                .cells
+                .iter()
+                .flat_map(|c| {
+                    (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
+                })
+                .collect();
+            let support =
+                candidate_support(&portions, &cell_set, &coverage, sport_tracks, pass_min_m);
+            let kept: Vec<Cell> = node
+                .cells
+                .iter()
+                .copied()
+                .filter(|c| support.get(c).copied().unwrap_or(0) >= floor)
+                .collect();
+            if kept.len() == node.cells.len() {
+                break;
+            }
+            let kept_set: HashSet<Cell> = kept.iter().copied().collect();
+            let dropped: Vec<Cell> = node
+                .cells
+                .iter()
+                .copied()
+                .filter(|c| !kept_set.contains(c))
+                .collect();
+            let (lat, lng) = dropped.iter().fold((0.0, 0.0), |(la, ln), c| {
+                let (cla, cln) = coverage.grid.centre_of(*c);
+                (la + cla, ln + cln)
+            });
+            records.push(BoundaryRecord {
+                latitude: lat / dropped.len() as f64,
+                longitude: lng / dropped.len() as f64,
+                reason: BoundaryReason::LowSupport {
+                    floor,
+                    dropped_cells: dropped.len() as u32,
+                },
+            });
+            if kept.is_empty() {
+                portions.clear();
+                break;
+            }
+            node.cells = kept;
+            portions = portions_for(&node, &coverage, sport_tracks, config, cell_size, tun);
+            if portions.is_empty() {
+                break;
+            }
+        }
+        let approx_len = node.cells.len() as f64 * cell_size;
+        if portions.is_empty()
+            || approx_len < config.min_section_length
+            || !has_support(&portions, approx_len, config, opportunity(&node, &coverage))
+        {
+            continue;
+        }
+        candidates.push((n_idx, node, portions, score));
     }
     candidates.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
+        b.3.partial_cmp(&a.3)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.0.cmp(&b.0))
     });
@@ -2090,8 +2256,7 @@ fn detect_for_cluster(
     let backoff_grid = CellGrid::new(cell_size, coverage.ref_lat);
     let mut accepted_pts: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
     let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
-    for (n_idx, portions, score) in candidates {
-        let node = &supernodes[n_idx];
+    for (_, node, portions, score) in candidates {
         // Selection backoff (rule 6): ground already represented by an
         // accepted polyline is never re-emitted. The probe walks the
         // candidate's best portion; representation means accepted
@@ -2732,6 +2897,49 @@ mod tests {
         }
         let pen = self_pass_penalty(&pts, 20.0, 100.0);
         assert!(pen < 0.05, "a clean loop only rejoins at the start: {pen}");
+    }
+
+    #[test]
+    fn support_counts_contributor_passes_not_strangers_or_clips() {
+        // Two corridor traversals (one a braid row over), one that
+        // continues onto a private tail, and a perpendicular crossing.
+        // Corridor ground is supported by all three traversals, tail
+        // ground by its one rider alone; the crossing's corner clip
+        // lends nothing, and a non-contributor lends nothing anywhere.
+        let corridor = row(0.0, 60);
+        let braid = row(30.0, 60);
+        let with_tail = row(0.0, 120);
+        let cross: Vec<GpsPoint> = (0..60)
+            .map(|i| GpsPoint::new(46.0 + 9.0e-5 * 30.0, 7.0 + (i as f64 * 10.0 - 300.0) / 77_000.0))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![
+            ("a", corridor.as_slice()),
+            ("b", braid.as_slice()),
+            ("c", with_tail.as_slice()),
+            ("x", cross.as_slice()),
+        ];
+        let coverage = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT);
+        let cell_set: HashSet<Cell> = with_tail
+            .iter()
+            .chain(braid.iter())
+            .flat_map(|p| {
+                let c = coverage.grid.cell_of(p.latitude, p.longitude);
+                (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
+            })
+            .collect();
+        // The crossing is deliberately NOT a contributor; c's fragment
+        // status is irrelevant here — every qualifying pass counts.
+        let portions: Vec<Portion> =
+            vec![(0, 0, 60, 600.0), (1, 0, 60, 600.0), (2, 0, 120, 1200.0)];
+        let support = candidate_support(&portions, &cell_set, &coverage, &tracks, 100.0);
+        let mid = coverage
+            .grid
+            .cell_of(corridor[30].latitude, corridor[30].longitude);
+        assert_eq!(support[&mid], 3, "braid row lends the lane support");
+        let tail = coverage
+            .grid
+            .cell_of(with_tail[100].latitude, with_tail[100].longitude);
+        assert_eq!(support[&tail], 1, "a tail is its one rider's alone");
     }
 
     #[test]

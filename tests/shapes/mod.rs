@@ -466,3 +466,33 @@ pub fn persona_racer() -> Vec<(String, Vec<GpsPoint>)> {
         })
         .collect()
 }
+
+/// A busy west-east corridor where one outing takes a wrong turn: it
+/// alone rides a 900 m northward tail to its end. Other riders peel off
+/// over the tail's first 450 m, so cell traffic thins one track at a
+/// time (the gradient that welds the tail onto the corridor), and three
+/// staggered 120 m strands keep the deep tail's cells hot without
+/// lending it a single portion-length traversal.
+pub fn welded_tail() -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    for (i, up) in [0.0, 150.0, 300.0, 450.0, 900.0].into_iter().enumerate() {
+        let mut wps = vec![(0.0, 0.0), (1500.0, 0.0)];
+        if up > 0.0 {
+            wps.push((1500.0, up));
+        }
+        out.push((
+            format!("cor_{}", i),
+            track(&wobble(&densify(&wps), HUMAN_WOBBLE_M, phase(i))),
+        ));
+    }
+    for (i, (y0, y1)) in [(450.0, 570.0), (550.0, 670.0), (650.0, 770.0)]
+        .into_iter()
+        .enumerate()
+    {
+        out.push((
+            format!("str_{}", i),
+            track(&densify(&[(1500.0, y0), (1500.0, y1)])),
+        ));
+    }
+    out
+}
