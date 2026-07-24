@@ -27,7 +27,10 @@ use std::time::Instant;
 
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::sections::find_sections_in_route;
-use tracematch::{FrequentSection, GpsPoint, SectionConfig, detect_sections_unified};
+use tracematch::{
+    FrequentSection, GpsPoint, SectionConfig, detect_sections_unified,
+    detect_sections_unified_incremental,
+};
 
 // ============================================================================
 // Ground-match maths — inlined so this test binary owns its geometry (Rust
@@ -470,14 +473,18 @@ fn naive_rebatch_cost_curve() {
     );
 }
 
-/// GATE (armed, `#[ignore]`d today). The literal drop-in B1 will be wired into:
-/// when the order-free Unified-aware incremental exists, replace the empty
-/// placeholder with its final catalogue and delete the `#[ignore]`. It asserts
-/// the incremental ground-matches the from-scratch Unified batch at >= 0.95.
-/// RED under `--include-ignored` today (0.0 < 0.95) because no incremental
-/// exists; that red is the standing definition of "B1 done".
+/// GATE (armed and live). The order-free Unified-aware incremental drips the
+/// pool one activity at a time, folding each into the prior catalogue, and must
+/// converge to the from-scratch Unified batch at >= 0.95 ground overlap.
+///
+/// This is green against the NAIVE-CORRECT baseline
+/// (`detect_sections_unified_incremental`), which re-batches the accumulated
+/// pool on every fold: correct by construction (the final fold IS the batch)
+/// but O(N) per add. The convergence CONTRACT is now locked; the engine layer
+/// optimises the baseline's cost UNDER this gate without touching the assertion.
+/// A separate cost/flat-per-add gate is intentionally NOT added here — the naive
+/// baseline would fail it; the optimiser adds it when it lands the fast path.
 #[test]
-#[ignore = "B1 not built: no Unified-aware incremental exists to converge to the batch"]
 fn gate_unified_incremental_converges_to_batch() {
     let corpus = reduced_corpus();
     let tracks = corpus.tracks_through_e();
@@ -486,17 +493,23 @@ fn gate_unified_incremental_converges_to_batch() {
 
     let batch = detect_sections_unified(&tracks, &[], &sports, &cfg);
 
-    // TODO(B1): replace this empty placeholder with the result of the real
-    // order-free, ingest-concurrent, Unified-aware incremental drip over
-    // `tracks`, then delete the `#[ignore]` above to arm the gate.
-    let incremental_catalogue: Vec<FrequentSection> = Vec::new();
+    // Order-free incremental drip: fold one activity at a time into the prior
+    // catalogue. `pool` is the accumulated prefix (the new activity included);
+    // the fold converges to the batch over that prefix, so the last fold equals
+    // the full batch.
+    let mut catalogue: Vec<FrequentSection> = Vec::new();
+    for n in 1..=tracks.len() {
+        let pool = &tracks[..n];
+        let result = detect_sections_unified_incremental(&catalogue, pool, &[], &sports, &cfg);
+        catalogue = result.catalogue;
+    }
 
-    let overlap = catalogue_overlap(&incremental_catalogue, &batch);
+    let overlap = catalogue_overlap(&catalogue, &batch);
     assert!(
         overlap >= 0.95,
         "B1 incremental must converge to the Unified batch: ground overlap {overlap:.3} < 0.95 \
-         (batch sections = {}, incremental sections = {}). No incremental exists yet.",
+         (batch sections = {}, incremental sections = {}).",
         batch.len(),
-        incremental_catalogue.len(),
+        catalogue.len(),
     );
 }
