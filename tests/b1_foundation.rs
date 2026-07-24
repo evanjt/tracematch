@@ -513,3 +513,374 @@ fn gate_unified_incremental_converges_to_batch() {
         catalogue.len(),
     );
 }
+
+// ============================================================================
+// PART C — the CACHED cluster-recompute fast path: oracle + cost
+// ============================================================================
+//
+// The optimisation under the same convergence contract. The oracle drips a
+// corpus one activity at a time through BOTH the cached fast path (threading one
+// &mut cache) and the naive re-batch baseline, and asserts cached == naive ==
+// batch at EVERY step — on a single-cluster corpus and on a two-cluster corpus
+// (so routing, verbatim reuse, and the bridge merge are all exercised). The
+// cost test proves the add cost is flat/sublinear in library size, not linear
+// like the naive.
+
+/// A far-apart second corpus, id-prefixed so two single-origin corpora combine
+/// into one pool with two geographically disjoint clusters (origins ~100 km
+/// apart, far past the 50 km cluster gap).
+fn prefixed_tracks(
+    corpus: &LifecycleCorpus,
+    prefix: &str,
+) -> Vec<(String, Vec<GpsPoint>)> {
+    corpus
+        .tracks_through_e()
+        .into_iter()
+        .map(|(id, pts)| (format!("{prefix}{id}"), pts))
+        .collect()
+}
+
+/// A small single-origin corpus for the two-cluster oracle.
+fn small_corpus(origin: GpsPoint, seed: u64) -> LifecycleCorpus {
+    LifecycleCorpus::generate(&LifecycleConfig {
+        origin,
+        seed,
+        bucket_a_count: 8,
+        bucket_b_delta_count: 0,
+        bucket_d_delta_count: 0,
+        bucket_e_delta_count: 0,
+        ..LifecycleConfig::default()
+    })
+}
+
+/// A coarse straight track spanning the gap between the two origins: its
+/// bounding box overlaps both clusters, so adding it forces a bridge merge
+/// (and the batch's `geo_clusters` unions them the same way).
+fn bridge_track(lat0: f64, lat1: f64, lng: f64) -> Vec<GpsPoint> {
+    let n = 90;
+    (0..n)
+        .map(|i| {
+            let t = i as f64 / (n - 1) as f64;
+            GpsPoint::with_elevation(lat0 + (lat1 - lat0) * t, lng, 400.0)
+        })
+        .collect()
+}
+
+/// Drip `tracks` one at a time through the cached fast path and the naive
+/// baseline in lockstep, asserting cached == naive == batch at every step.
+/// `sports` must cover every id. Returns nothing; it asserts.
+fn assert_cached_tracks_naive_and_batch(
+    tracks: &[(String, Vec<GpsPoint>)],
+    sports: &HashMap<String, String>,
+    cfg: &SectionConfig,
+    label: &str,
+) {
+    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
+    let mut cache = SectionEvidenceCache::new();
+    let mut cached_cat: Vec<FrequentSection> = Vec::new();
+    let mut naive_cat: Vec<FrequentSection> = Vec::new();
+
+    for (step, (id, pts)) in tracks.iter().enumerate() {
+        pool.push((id.clone(), pts.clone()));
+        let new_ids = [pool.last().unwrap().0.as_str()];
+
+        let cached = detect_sections_unified_incremental_cached(
+            &mut cache, &cached_cat, &pool, &new_ids, &[], sports, cfg,
+        );
+        cached_cat = cached.catalogue;
+
+        // Naive re-batches the whole pool: naive_cat is the batch by construction.
+        let naive = detect_sections_unified_incremental(&naive_cat, &pool, &[], sports, cfg);
+        naive_cat = naive.catalogue;
+
+        let cached_vs_naive = catalogue_overlap(&cached_cat, &naive_cat);
+        if cached_vs_naive < 0.95 || cached_cat.len() != naive_cat.len() {
+            eprintln!(
+                "[{label}] MISMATCH step {step} N={}: cached {} vs naive/batch {} sections",
+                pool.len(),
+                cached_cat.len(),
+                naive_cat.len()
+            );
+            for (sp, m, rl, se) in cache.debug_summary() {
+                eprintln!("  cached cluster: {sp} members={m} ref_lat={rl:.6} sections={se}");
+            }
+        }
+        assert!(
+            cached_vs_naive >= 0.95,
+            "[{label}] step {step} (N={}): cached diverged from naive/batch: ground overlap \
+             {cached_vs_naive:.3} < 0.95 (cached {} sections, naive/batch {} sections)",
+            pool.len(),
+            cached_cat.len(),
+            naive_cat.len(),
+        );
+        // Frozen ref-lat is sub-cell, so the section COUNT must match exactly:
+        // a fragmented or padded catalogue would fail this even at 0.95 overlap.
+        assert_eq!(
+            cached_cat.len(),
+            naive_cat.len(),
+            "[{label}] step {step} (N={}): cached section count {} != batch {}",
+            pool.len(),
+            cached_cat.len(),
+            naive_cat.len(),
+        );
+    }
+
+    // Anchor the whole chain to a from-scratch batch: naive's final catalogue IS
+    // the batch, and the cached tracked it the whole way.
+    let batch = detect_sections_unified(&pool, &[], sports, cfg);
+    assert_eq!(
+        naive_cat.len(),
+        batch.len(),
+        "[{label}] naive final != from-scratch batch"
+    );
+    let final_overlap = catalogue_overlap(&cached_cat, &batch);
+    assert!(
+        final_overlap >= 0.95 && cached_cat.len() == batch.len(),
+        "[{label}] cached final vs batch: overlap {final_overlap:.3}, counts {} vs {}",
+        cached_cat.len(),
+        batch.len(),
+    );
+    println!(
+        "[{label}] {} activities dripped; final catalogue {} sections, cached==naive==batch \
+         at every step.",
+        tracks.len(),
+        cached_cat.len(),
+    );
+}
+
+/// ORACLE (single cluster). Every add touches the one home cluster, so the
+/// cached path recomputes it wholesale each fold (no untouched cluster to
+/// reuse) — this is the pure fold-and-recompute correctness proof, tracking the
+/// batch's non-monotone dissolve/reform walk step for step.
+#[test]
+fn gate_cached_incremental_single_cluster_matches_batch() {
+    let corpus = reduced_corpus();
+    let tracks = corpus.tracks_through_e();
+    let sports = corpus.sport_map_through_e();
+    let cfg = SectionConfig::default();
+    assert_cached_tracks_naive_and_batch(&tracks, &sports, &cfg, "single-cluster");
+}
+
+/// ORACLE (multi cluster). Two disjoint origins interleaved, then a bridge
+/// track that merges them. Exercises cluster routing, verbatim reuse of the
+/// untouched cluster on each add, and the bridge merge — all under the same
+/// cached == naive == batch assertion.
+#[test]
+fn gate_cached_incremental_multi_cluster_and_bridge_matches_batch() {
+    let north = small_corpus(GpsPoint::with_elevation(47.0, 8.0, 400.0), 0xC0FFEE);
+    let south = small_corpus(GpsPoint::with_elevation(47.9, 8.0, 400.0), 0xBEEF);
+    let north_tracks = prefixed_tracks(&north, "N_");
+    let south_tracks = prefixed_tracks(&south, "S_");
+
+    // Interleave the two clusters so each add reuses the other verbatim.
+    let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut ni = north_tracks.into_iter();
+    let mut si = south_tracks.into_iter();
+    loop {
+        match (ni.next(), si.next()) {
+            (Some(n), Some(s)) => {
+                tracks.push(n);
+                tracks.push(s);
+            }
+            (Some(n), None) => tracks.push(n),
+            (None, Some(s)) => tracks.push(s),
+            (None, None) => break,
+        }
+    }
+    // The bridge: one track spanning the ~100 km gap, overlapping both clusters.
+    tracks.push(("BRIDGE".to_string(), bridge_track(47.05, 47.85, 8.0)));
+
+    // One sport so the geography alone drives the two clusters and their merge.
+    let sports: HashMap<String, String> = tracks
+        .iter()
+        .map(|(id, _)| (id.clone(), "Ride".to_string()))
+        .collect();
+    let cfg = SectionConfig::default();
+    assert_cached_tracks_naive_and_batch(&tracks, &sports, &cfg, "multi-cluster+bridge");
+}
+
+/// A library spread over many far-apart clusters, dripped cluster by cluster, so
+/// every add lands in a cluster bounded by one corpus's size however large the
+/// whole library grows. `bucket_a` is each corpus's cold-start count (its total
+/// through-E size is a little larger). Returns `(tracks in drip order, sport map)`.
+fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
+    let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut sports: HashMap<String, String> = HashMap::new();
+    for c in 0..n_clusters {
+        // 3° apart (~330 km), far past the 50 km cluster gap. No one-offs or
+        // parallel streets: those carry wide random offsets that would stretch a
+        // cluster's bbox toward its neighbour and bridge them, defeating the
+        // point of measuring the bounded-cluster case.
+        let origin = GpsPoint::with_elevation(44.0 + c as f64 * 3.0, 8.0, 400.0);
+        let corpus = LifecycleCorpus::generate(&LifecycleConfig {
+            origin,
+            seed: 0x51D + c as u64,
+            bucket_a_count: bucket_a,
+            bucket_b_delta_count: 0,
+            bucket_d_delta_count: 0,
+            bucket_e_delta_count: 0,
+            one_off_fraction: 0.0,
+            parallel_street_count: 0,
+            ..LifecycleConfig::default()
+        });
+        for (id, pts) in corpus.tracks_through_e() {
+            let id = format!("c{c}_{id}");
+            sports.insert(id.clone(), "Ride".to_string());
+            tracks.push((id, pts));
+        }
+    }
+    (tracks, sports)
+}
+
+/// COST gate — the O(touched-cluster) property. The cached add cost is governed
+/// by the size of the cluster a new activity TOUCHES, not the whole library:
+/// the win the naive re-batch cannot have (it re-processes the entire pool on
+/// every add). The library grows across many far-apart clusters, each the SAME
+/// fresh corpus at a new origin, dripped cluster by cluster. The cost to
+/// INTEGRATE a whole cluster (its adds summed — which averages out debug-build
+/// per-add noise) must be flat however many clusters already exist, while the
+/// naive re-batch of the whole library grows. Debug timings are inflated, so the
+/// SCALING SHAPE is asserted, never an absolute millisecond.
+///
+/// (A single unbounded cluster is a different, honest story: there the touched
+/// cluster IS the whole library, so the add is O(cluster)=O(N), dominated by the
+/// discovery scan — see the build-vs-discovery split in the report. Making that
+/// sub-linear needs incremental discovery, deliberately out of this optimisation.)
+#[test]
+fn gate_cached_incremental_cost_is_flat() {
+    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+
+    let cfg = SectionConfig::default();
+    let n_clusters = 9;
+    let (tracks, sports) = multi_cluster_library(n_clusters, 8);
+    let cluster_size = tracks.len() / n_clusters; // identical clusters
+
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
+    let mut cache = SectionEvidenceCache::new();
+    let mut cached_cat: Vec<FrequentSection> = Vec::new();
+    let mut it = tracks.iter();
+
+    // Integrate the library one cluster at a time. After each cluster, measure a
+    // naive re-batch of the SAME pool right next to the cached adds, so the
+    // cached-vs-naive comparison at each depth shares a thermal state (debug
+    // runs drift as the machine warms; a ratio taken adjacently cancels it).
+    // `mean_cached_add` = a bounded touched-cluster recompute; `naive_rebatch`
+    // re-processes the whole pool, so it grows with the library.
+    let mut samples: Vec<(usize, f64, f64)> = Vec::new(); // (pool_len, mean_cached_add_us, naive_us)
+    for _c in 0..n_clusters {
+        let t_cached = Instant::now();
+        for _ in 0..cluster_size {
+            let (id, pts) = it.next().unwrap();
+            pool.push((id.clone(), pts.clone()));
+            let new_ids = [pool.last().unwrap().0.as_str()];
+            let res = detect_sections_unified_incremental_cached(
+                &mut cache, &cached_cat, &pool, &new_ids, &[], &sports, &cfg,
+            );
+            cached_cat = res.catalogue;
+        }
+        let mean_cached = t_cached.elapsed().as_micros() as f64 / cluster_size as f64;
+        let t_naive = Instant::now();
+        let _ = detect_sections_unified(&pool, &[], &sports, &cfg);
+        let naive = t_naive.elapsed().as_micros() as f64;
+        samples.push((pool.len(), mean_cached, naive));
+    }
+
+    let shallow = &samples[1]; // library ~2 clusters deep
+    let deep = samples.last().unwrap(); // full library
+    let ratio_shallow = safe_ratio(shallow.1, shallow.2);
+    let ratio_deep = safe_ratio(deep.1, deep.2);
+
+    println!("\n================ PART C: cached add vs naive re-batch, by library depth (debug) ================");
+    println!(
+        "(library = {n_clusters} far-apart clusters of {cluster_size}; each cached add touches ONE bounded cluster)"
+    );
+    println!("  pool   mean cached add    naive re-batch    cached/naive");
+    for (n, c, na) in &samples {
+        println!("  {n:>4}   {c:>12.0}us   {na:>12.0}us   {:.3}", safe_ratio(*c, *na));
+    }
+    println!("------------------------------------------------------------------------------------------------");
+    println!(
+        "READ: the mean cached add stays governed by the ONE bounded cluster it touches, while the\n\
+         naive re-batch re-processes the whole pool. So cached/naive SHRINKS with depth — a cached\n\
+         add is {:.0}x cheaper than a re-batch shallow, {:.0}x cheaper deep. Untouched clusters are\n\
+         reused verbatim, never recomputed. (Single-cluster is the honest O(N) case — see report.)\n",
+        safe_ratio(shallow.2, shallow.1),
+        safe_ratio(deep.2, deep.1),
+    );
+
+    assert!(deep.1 > 0.0 && deep.2 > 0.0, "cost samples must be non-zero");
+    // The O(touched-cluster) win: a cached add is far cheaper than a whole-pool
+    // re-batch, and the gap WIDENS with the library (the ratio shrinks), because
+    // the cached add's cost does not grow with the pool the way the re-batch does.
+    assert!(
+        ratio_deep < ratio_shallow,
+        "cached add must get RELATIVELY cheaper vs the naive re-batch as the library grows: \
+         deep ratio {ratio_deep:.3} must be < shallow ratio {ratio_shallow:.3}",
+    );
+    assert!(
+        deep.1 < 0.25 * deep.2,
+        "a cached add ({:.0}us) must be far cheaper than re-batching the whole library ({:.0}us)",
+        deep.1,
+        deep.2,
+    );
+}
+
+/// REPORT (not a gate): the single-cluster cached cost is honestly O(N). When a
+/// user's whole history sits in ONE cluster, every add recomputes that whole
+/// cluster, and its detection is O(cluster tracks) dominated by the discovery
+/// scan (measured ~35x the grid build, both O(cluster)). So the cached add grows
+/// with N here just as the naive re-batch does — cheaper by a constant (it skips
+/// re-clustering the pool and has no other cluster to reuse), NOT sub-linear.
+/// This is the remaining gap to the <=150ms/add budget for a single-cluster
+/// user; closing it needs incremental (sub-supernode) discovery, deferred as
+/// B1b. Printed so the O(N) shape stays visible next to the multi-cluster gate.
+#[test]
+fn cached_single_cluster_cost_curve_is_linear() {
+    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+
+    let cfg = SectionConfig::default();
+    let corpus = corpus_with_bucket_a(36); // one home cluster, ~40 activities
+    let tracks = corpus.tracks_through_e();
+    let sports = corpus.sport_map_through_e();
+
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
+    let mut cache = SectionEvidenceCache::new();
+    let mut cached_cat: Vec<FrequentSection> = Vec::new();
+    let mut per_add: Vec<(usize, u128)> = Vec::with_capacity(tracks.len());
+    for (id, pts) in &tracks {
+        pool.push((id.clone(), pts.clone()));
+        let new_ids = [pool.last().unwrap().0.as_str()];
+        let t0 = Instant::now();
+        let res = detect_sections_unified_incremental_cached(
+            &mut cache, &cached_cat, &pool, &new_ids, &[], &sports, &cfg,
+        );
+        per_add.push((pool.len(), t0.elapsed().as_micros()));
+        cached_cat = res.catalogue;
+    }
+    let median_around = |target: usize| -> f64 {
+        let mut xs: Vec<u128> = per_add
+            .iter()
+            .filter(|(n, _)| (*n as i64 - target as i64).abs() <= 3)
+            .map(|(_, us)| *us)
+            .collect();
+        xs.sort_unstable();
+        xs.get(xs.len() / 2).copied().unwrap_or(0) as f64
+    };
+    let (a10, a20, a40) = (median_around(10), median_around(20), median_around(40));
+
+    println!("\n================ PART C: cached SINGLE-cluster cost curve (debug, O(N)) ================");
+    println!("(one home cluster; every add recomputes it wholesale — the honest O(cluster)=O(N) case)");
+    println!("  N~10 {a10:>8.0}us   N~20 {a20:>8.0}us (x{:.2})   N~40 {a40:>8.0}us (x{:.2})",
+        safe_ratio(a20, a10), safe_ratio(a40, a10));
+    println!("------------------------------------------------------------------------------------------");
+    println!(
+        "READ: unlike the multi-cluster gate, this GROWS with N — the touched cluster IS the whole\n\
+         library. Sub-linear single-cluster adds need incremental discovery (B1b), not shipped here.\n"
+    );
+}
+
+fn safe_ratio(a: f64, b: f64) -> f64 {
+    if b > 0.0 { a / b } else { 0.0 }
+}

@@ -68,6 +68,7 @@ use super::{FrequentSection, SectionConfig, process_cluster};
 use crate::GpsPoint;
 use crate::union_find::UnionFind;
 use log::info;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 type Cell = (i32, i32);
@@ -634,6 +635,13 @@ pub fn confirmed_lift_spans_tuned(
         .collect()
 }
 
+/// The coverage-grid cell size for a cluster, derived from the config's
+/// proximity threshold. The batch [`detect_for_cluster`] and the cached
+/// fold must agree on this exactly, so it lives in one place.
+fn cluster_cell_size(config: &SectionConfig) -> f64 {
+    (config.proximity_threshold * 0.5).clamp(50.0, 150.0)
+}
+
 fn build_coverage_grid(
     tracks: &[(&str, &[GpsPoint])],
     seconds: &[&[f64]],
@@ -682,91 +690,16 @@ fn build_coverage_grid(
     let mut cell_tracks: HashMap<Cell, HashSet<u32>> = HashMap::new();
     let mut cell_passes: HashMap<Cell, HashMap<u32, u8>> = HashMap::new();
     for (t_idx, (_, pts)) in tracks.iter().enumerate() {
-        if pts.is_empty() {
-            continue;
-        }
-        let t = t_idx as u32;
-
-        // Fine-cell pass counting; each fine cell remembers the
-        // partition cell it first appeared in.
-        let mut scratch: HashMap<Cell, (Cell, PassScratch)> = HashMap::new();
-        let mut fine_seq = 0usize;
-        let mut visit_fine =
-            |fc: Cell, pc: Cell, ele: Option<f64>, seq: usize| match scratch.entry(fc) {
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    let (_, sc) = e.get_mut();
-                    if seq - sc.last_seq > tun.pass_away_cells {
-                        match sc.levels.iter_mut().find(|(lvl, _)| match (*lvl, ele) {
-                            (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
-                            _ => true,
-                        }) {
-                            Some((_, n)) => *n = (*n + 1).min(PASS_CLASS_MAX),
-                            None => sc.levels.push((ele, 1)),
-                        }
-                    }
-                    sc.last_seq = seq;
-                }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert((
-                        pc,
-                        PassScratch {
-                            last_seq: seq,
-                            levels: vec![(ele, 1)],
-                        },
-                    ));
-                }
-            };
-
-        // Lift-carried stretches contribute nothing; each remaining
-        // stretch walks with a fresh cell seed so no evidence bridges
-        // across the skipped ground.
-        for (r_idx, &(rs, re)) in keep[t_idx].iter().enumerate() {
-            if r_idx > 0 {
-                // A skipped lift stretch always counts as "away".
-                fine_seq += tun.pass_away_cells + 1;
-            }
-            let seg = &pts[rs..=re];
-            let mut prev = grid.cell_of(seg[0].latitude, seg[0].longitude);
-            let mut prev_fine = fine.cell_of(seg[0].latitude, seg[0].longitude);
-            cell_tracks.entry(prev).or_default().insert(t);
-            visit_fine(prev_fine, prev, seg[0].elevation, fine_seq);
-            for w in seg.windows(2) {
-                let b = grid.cell_of(w[1].latitude, w[1].longitude);
-                if b != prev {
-                    // Bresenham covers GPS gaps that skip cells.
-                    for c in bresenham_cells(prev, b).into_iter().skip(1) {
-                        cell_tracks.entry(c).or_default().insert(t);
-                    }
-                    prev = b;
-                }
-                let bf = fine.cell_of(w[1].latitude, w[1].longitude);
-                if bf != prev_fine {
-                    for fc in bresenham_cells(prev_fine, bf).into_iter().skip(1) {
-                        fine_seq += 1;
-                        visit_fine(fc, prev, w[1].elevation, fine_seq);
-                    }
-                    prev_fine = bf;
-                }
-            }
-        }
-
-        // Aggregate: a partition cell's class for this track is the mode
-        // of its fine-cell classes (ties to the lower class), so one
-        // double-clipped fine cell can't relabel a whole corridor cell.
-        let mut per_cell: HashMap<Cell, [u32; PASS_CLASS_MAX as usize]> = HashMap::new();
-        for (_, (pc, sc)) in scratch {
-            let class = sc.levels.iter().map(|&(_, n)| n).max().unwrap_or(1);
-            per_cell.entry(pc).or_default()[(class - 1) as usize] += 1;
-        }
-        for (pc, counts) in per_cell {
-            let mode = counts
-                .iter()
-                .enumerate()
-                .max_by_key(|(i, n)| (**n, std::cmp::Reverse(*i)))
-                .map(|(i, _)| i as u8 + 1)
-                .unwrap_or(1);
-            cell_passes.entry(pc).or_default().insert(t, mode);
-        }
+        fold_track_into_grid(
+            &grid,
+            &fine,
+            &mut cell_tracks,
+            &mut cell_passes,
+            t_idx as u32,
+            pts,
+            &keep[t_idx],
+            tun,
+        );
     }
 
     CoverageGrid {
@@ -775,6 +708,111 @@ fn build_coverage_grid(
         cell_tracks,
         cell_passes,
         keep,
+    }
+}
+
+/// Accumulate one track's coverage into the grid maps: its unique-cell
+/// visits (`cell_tracks`) and its per-cell pass class (`cell_passes`).
+/// The per-track step of [`build_coverage_grid`].
+///
+/// `t` is the track's index in the cluster's track ordering (the `u32`
+/// the grid keys everything by); `keep_t` is its lift-excluded keep
+/// ranges. `grid` and `fine` are the partition and sub-cell grids, both
+/// derived from the cluster's cell size and reference latitude.
+#[allow(clippy::too_many_arguments)]
+fn fold_track_into_grid(
+    grid: &CellGrid,
+    fine: &CellGrid,
+    cell_tracks: &mut HashMap<Cell, HashSet<u32>>,
+    cell_passes: &mut HashMap<Cell, HashMap<u32, u8>>,
+    t: u32,
+    pts: &[GpsPoint],
+    keep_t: &[(usize, usize)],
+    tun: &Tunables,
+) {
+    if pts.is_empty() {
+        return;
+    }
+
+    // Fine-cell pass counting; each fine cell remembers the
+    // partition cell it first appeared in.
+    let mut scratch: HashMap<Cell, (Cell, PassScratch)> = HashMap::new();
+    let mut fine_seq = 0usize;
+    let mut visit_fine = |fc: Cell, pc: Cell, ele: Option<f64>, seq: usize| match scratch.entry(fc)
+    {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            let (_, sc) = e.get_mut();
+            if seq - sc.last_seq > tun.pass_away_cells {
+                match sc.levels.iter_mut().find(|(lvl, _)| match (*lvl, ele) {
+                    (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
+                    _ => true,
+                }) {
+                    Some((_, n)) => *n = (*n + 1).min(PASS_CLASS_MAX),
+                    None => sc.levels.push((ele, 1)),
+                }
+            }
+            sc.last_seq = seq;
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert((
+                pc,
+                PassScratch {
+                    last_seq: seq,
+                    levels: vec![(ele, 1)],
+                },
+            ));
+        }
+    };
+
+    // Lift-carried stretches contribute nothing; each remaining
+    // stretch walks with a fresh cell seed so no evidence bridges
+    // across the skipped ground.
+    for (r_idx, &(rs, re)) in keep_t.iter().enumerate() {
+        if r_idx > 0 {
+            // A skipped lift stretch always counts as "away".
+            fine_seq += tun.pass_away_cells + 1;
+        }
+        let seg = &pts[rs..=re];
+        let mut prev = grid.cell_of(seg[0].latitude, seg[0].longitude);
+        let mut prev_fine = fine.cell_of(seg[0].latitude, seg[0].longitude);
+        cell_tracks.entry(prev).or_default().insert(t);
+        visit_fine(prev_fine, prev, seg[0].elevation, fine_seq);
+        for w in seg.windows(2) {
+            let b = grid.cell_of(w[1].latitude, w[1].longitude);
+            if b != prev {
+                // Bresenham covers GPS gaps that skip cells.
+                for c in bresenham_cells(prev, b).into_iter().skip(1) {
+                    cell_tracks.entry(c).or_default().insert(t);
+                }
+                prev = b;
+            }
+            let bf = fine.cell_of(w[1].latitude, w[1].longitude);
+            if bf != prev_fine {
+                for fc in bresenham_cells(prev_fine, bf).into_iter().skip(1) {
+                    fine_seq += 1;
+                    visit_fine(fc, prev, w[1].elevation, fine_seq);
+                }
+                prev_fine = bf;
+            }
+        }
+    }
+
+    // Aggregate: a partition cell's class for this track is the mode
+    // of its fine-cell classes (ties to the lower class), so one
+    // double-clipped fine cell can't relabel a whole corridor cell.
+    let mut per_cell: HashMap<Cell, [u32; PASS_CLASS_MAX as usize]> = HashMap::new();
+    for (_, (pc, sc)) in scratch {
+        let class = sc.levels.iter().map(|&(_, n)| n).max().unwrap_or(1);
+        per_cell.entry(pc).or_default()[(class - 1) as usize] += 1;
+    }
+    for (pc, counts) in per_cell {
+        let mode = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, n)| (**n, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i as u8 + 1)
+            .unwrap_or(1);
+        cell_passes.entry(pc).or_default().insert(t, mode);
     }
 }
 
@@ -2199,6 +2237,11 @@ fn detect_for_sport(
 
 /// One geographic cluster's pipeline: coverage grid → same-traffic
 /// supernodes → fixed point → candidates → selection backoff.
+///
+/// The body past the grid is [`detect_for_cluster_with_grid`], shared
+/// verbatim with the cached incremental
+/// ([`detect_sections_unified_incremental_cached`]) so a touched cluster's
+/// recompute is byte-identical to the batch's.
 fn detect_for_cluster(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -2211,10 +2254,37 @@ fn detect_for_cluster(
     if sport_tracks.len() < config.min_activities as usize {
         return Vec::new();
     }
-
-    let cell_size = (config.proximity_threshold * 0.5).clamp(50.0, 150.0);
+    let cell_size = cluster_cell_size(config);
     let coverage = build_coverage_grid(sport_tracks, sport_seconds, cell_size, tun);
+    detect_for_cluster_with_grid(
+        sport,
+        sport_tracks,
+        &coverage,
+        cell_size,
+        config,
+        tun,
+        section_idx,
+        records,
+    )
+}
 
+/// The discovery half of [`detect_for_cluster`], run against an
+/// already-built [`CoverageGrid`]. A pure function of `(coverage,
+/// sport_tracks)`: given the same grid and the same track ordering it
+/// emits byte-identical sections. Both the batch and the cached
+/// incremental build the grid ([`build_coverage_grid`]) then call this, so
+/// a touched cluster's recompute matches the batch exactly.
+#[allow(clippy::too_many_arguments)]
+fn detect_for_cluster_with_grid(
+    sport: &str,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    coverage: &CoverageGrid,
+    cell_size: f64,
+    config: &SectionConfig,
+    tun: &Tunables,
+    section_idx: &mut usize,
+    records: &mut Vec<BoundaryRecord>,
+) -> Vec<FrequentSection> {
     // Hot cells: adaptive floor, never an absolute constant.
     let hot_min = (config.min_activities as usize).max(2);
     let mut hot_cells: Vec<Cell> = coverage
@@ -2232,7 +2302,7 @@ fn detect_for_cluster(
     let divergence = config.divergence_threshold.clamp(0.05, 0.5);
     let same_traffic = 1.0 - divergence;
 
-    let mut supernodes = partition_supernodes(&hot_cells, &coverage, same_traffic);
+    let mut supernodes = partition_supernodes(&hot_cells, coverage, same_traffic);
 
     // Two rules applied to a fixed point:
     //  * a component that cannot be a section is not a barrier — absorb it
@@ -2241,12 +2311,12 @@ fn detect_for_cluster(
     //    map: the corridor stops for no reason the athlete can see.
     // Absorbing and merging can promote a component, so iterate.
     let mut worthy =
-        section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
+        section_worthiness(&supernodes, coverage, sport_tracks, config, cell_size, tun);
     for _ in 0..5 {
         let before = supernodes.len();
         supernodes = merge_non_fork_boundaries(
             supernodes,
-            &coverage,
+            coverage,
             divergence,
             config.min_activities,
             &worthy,
@@ -2256,24 +2326,13 @@ fn detect_for_cluster(
             // components; the explanation pass below reuses it.
             break;
         }
-        worthy = section_worthiness(&supernodes, &coverage, sport_tracks, config, cell_size, tun);
+        worthy = section_worthiness(&supernodes, coverage, sport_tracks, config, cell_size, tun);
     }
-
-    let mut sn_sizes: Vec<usize> = supernodes.iter().map(|s| s.cells.len()).collect();
-    sn_sizes.sort_unstable();
-    info!(
-        "[Unified] {}: {} hot cells → {} supernodes (median {} cells, max {})",
-        sport,
-        hot_cells.len(),
-        supernodes.len(),
-        sn_sizes.get(sn_sizes.len() / 2).copied().unwrap_or(0),
-        sn_sizes.last().copied().unwrap_or(0),
-    );
 
     // Every boundary that survived explains itself, as data.
     explain_boundaries(
         &supernodes,
-        &coverage,
+        coverage,
         divergence,
         config.min_activities,
         &worthy,
@@ -2296,9 +2355,9 @@ fn detect_for_cluster(
             continue;
         }
 
-        let mut portions = portions_for(node, &coverage, sport_tracks, config, cell_size, tun);
+        let mut portions = portions_for(node, coverage, sport_tracks, config, cell_size, tun);
         if portions.is_empty()
-            || !has_support(&portions, approx_len, config, opportunity(node, &coverage))
+            || !has_support(&portions, approx_len, config, opportunity(node, coverage))
         {
             continue;
         }
@@ -2328,7 +2387,7 @@ fn detect_for_cluster(
         let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
         lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median_len = lens[lens.len() / 2];
-        let required = required_visits_for_length(median_len, opportunity(node, &coverage)) as usize;
+        let required = required_visits_for_length(median_len, opportunity(node, coverage)) as usize;
         let floor = required.max(config.min_activities as usize) as u32;
         let pass_min_m = (2.0 * cell_size).min(0.5 * median_len);
         let mut node = Supernode {
@@ -2344,7 +2403,7 @@ fn detect_for_cluster(
                 })
                 .collect();
             let support =
-                candidate_support(&portions, &cell_set, &coverage, sport_tracks, pass_min_m);
+                candidate_support(&portions, &cell_set, coverage, sport_tracks, pass_min_m);
             let kept: Vec<Cell> = node
                 .cells
                 .iter()
@@ -2378,7 +2437,7 @@ fn detect_for_cluster(
                 break;
             }
             node.cells = kept;
-            portions = portions_for(&node, &coverage, sport_tracks, config, cell_size, tun);
+            portions = portions_for(&node, coverage, sport_tracks, config, cell_size, tun);
             if portions.is_empty() {
                 break;
             }
@@ -2386,7 +2445,7 @@ fn detect_for_cluster(
         let approx_len = node.cells.len() as f64 * cell_size;
         if portions.is_empty()
             || approx_len < config.min_section_length
-            || !has_support(&portions, approx_len, config, opportunity(&node, &coverage))
+            || !has_support(&portions, approx_len, config, opportunity(&node, coverage))
         {
             continue;
         }
@@ -2483,10 +2542,10 @@ fn detect_for_cluster(
                 };
                 let approx = reduced.cells.len() as f64 * cell_size;
                 let trimmed =
-                    portions_for(&reduced, &coverage, sport_tracks, config, cell_size, tun);
+                    portions_for(&reduced, coverage, sport_tracks, config, cell_size, tun);
                 if reduced.cells.is_empty()
                     || trimmed.is_empty()
-                    || !has_support(&trimmed, approx, config, opportunity(&reduced, &coverage))
+                    || !has_support(&trimmed, approx, config, opportunity(&reduced, coverage))
                 {
                     let mid = probe[probe.len() / 2];
                     records.push(BoundaryRecord {
@@ -2889,15 +2948,31 @@ pub fn detect_sections_unified_incremental(
     }
 }
 
-/// Two sections share ground when a majority of either polyline lies
-/// within [`GROUND_TOL_M`] of the other. This is the same ground-overlap
-/// match the convergence gate scores catalogues by, so `added` and
-/// `dissolved` agree with the metric B1 is held to.
+/// Ground-overlap match tolerance and coverage fraction: two sections share
+/// ground when a majority ([`GROUND_COVERAGE_FRAC`]) of either polyline lies
+/// within [`GROUND_TOL_M`] of the other. This is the metric the convergence gate
+/// scores catalogues by, so `added`/`dissolved` agree with what B1 is held to.
+const GROUND_TOL_M: f64 = 50.0;
+const GROUND_COVERAGE_FRAC: f64 = 0.6;
+
+/// Two sections share ground: a majority of either polyline within
+/// [`GROUND_TOL_M`] of the other.
 fn sections_share_ground(a: &FrequentSection, b: &FrequentSection) -> bool {
-    const GROUND_TOL_M: f64 = 50.0;
-    const COVERAGE_FRAC: f64 = 0.6;
-    ground_coverage(&a.polyline, &b.polyline, GROUND_TOL_M) >= COVERAGE_FRAC
-        || ground_coverage(&b.polyline, &a.polyline, GROUND_TOL_M) >= COVERAGE_FRAC
+    ground_coverage(&a.polyline, &b.polyline, GROUND_TOL_M) >= GROUND_COVERAGE_FRAC
+        || ground_coverage(&b.polyline, &a.polyline, GROUND_TOL_M) >= GROUND_COVERAGE_FRAC
+}
+
+/// A polyline's bbox padded by `pad_m` (longitude scaled by its own latitude).
+/// Two sections can only share ground within [`GROUND_TOL_M`] if their
+/// `GROUND_TOL_M`-padded bboxes overlap, so this gates the O(polyline²) ground
+/// test: geographically distant sections (different clusters) are rejected in
+/// O(1). Padding is generous (never a false reject).
+fn section_bbox_padded(polyline: &[GpsPoint], pad_m: f64) -> (f64, f64, f64, f64) {
+    let bb = track_bbox(polyline);
+    let mid = ((bb.0 + bb.1) * 0.5).to_radians();
+    let pad_lat = pad_m / 111_000.0;
+    let pad_lng = pad_m / (111_320.0 * mid.cos().abs().max(0.01));
+    (bb.0 - pad_lat, bb.1 + pad_lat, bb.2 - pad_lng, bb.3 + pad_lng)
 }
 
 /// Fraction of `samples` within `tol_m` of any point on `line`.
@@ -2915,6 +2990,435 @@ fn ground_coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
         })
         .count();
     covered as f64 / samples.len() as f64
+}
+
+// ============================================================================
+// Cached cluster-recompute incremental (the O(touched-cluster) fast path)
+// ============================================================================
+//
+// The naive [`detect_sections_unified_incremental`] above re-batches the WHOLE
+// pool on every add. This path holds the per-(sport, cluster) catalogue across
+// calls and re-runs detection ONLY for the cluster(s) a new activity touches,
+// reusing every untouched cluster verbatim. Detection is already partitioned
+// per geo-cluster and each cluster is an order-free pure function of its set
+// ([`detect_for_cluster`]), so the touched cluster is recomputed from its
+// current tracks and the catalogue equals the batch by construction — the same
+// per-cluster decomposition, minus the clusters the add did not reach.
+//
+// The touched cluster is recomputed with a FRESH reference latitude (a plain
+// [`build_coverage_grid`] over its members), so it is byte-identical to what the
+// batch computes for that cluster. An earlier design froze the reference
+// latitude and folded the grid in place; measurement retired it — the grid build
+// is ~3% of a cluster's detect cost (discovery dominates), so the fold saved
+// almost nothing, while a frozen projection drifts against the batch's and, far
+// from the meridian, the longitude scale amplifies that drift enough to flip
+// marginal sections. Always recomputing the touched cluster is exact and only
+// marginally dearer. The win is not re-touching the OTHER clusters.
+
+/// On-disk layout version of [`SectionEvidenceCache`]. Bump when the stored
+/// per-cluster shape changes so a persisted blob from an older build is
+/// recognised as stale and the engine cold-rebatches instead of trusting it.
+const EVIDENCE_CACHE_VERSION: u32 = 1;
+
+/// Persisted per-(sport, geo-cluster) evidence backing
+/// [`detect_sections_unified_incremental_cached`]. The engine holds one across
+/// folds and (in a later phase) persists it as a blob; this layer only defines
+/// the type and keeps it warm in memory.
+///
+/// Per cluster it stores the member set with per-member bounding boxes (for
+/// routing a new activity and detecting a bridge) and the cluster's last-emitted
+/// catalogue, reused verbatim whenever an add does not touch that cluster. No
+/// grid is persisted: a touched cluster is rebuilt from the pool on demand.
+/// `version` guards the blob: a decode that finds a different version must
+/// discard and cold-rebatch.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SectionEvidenceCache {
+    version: u32,
+    /// One bucket per sport; each holds that sport's geographically disjoint
+    /// clusters. Sport is a bucketing key here only, never part of a section's
+    /// identity (that is the engine's concern).
+    sports: HashMap<String, Vec<ClusterEvidence>>,
+}
+
+impl Default for SectionEvidenceCache {
+    fn default() -> Self {
+        Self {
+            version: EVIDENCE_CACHE_VERSION,
+            sports: HashMap::new(),
+        }
+    }
+}
+
+impl SectionEvidenceCache {
+    /// A fresh, empty cache at the current layout version.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when the blob's layout matches this build. A mismatch means the
+    /// persisted grid cannot be trusted and the caller should cold-rebatch.
+    pub fn is_current(&self) -> bool {
+        self.version == EVIDENCE_CACHE_VERSION
+    }
+
+    /// Per-cluster `(sport, members, ref_lat, sections)` snapshot, for tests
+    /// and diagnostics.
+    #[doc(hidden)]
+    pub fn debug_summary(&self) -> Vec<(String, usize, f64, usize)> {
+        let mut sports: Vec<&String> = self.sports.keys().collect();
+        sports.sort_unstable();
+        let mut out = Vec::new();
+        for s in sports {
+            for c in &self.sports[s] {
+                out.push((s.clone(), c.member_ids.len(), c.ref_lat, c.sections.len()));
+            }
+        }
+        out
+    }
+}
+
+/// One geographic cluster's evidence within a sport.
+#[derive(Clone, Serialize, Deserialize)]
+struct ClusterEvidence {
+    /// Member activity ids in arrival order (also the track ordering a rebuild
+    /// keys the grid by). Grows by append; a bridge concatenates the merged
+    /// clusters' members.
+    member_ids: Vec<String>,
+    /// Per-member raw bbox `(lat0, lat1, lng0, lng1)`, parallel to `member_ids`.
+    /// The routing/bridge relation pads these exactly as [`geo_clusters`] does.
+    member_bboxes: Vec<(f64, f64, f64, f64)>,
+    /// Union of the member bboxes: a routing pre-filter so a new activity far
+    /// from this cluster is rejected in O(1) instead of scanning every member.
+    union_bbox: (f64, f64, f64, f64),
+    /// The reference latitude of the last rebuild (the batch's set-mean over the
+    /// members). Informational; a rebuild recomputes it.
+    ref_lat: f64,
+    /// The cluster's last-emitted sections, reused verbatim whenever an add does
+    /// not touch this cluster.
+    sections: Vec<FrequentSection>,
+}
+
+impl ClusterEvidence {
+    fn empty() -> Self {
+        Self {
+            member_ids: Vec::new(),
+            member_bboxes: Vec::new(),
+            union_bbox: (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+            ref_lat: 0.0,
+            sections: Vec::new(),
+        }
+    }
+
+    /// Add a member, keeping the union bbox current.
+    fn push_member(&mut self, id: &str, bbox: (f64, f64, f64, f64)) {
+        self.member_ids.push(id.to_string());
+        self.member_bboxes.push(bbox);
+        let u = &mut self.union_bbox;
+        u.0 = u.0.min(bbox.0);
+        u.1 = u.1.max(bbox.1);
+        u.2 = u.2.min(bbox.2);
+        u.3 = u.3.max(bbox.3);
+    }
+
+    /// South-west corner `(min lat, min lng)` over member boxes, the key
+    /// [`geo_clusters`] sorts clusters by. Used to order clusters (and thus
+    /// section ids) exactly as the batch does.
+    fn sw_corner(&self) -> (f64, f64) {
+        let mut sw = (f64::MAX, f64::MAX);
+        for b in &self.member_bboxes {
+            sw.0 = sw.0.min(b.0);
+            sw.1 = sw.1.min(b.2);
+        }
+        sw
+    }
+}
+
+/// Fold new activities into an existing Unified catalogue using the persisted
+/// per-cluster evidence in `cache`. Order-free and equal to the
+/// [`detect_sections_unified`] batch over `pool` (same per-cluster
+/// decomposition), so it converges at >= 0.95 ground overlap with identical
+/// section count.
+///
+/// `pool` is the full accumulated pool (the new activities included) and is the
+/// source of truth for every touched cluster's tracks; `new_activity_ids` names
+/// the just-arrived entries, so only the clusters they touch are recomputed.
+/// The delta ([`UnifiedIncrementalResult`]) is computed against `existing`
+/// exactly as the naive baseline does (ground overlap), so the two agree.
+///
+/// The cache is mutated in place: a touched cluster is rebuilt fresh from its
+/// members and re-detected; untouched clusters keep their stored sections. A new
+/// activity that bridges two clusters merges them and rebuilds the union (the
+/// one genuinely global event, bounded by the merged size). The add cost is
+/// therefore O(touched cluster), not O(whole pool) as the naive re-batch is.
+pub fn detect_sections_unified_incremental_cached(
+    cache: &mut SectionEvidenceCache,
+    existing: &[FrequentSection],
+    pool: &[(String, Vec<GpsPoint>)],
+    new_activity_ids: &[&str],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    config: &SectionConfig,
+) -> UnifiedIncrementalResult {
+    let tun = Tunables::DEFAULT;
+    let cell_size = cluster_cell_size(config);
+
+    // Pool lookup: id → (points, seconds). Empty slice when a stream is absent,
+    // mirroring how the batch reads a missing `seconds` entry.
+    let lookup: HashMap<&str, (&[GpsPoint], &[f64])> = pool
+        .iter()
+        .enumerate()
+        .map(|(i, (id, pts))| {
+            let secs: &[f64] = seconds.get(i).copied().unwrap_or(&[]);
+            (id.as_str(), (pts.as_slice(), secs))
+        })
+        .collect();
+
+    // Route each new activity into its sport's clusters, recomputing the touched
+    // cluster as we go.
+    for &new_id in new_activity_ids {
+        let Some((new_pts, _)) = lookup.get(new_id).copied() else {
+            continue; // a named new id not present in the pool: nothing to route
+        };
+        let sport = sport_types
+            .get(new_id)
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        route_and_recompute(cache, sport, new_id, new_pts, &lookup, config, cell_size, &tun);
+    }
+
+    // Assemble the catalogue from every cluster, renumbering section ids
+    // per-sport in SW-corner cluster order so they match the batch's scheme.
+    let catalogue = assemble_catalogue(cache);
+
+    // Delta vs `existing` by ground overlap, exactly as the naive baseline —
+    // but gated by a padded-bbox pre-check so the O(polyline²) ground test only
+    // runs on geographically co-located pairs. Distant sections (untouched
+    // clusters) are rejected in O(1), so the delta cost tracks the CHANGED
+    // ground, not the whole (growing) catalogue.
+    let cat_bb: Vec<(f64, f64, f64, f64)> = catalogue
+        .iter()
+        .map(|s| section_bbox_padded(&s.polyline, GROUND_TOL_M))
+        .collect();
+    let ex_bb: Vec<(f64, f64, f64, f64)> = existing
+        .iter()
+        .map(|s| section_bbox_padded(&s.polyline, GROUND_TOL_M))
+        .collect();
+    let added = catalogue
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            !existing
+                .iter()
+                .enumerate()
+                .any(|(j, e)| boxes_overlap(cat_bb[*i], ex_bb[j]) && sections_share_ground(e, c))
+        })
+        .map(|(_, c)| c.clone())
+        .collect();
+    let dissolved = existing
+        .iter()
+        .enumerate()
+        .filter(|(j, e)| {
+            !catalogue
+                .iter()
+                .enumerate()
+                .any(|(i, c)| boxes_overlap(cat_bb[i], ex_bb[*j]) && sections_share_ground(c, e))
+        })
+        .map(|(_, e)| e.clone())
+        .collect();
+    UnifiedIncrementalResult {
+        catalogue,
+        added,
+        dissolved,
+    }
+}
+
+/// Raw lat/lng bounding box of a track: `(lat0, lat1, lng0, lng1)`.
+fn track_bbox(pts: &[GpsPoint]) -> (f64, f64, f64, f64) {
+    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in pts {
+        bb.0 = bb.0.min(p.latitude);
+        bb.1 = bb.1.max(p.latitude);
+        bb.2 = bb.2.min(p.longitude);
+        bb.3 = bb.3.max(p.longitude);
+    }
+    bb
+}
+
+/// Pad a raw bbox by half `gap_m`, exactly as [`geo_clusters`] does (longitude
+/// scaled by the box's own mid-latitude cosine).
+fn pad_bbox(bb: (f64, f64, f64, f64), gap_m: f64) -> (f64, f64, f64, f64) {
+    let pad_lat = gap_m * 0.5 / 111_132.0;
+    let mid = ((bb.0 + bb.1) * 0.5).to_radians();
+    let pad_lng = gap_m * 0.5 / (111_320.0 * mid.cos().abs().max(0.01));
+    (bb.0 - pad_lat, bb.1 + pad_lat, bb.2 - pad_lng, bb.3 + pad_lng)
+}
+
+/// Two padded boxes overlap: the [`geo_clusters`] union relation.
+fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3
+}
+
+/// Route a new activity into the cache: append it to the single cluster it
+/// touches and recompute that cluster, seed a new singleton if it touches none,
+/// or bridge (merge and recompute) the clusters it connects.
+#[allow(clippy::too_many_arguments)]
+fn route_and_recompute(
+    cache: &mut SectionEvidenceCache,
+    sport: &str,
+    new_id: &str,
+    new_pts: &[GpsPoint],
+    lookup: &HashMap<&str, (&[GpsPoint], &[f64])>,
+    config: &SectionConfig,
+    cell_size: f64,
+    tun: &Tunables,
+) {
+    let gap = tun.cluster_gap_m;
+    let new_bbox = track_bbox(new_pts);
+    let new_padded = pad_bbox(new_bbox, gap);
+
+    let clusters = cache.sports.entry(sport.to_string()).or_default();
+    let touched: Vec<usize> = clusters
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            // Union-bbox pre-filter rejects a far cluster in O(1); only a cluster
+            // the activity might actually join pays the per-member scan.
+            boxes_overlap(new_padded, pad_bbox(c.union_bbox, gap))
+                && c.member_bboxes
+                    .iter()
+                    .any(|&m| boxes_overlap(new_padded, pad_bbox(m, gap)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    match touched.as_slice() {
+        [] => {
+            let mut c = ClusterEvidence::empty();
+            c.push_member(new_id, new_bbox);
+            recompute_cluster(&mut c, sport, lookup, config, cell_size, tun);
+            clusters.push(c);
+        }
+        [i] => {
+            let c = &mut clusters[*i];
+            c.push_member(new_id, new_bbox);
+            recompute_cluster(c, sport, lookup, config, cell_size, tun);
+        }
+        _ => {
+            bridge_clusters(
+                clusters, &touched, new_id, new_bbox, sport, lookup, config, cell_size, tun,
+            );
+        }
+    }
+}
+
+/// Merge every cluster a bridging activity touches, plus the activity itself,
+/// into one cluster and recompute it over the union. The connected-component
+/// result matches the batch's [`geo_clusters`] union-find. Bounded by the merged
+/// size, and rare (a genuinely new connecting route).
+#[allow(clippy::too_many_arguments)]
+fn bridge_clusters(
+    clusters: &mut Vec<ClusterEvidence>,
+    touched: &[usize],
+    new_id: &str,
+    new_bbox: (f64, f64, f64, f64),
+    sport: &str,
+    lookup: &HashMap<&str, (&[GpsPoint], &[f64])>,
+    config: &SectionConfig,
+    cell_size: f64,
+    tun: &Tunables,
+) {
+    // Remove touched clusters high-index first so earlier indices stay valid,
+    // then restore ascending order so members keep their arrival sequence.
+    let mut desc = touched.to_vec();
+    desc.sort_unstable_by(|a, b| b.cmp(a));
+    let mut removed: Vec<ClusterEvidence> = desc.iter().map(|&i| clusters.remove(i)).collect();
+    removed.reverse();
+
+    let mut merged = ClusterEvidence::empty();
+    for c in removed {
+        for (id, bbox) in c.member_ids.iter().zip(&c.member_bboxes) {
+            merged.push_member(id, *bbox);
+        }
+    }
+    merged.push_member(new_id, new_bbox);
+
+    recompute_cluster(&mut merged, sport, lookup, config, cell_size, tun);
+    clusters.push(merged);
+}
+
+/// Rebuild one cluster's coverage grid over its current members and re-run
+/// detection, storing the fresh catalogue. This is exactly the batch's
+/// per-cluster computation ([`build_coverage_grid`] +
+/// [`detect_for_cluster_with_grid`]), so the cluster's sections equal what the
+/// batch would emit for it. Below `min_activities` the cluster emits nothing,
+/// matching the batch's per-cluster gate.
+fn recompute_cluster(
+    cluster: &mut ClusterEvidence,
+    sport: &str,
+    lookup: &HashMap<&str, (&[GpsPoint], &[f64])>,
+    config: &SectionConfig,
+    cell_size: f64,
+    tun: &Tunables,
+) {
+    if cluster.member_ids.len() < config.min_activities as usize {
+        cluster.sections.clear();
+        return;
+    }
+
+    let members = std::mem::take(&mut cluster.member_ids);
+    let sport_tracks: Vec<(&str, &[GpsPoint])> = members
+        .iter()
+        .map(|id| (id.as_str(), lookup[id.as_str()].0))
+        .collect();
+    let sport_seconds: Vec<&[f64]> = members.iter().map(|id| lookup[id.as_str()].1).collect();
+
+    let coverage = build_coverage_grid(&sport_tracks, &sport_seconds, cell_size, tun);
+    let ref_lat = coverage.ref_lat;
+    let mut idx = 0usize;
+    let mut records = Vec::new();
+    let sections = detect_for_cluster_with_grid(
+        sport,
+        &sport_tracks,
+        &coverage,
+        cell_size,
+        config,
+        tun,
+        &mut idx,
+        &mut records,
+    );
+
+    cluster.member_ids = members;
+    cluster.ref_lat = ref_lat;
+    cluster.sections = sections;
+}
+
+/// Concatenate every cluster's sections into the full catalogue, renumbering
+/// ids per sport in SW-corner cluster order so a cached catalogue carries the
+/// same `sec_<sport>_<n>` ids the batch would assign for the same ground.
+fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
+    let mut out = Vec::new();
+    let mut sports: Vec<&String> = cache.sports.keys().collect();
+    sports.sort_unstable();
+    for sport in sports {
+        let clusters = &cache.sports[sport];
+        let mut order: Vec<usize> = (0..clusters.len()).collect();
+        order.sort_by(|&a, &b| {
+            let sa = clusters[a].sw_corner();
+            let sb = clusters[b].sw_corner();
+            sa.0.total_cmp(&sb.0).then(sa.1.total_cmp(&sb.1))
+        });
+        let mut idx = 0usize;
+        let lower = sport.to_lowercase();
+        for &ci in &order {
+            for s in &clusters[ci].sections {
+                let mut s = s.clone();
+                s.id = format!("sec_{lower}_{idx}");
+                idx += 1;
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -73,9 +73,10 @@ pub(crate) use postprocess::{
 pub use rtree::{IndexedPoint, build_rtree};
 pub use traces::{extract_activity_trace, extract_all_activity_traces};
 pub use unified::{
-    BoundaryReason, BoundaryRecord, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections_unified,
-    detect_sections_unified_explained, detect_sections_unified_incremental,
+    BoundaryReason, BoundaryRecord, SectionEvidenceCache, Tunables, UnifiedDetection,
+    UnifiedIncrementalResult, confirmed_lift_spans, confirmed_lift_spans_tuned,
+    detect_sections_unified, detect_sections_unified_explained,
+    detect_sections_unified_incremental, detect_sections_unified_incremental_cached,
     detect_sections_unified_tuned, lift_spans, lift_spans_tuned, self_pass_penalty,
 };
 
