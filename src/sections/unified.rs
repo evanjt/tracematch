@@ -2303,23 +2303,48 @@ fn detect_for_cluster(
                     .iter()
                     .position(|&(t, ..)| sport_tracks[t].0 == section.representative_activity_id)
             };
+            // A section OCCUPIES its represented ground (the default,
+            // longest-or-medoid portion) for the trim of later candidates,
+            // independent of which cleaner strand it DISPLAYS. Filling the
+            // trim grid from a shorter rendered strand instead lets a
+            // neighbour re-expand into the freed ground and inherit its
+            // milling: that is how a junction's noise migrated into an
+            // innocent neighbour when the junction re-rendered short.
+            let footprint: Vec<GpsPoint> = default_i
+                .map(|di| {
+                    let (t, s, e, _) = portions[di];
+                    sport_tracks[t].1[s..e].to_vec()
+                })
+                .unwrap_or_else(|| section.polyline.clone());
+            let cleanest_i = (0..portions.len()).min_by(|&a, &b| {
+                pens[a]
+                    .partial_cmp(&pens[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(
+                        portions[b]
+                            .3
+                            .partial_cmp(&portions[a].3)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
+            });
+            // The default render (longest/medoid) stands when it is a
+            // single pass; above the floor the cleanest contributing pass
+            // is displayed instead, and a candidate whose cleanest pass is
+            // still over the floor backs off as a blob.
             let chosen = match default_i {
                 Some(i) if pens[i] <= tun.self_pass_max => Some(i),
-                _ => (0..portions.len())
-                    .min_by(|&a, &b| {
-                        pens[a]
-                            .partial_cmp(&pens[b])
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then(
-                                portions[b]
-                                    .3
-                                    .partial_cmp(&portions[a].3)
-                                    .unwrap_or(std::cmp::Ordering::Equal),
-                            )
-                    })
-                    .filter(|&i| pens[i] <= tun.self_pass_max),
+                _ => cleanest_i.filter(|&i| pens[i] <= tun.self_pass_max),
             };
             let Some(i) = chosen else {
+                // No pass is a single traversal: the candidate backs off,
+                // but its footprint still occupies the ground so a
+                // neighbour cannot re-expand into a junction with no line.
+                for p in footprint.iter().step_by(3) {
+                    accepted_pts
+                        .entry(backoff_grid.cell_of(p.latitude, p.longitude))
+                        .or_default()
+                        .push(*p);
+                }
                 let best = pens.iter().copied().fold(1.0_f64, f64::min);
                 let mid = section.polyline[section.polyline.len() / 2];
                 records.push(BoundaryRecord {
@@ -2347,7 +2372,7 @@ fn detect_for_cluster(
                 section.visit_count,
             );
             *section_idx += 1;
-            for p in section.polyline.iter().step_by(3) {
+            for p in footprint.iter().step_by(3) {
                 accepted_pts
                     .entry(backoff_grid.cell_of(p.latitude, p.longitude))
                     .or_default()
