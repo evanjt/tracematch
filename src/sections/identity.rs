@@ -582,6 +582,18 @@ impl HysteresisState {
     /// before they apply. A debounce, not a freeze: once the batch sustains the
     /// change for `k` steps it applies.
     pub fn step(&mut self, next: &[CandidateSection]) -> StepOutcome {
+        self.step_assign(next).0
+    }
+
+    /// [`step`](Self::step) that also returns, parallel to `next`, the visible
+    /// stable id each candidate resolved to. Every candidate maps to exactly one
+    /// visible id (a carry/split/merge target inherits its prior's id, a mint or
+    /// a tombstone-restore takes the fresh/restored id), so a stateful caller
+    /// like the veloqrs registry can join its own per-id payload — real DB id,
+    /// members, name — onto the plan without re-deriving the graph. The pure
+    /// layer's `s_<n>` id is the join key; the caller keeps the opaque
+    /// `s_<ts>__<rand>` id it persists on the side.
+    pub fn step_assign(&mut self, next: &[CandidateSection]) -> (StepOutcome, Vec<String>) {
         let prior: Vec<PriorSection> = self
             .visible
             .iter()
@@ -601,7 +613,8 @@ impl HysteresisState {
         );
 
         // Index the plan by prior id: which candidate carried it, and which
-        // priors retired and why.
+        // priors retired and why. `carried` doubles as the carry half of the
+        // per-candidate id assignment.
         let mut carried: BTreeMap<&str, usize> = BTreeMap::new();
         for (j, d) in plan.decisions.iter().enumerate() {
             if let Some(id) = d.carried_id() {
@@ -613,6 +626,13 @@ impl HysteresisState {
             .iter()
             .map(|r| (r.id.as_str(), &r.reason))
             .collect();
+
+        // The id each candidate becomes visible under. A carried candidate takes
+        // its inherited id; a mint/restore fills its slot in the loop below.
+        let mut candidate_ids: Vec<String> = vec![String::new(); next.len()];
+        for (&id, &j) in &carried {
+            candidate_ids[j] = id.to_string();
+        }
 
         let mut new_visible: BTreeMap<String, HeldSection> = BTreeMap::new();
         let mut new_pending: BTreeMap<String, Pending> = BTreeMap::new();
@@ -660,11 +680,13 @@ impl HysteresisState {
                 let mut held = self.tombstones.remove(&tomb_id).expect("matched tombstone");
                 held.polyline = cand.polyline.clone();
                 held.visit_count = cand.visit_count.max(held.visit_count);
+                candidate_ids[j] = tomb_id.clone();
                 new_visible.insert(tomb_id, held);
                 out.restored += 1;
             } else {
                 self.ordinal += 1;
                 let id = format!("s_{:06}", self.ordinal);
+                candidate_ids[j] = id.clone();
                 new_visible.insert(
                     id,
                     HeldSection {
@@ -681,7 +703,19 @@ impl HysteresisState {
         out.debouncing = new_pending.len();
         self.visible = new_visible;
         self.pending = new_pending;
-        out
+        (out, candidate_ids)
+    }
+
+    /// Drop an id from the visible view, its debounce, and any tombstone. The
+    /// veloqrs registry calls this when a section's ground passes to a durable
+    /// intent row (accept/trim/merge): identity ownership transfers to the DB
+    /// row, so the registry must stop carrying — and stop debounce-dissolving —
+    /// the ground it no longer owns. Idempotent: forgetting an absent id is a
+    /// no-op.
+    pub fn forget(&mut self, id: &str) {
+        self.visible.remove(id);
+        self.pending.remove(id);
+        self.tombstones.remove(id);
     }
 
     /// Decide a carried section: fold visits immediately; adopt geometry now
