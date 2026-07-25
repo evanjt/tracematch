@@ -135,13 +135,12 @@ fn fork_split_larger_piece_inherits_and_is_order_free() {
     );
     assert_eq!(rev.decisions[0], Decision::Mint);
 
-    // Through the hysteresis. The larger piece must keep P's id the whole way.
-    // FINDING: with the default floor, a balanced (re-cut) split accretes phantom
-    // duplicates of the carved piece. While the retained piece's re-cut debounces
-    // (its held geometry is still the full corridor, which covers the carved
-    // ground), the senior captures the carved piece's candidacy each detect, so
-    // it re-mints instead of carrying its own id. This is the same root as
-    // scenario (c). The merge floor removes it, so the split is clean.
+    // Through the hysteresis. The larger piece keeps P's id the whole way, and
+    // the carved piece resolves to exactly ONE section. The fold fix (a section
+    // mid re-cut competes on its target footprint, not its stale full one) stops
+    // the retained piece capturing the carved candidate on its held geometry, so
+    // it no longer mints phantom duplicates each detect. This holds at the
+    // default floor 0.0 — the fold fix, not the merge floor, resolves it.
     let run = |floor: f64| -> (String, usize, Vec<(usize, usize)>) {
         let mut state = HysteresisState::new(HysteresisParams {
             merge_mutual_floor: floor,
@@ -169,18 +168,17 @@ fn fork_split_larger_piece_inherits_and_is_order_free() {
         "floored (0.4):       per-step (visible, mint) = {floored_rows:?}; carved-ground sections = {floored_dups}"
     );
     println!(
-        "READ: the split's larger piece keeps its id either way; the floor stops the carved piece re-minting."
+        "READ: the larger piece keeps its id and the carved piece is a single section at floor 0.0 - the fold fix, not the floor, resolves the phantom duplicates."
     );
 
-    // The floor makes the split clean: exactly one section on the carved ground.
+    // The fold fix makes the split clean at the DEFAULT floor: exactly one
+    // section on the carved ground, no phantom duplicates. The floor does not
+    // change this.
     assert_eq!(
-        floored_dups, 1,
-        "with the floor a split leaves one section on the carved ground"
+        default_dups, 1,
+        "the split leaves one section on the carved ground at floor 0.0 (phantoms resolved by the fold fix)"
     );
-    assert!(
-        default_dups >= 2,
-        "the default re-cut split accretes duplicates on the carved ground (got {default_dups})"
-    );
+    assert_eq!(floored_dups, 1, "and the merge floor does not change that");
 }
 
 // ============================================================================
@@ -398,20 +396,32 @@ fn marginal_capture_hysteresis_pathology_and_floor_fix() {
     println!("floored: {floored_visible} visible, {floored_dups} on the long corridor");
     println!("-----------------------------------------------------------------------------");
     println!(
-        "READ: an UNCHANGED catalogue must not churn. Pre-change the marginal senior blocks the\n\
-         long corridor from ever confirming onto the junior, so the corridor re-mints while the\n\
-         displaced sections are held (dissolve pressure is zero, they are covered) - duplicates\n\
-         accrete on one ground. The floor lets the dominant junior carry the corridor, so the two\n\
-         priors carry 1:1 and the view is stable.\n"
+        "READ: the marginal senior still captures the corridor at floor 0.0 (only the floor prevents\n\
+         that), so it keeps re-minting - but the displaced held duplicates now RETIRE by the\n\
+         plan-retirement debounce after k, so the visible view converges to a bounded steady state\n\
+         (one in-and-out churn) instead of growing without bound. Pre-fix it grew 2->7 unbounded.\n\
+         The floor additionally prevents the capture, giving the cleanest two-stable view.\n"
     );
 
-    // Pre-change exhibits the pathology: more than one section ends up on the
-    // long corridor's ground (a duplicate), and the visible total exceeds two.
+    // Fold fix: the accretion STABILISES at the default floor 0.0. The visible
+    // count converges (the last steps hold constant, no unbounded growth) and the
+    // held duplicates retire by count, which is what bounds it.
+    let default_visible: Vec<usize> = default_rows[..6].iter().map(|r| r.0).collect();
+    let default_diss: usize = default_rows[..6].iter().map(|r| r.2).sum();
     assert!(
-        default_dups >= 2,
-        "pre-change must show a duplicate on the long corridor (got {default_dups})"
+        default_visible[3] == default_visible[4] && default_visible[4] == default_visible[5],
+        "accretion must stabilise at floor 0.0 (visible per step = {default_visible:?})"
     );
-    // The floor fixes it: exactly the two priors, one section on the corridor, no churn.
+    assert!(
+        default_diss > 0,
+        "held duplicates must retire by count at floor 0.0 (total dissolved = {default_diss})"
+    );
+    assert!(
+        default_dups <= 1,
+        "the long corridor must not accrete unbounded duplicates at floor 0.0 (got {default_dups})"
+    );
+    // The floor additionally prevents the capture: exactly the two priors, one
+    // section on the corridor, no churn at all.
     assert_eq!(
         floored_dups, 1,
         "with the floor, the long corridor holds exactly one section"
