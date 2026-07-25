@@ -594,14 +594,30 @@ impl HysteresisState {
     /// layer's `s_<n>` id is the join key; the caller keeps the opaque
     /// `s_<ts>__<rand>` id it persists on the side.
     pub fn step_assign(&mut self, next: &[CandidateSection]) -> (StepOutcome, Vec<String>) {
+        // A section mid re-cut competes on the batch geometry it is re-cutting TO
+        // (its pending target), not its stale frozen footprint. Presenting the
+        // stale, larger footprint lets it capture a neighbouring candidate's
+        // identity while the geometry is held, minting phantom duplicates of the
+        // carved-off piece (the balanced-split cascade). It still matches its own
+        // re-cut candidate, which equals this target.
         let prior: Vec<PriorSection> = self
             .visible
             .iter()
-            .map(|(id, h)| PriorSection {
-                id: id.clone(),
-                polyline: h.polyline.clone(),
-                first_seen: h.first_seen,
-                visit_count: h.visit_count,
+            .map(|(id, h)| {
+                let polyline = match self.pending.get(id) {
+                    Some(Pending {
+                        kind: PendingKind::ReCut,
+                        target: Some(t),
+                        ..
+                    }) => t.polyline.clone(),
+                    _ => h.polyline.clone(),
+                };
+                PriorSection {
+                    id: id.clone(),
+                    polyline,
+                    first_seen: h.first_seen,
+                    visit_count: h.visit_count,
+                }
             })
             .collect();
         let plan = plan_identity_tuned(
@@ -649,8 +665,8 @@ impl HysteresisState {
         for (id, held) in old_visible {
             let action = if let Some(&j) = carried.get(id.as_str()) {
                 self.apply_carry(&id, &held, &next[j], &mut out)
-            } else if let Some(reason) = retired.get(id.as_str()) {
-                self.apply_retire(&id, &held, reason, next, &mut out)
+            } else if retired.contains_key(id.as_str()) {
+                self.apply_retire(&id, &held, &mut out)
             } else {
                 // Unreachable in a correct plan; hold defensively rather than
                 // silently drop a section.
@@ -760,27 +776,21 @@ impl HysteresisState {
         }
     }
 
-    /// Decide a retired section: debounce a dissolve, and tombstone it once the
-    /// disappearance sustains `k`. A merge-away is decisive by itself; a plain
-    /// dissolve only counts a step where the pressure clears the threshold.
-    fn apply_retire(
-        &self,
-        id: &str,
-        held: &HeldSection,
-        reason: &RetireReason,
-        next: &[CandidateSection],
-        out: &mut StepOutcome,
-    ) -> HeldAction {
-        let decisive = match reason {
-            RetireReason::MergedInto { .. } => true,
-            RetireReason::Dissolved => {
-                dissolve_pressure(&held.polyline, next) >= self.params.dissolve_pressure_hi
-            }
-        };
-        if !decisive {
-            // Not decisively gone: hold and let the streak lapse.
-            return HeldAction::Keep(held.clone());
-        }
+    /// Decide a retired section: debounce the plan's retirement by COUNT and
+    /// tombstone it once the plan has retired it for `k` consecutive detects,
+    /// whether or not its ground stays covered.
+    ///
+    /// Both a merge-away and a plain dissolve debounce identically here. The old
+    /// gate held a dissolve until [`dissolve_pressure`] cleared a threshold, but
+    /// pressure stays ~0 for a section the batch replaced whose ground a
+    /// neighbour still covers, so such sections never retired and the visible
+    /// catalogue inflated (held > raw, overlapping duplicates). Trusting
+    /// plan_identity's retirement persistence drains them. The pressure metric
+    /// stays for ground that genuinely vanished, which the plan also retires and
+    /// so retires on the same count. A non-debounced pressure fast-path is
+    /// deliberately NOT used: it would let a single detect flip a visible
+    /// section, breaking single-add stability.
+    fn apply_retire(&self, id: &str, held: &HeldSection, out: &mut StepOutcome) -> HeldAction {
         let streak = self.continued_streak(id, PendingKind::Dissolve) + 1;
         if streak >= self.params.k {
             out.dissolved += 1;

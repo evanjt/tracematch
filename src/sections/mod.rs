@@ -237,7 +237,7 @@ impl std::str::FromStr for ScaleName {
 }
 
 /// Scale preset for multi-scale section detection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScalePreset {
     /// Scale name
@@ -309,7 +309,7 @@ impl ScalePreset {
 }
 
 /// Configuration for section detection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionConfig {
     /// Maximum distance between tracks to consider overlapping (meters)
