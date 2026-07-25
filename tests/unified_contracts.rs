@@ -807,7 +807,9 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
     dump(&out.sections);
     assert_catalogue_invariants(&tracks, &out.sections);
 
-    let corridor: Vec<GpsPoint> = (2..=13).map(|i| shapes::to_gps(i as f64 * 100.0, 0.0)).collect();
+    let corridor: Vec<GpsPoint> = (2..=13)
+        .map(|i| shapes::to_gps(i as f64 * 100.0, 0.0))
+        .collect();
     assert!(
         coverage(&corridor, &out.sections, 130.0) >= 0.9,
         "the corridor itself must survive"
@@ -815,7 +817,9 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
     for y in [700.0, 800.0, 900.0] {
         let p = shapes::to_gps(1500.0, y);
         assert!(
-            out.sections.iter().all(|s| min_dist(&p, &s.polyline) > 130.0),
+            out.sections
+                .iter()
+                .all(|s| min_dist(&p, &s.polyline) > 130.0),
             "one outing's tail ground appeared in a section at y={y}"
         );
     }

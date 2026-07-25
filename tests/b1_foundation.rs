@@ -306,7 +306,12 @@ fn matching_half_characterisation() {
         proximity_threshold: prox,
         ..cfg.clone()
     };
-    let full_p100 = probe("full @ proximity=100m", &traverser, &section, &tighter(100.0));
+    let full_p100 = probe(
+        "full @ proximity=100m",
+        &traverser,
+        &section,
+        &tighter(100.0),
+    );
     let full_p40 = probe("full @ proximity=40m", &traverser, &section, &tighter(40.0));
 
     print_probe(&full);
@@ -352,7 +357,10 @@ fn matching_half_characterisation() {
         "the returned portion must be the new activity's verbatim points, not consensus"
     );
     if let Some(far) = &far {
-        assert!(!far.matched, "a far one-off activity must not match the section");
+        assert!(
+            !far.matched,
+            "a far one-off activity must not match the section"
+        );
     }
 }
 
@@ -401,10 +409,7 @@ fn naive_rebatch_convergence_and_order_free() {
     println!("\n================ PART B1: naive re-batch convergence ================");
     println!("corpus activities .......... {}", tracks.len());
     println!("batch sections ............. {}", batch.len());
-    println!(
-        "re-batch step counts ....... {:?}",
-        step_counts
-    );
+    println!("re-batch step counts ....... {:?}", step_counts);
     println!("final drip vs batch ........ {final_vs_batch:.3}  (== 1.000 by construction)");
     println!("order-free (reversed set) .. {order_free:.3}  (ground overlap of two ingest orders)");
     println!("--------------------------------------------------------------------");
@@ -414,7 +419,11 @@ fn naive_rebatch_convergence_and_order_free() {
          (see the cost curve). Convergence bar for B1 = ground overlap >= 0.95.\n"
     );
 
-    assert_eq!(final_drip.len(), batch.len(), "final re-batch step must equal the batch");
+    assert_eq!(
+        final_drip.len(),
+        batch.len(),
+        "final re-batch step must equal the batch"
+    );
     assert!(
         final_vs_batch >= 0.999,
         "final re-batch step must be the batch (overlap {final_vs_batch:.3})"
@@ -529,10 +538,7 @@ fn gate_unified_incremental_converges_to_batch() {
 /// A far-apart second corpus, id-prefixed so two single-origin corpora combine
 /// into one pool with two geographically disjoint clusters (origins ~100 km
 /// apart, far past the 50 km cluster gap).
-fn prefixed_tracks(
-    corpus: &LifecycleCorpus,
-    prefix: &str,
-) -> Vec<(String, Vec<GpsPoint>)> {
+fn prefixed_tracks(corpus: &LifecycleCorpus, prefix: &str) -> Vec<(String, Vec<GpsPoint>)> {
     corpus
         .tracks_through_e()
         .into_iter()
@@ -587,7 +593,13 @@ fn assert_cached_tracks_naive_and_batch(
         let new_ids = [pool.last().unwrap().0.as_str()];
 
         let cached = detect_sections_unified_incremental_cached(
-            &mut cache, &cached_cat, &pool, &new_ids, &[], sports, cfg,
+            &mut cache,
+            &cached_cat,
+            &pool,
+            &new_ids,
+            &[],
+            sports,
+            cfg,
         );
         cached_cat = cached.catalogue;
 
@@ -705,7 +717,10 @@ fn gate_cached_incremental_multi_cluster_and_bridge_matches_batch() {
 /// every add lands in a cluster bounded by one corpus's size however large the
 /// whole library grows. `bucket_a` is each corpus's cold-start count (its total
 /// through-E size is a little larger). Returns `(tracks in drip order, sport map)`.
-fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
+fn multi_cluster_library(
+    n_clusters: usize,
+    bucket_a: usize,
+) -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
     let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
     let mut sports: HashMap<String, String> = HashMap::new();
     for c in 0..n_clusters {
@@ -776,7 +791,13 @@ fn gate_cached_incremental_cost_is_flat() {
             pool.push((id.clone(), pts.clone()));
             let new_ids = [pool.last().unwrap().0.as_str()];
             let res = detect_sections_unified_incremental_cached(
-                &mut cache, &cached_cat, &pool, &new_ids, &[], &sports, &cfg,
+                &mut cache,
+                &cached_cat,
+                &pool,
+                &new_ids,
+                &[],
+                &sports,
+                &cfg,
             );
             cached_cat = res.catalogue;
         }
@@ -792,15 +813,22 @@ fn gate_cached_incremental_cost_is_flat() {
     let ratio_shallow = safe_ratio(shallow.1, shallow.2);
     let ratio_deep = safe_ratio(deep.1, deep.2);
 
-    println!("\n================ PART C: cached add vs naive re-batch, by library depth (debug) ================");
+    println!(
+        "\n================ PART C: cached add vs naive re-batch, by library depth (debug) ================"
+    );
     println!(
         "(library = {n_clusters} far-apart clusters of {cluster_size}; each cached add touches ONE bounded cluster)"
     );
     println!("  pool   mean cached add    naive re-batch    cached/naive");
     for (n, c, na) in &samples {
-        println!("  {n:>4}   {c:>12.0}us   {na:>12.0}us   {:.3}", safe_ratio(*c, *na));
+        println!(
+            "  {n:>4}   {c:>12.0}us   {na:>12.0}us   {:.3}",
+            safe_ratio(*c, *na)
+        );
     }
-    println!("------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------"
+    );
     println!(
         "READ: the mean cached add stays governed by the ONE bounded cluster it touches, while the\n\
          naive re-batch re-processes the whole pool. So cached/naive SHRINKS with depth — a cached\n\
@@ -810,7 +838,10 @@ fn gate_cached_incremental_cost_is_flat() {
         safe_ratio(deep.2, deep.1),
     );
 
-    assert!(deep.1 > 0.0 && deep.2 > 0.0, "cost samples must be non-zero");
+    assert!(
+        deep.1 > 0.0 && deep.2 > 0.0,
+        "cost samples must be non-zero"
+    );
     // The O(touched-cluster) win: a cached add is far cheaper than a whole-pool
     // re-batch, and the gap WIDENS with the library (the ratio shrinks), because
     // the cached add's cost does not grow with the pool the way the re-batch does.
@@ -854,7 +885,13 @@ fn cached_single_cluster_cost_curve_is_linear() {
         let new_ids = [pool.last().unwrap().0.as_str()];
         let t0 = Instant::now();
         let res = detect_sections_unified_incremental_cached(
-            &mut cache, &cached_cat, &pool, &new_ids, &[], &sports, &cfg,
+            &mut cache,
+            &cached_cat,
+            &pool,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
         );
         per_add.push((pool.len(), t0.elapsed().as_micros()));
         cached_cat = res.catalogue;
@@ -870,11 +907,20 @@ fn cached_single_cluster_cost_curve_is_linear() {
     };
     let (a10, a20, a40) = (median_around(10), median_around(20), median_around(40));
 
-    println!("\n================ PART C: cached SINGLE-cluster cost curve (debug, O(N)) ================");
-    println!("(one home cluster; every add recomputes it wholesale — the honest O(cluster)=O(N) case)");
-    println!("  N~10 {a10:>8.0}us   N~20 {a20:>8.0}us (x{:.2})   N~40 {a40:>8.0}us (x{:.2})",
-        safe_ratio(a20, a10), safe_ratio(a40, a10));
-    println!("------------------------------------------------------------------------------------------");
+    println!(
+        "\n================ PART C: cached SINGLE-cluster cost curve (debug, O(N)) ================"
+    );
+    println!(
+        "(one home cluster; every add recomputes it wholesale — the honest O(cluster)=O(N) case)"
+    );
+    println!(
+        "  N~10 {a10:>8.0}us   N~20 {a20:>8.0}us (x{:.2})   N~40 {a40:>8.0}us (x{:.2})",
+        safe_ratio(a20, a10),
+        safe_ratio(a40, a10)
+    );
+    println!(
+        "------------------------------------------------------------------------------------------"
+    );
     println!(
         "READ: unlike the multi-cluster gate, this GROWS with N — the touched cluster IS the whole\n\
          library. Sub-linear single-cluster adds need incremental discovery (B1b), not shipped here.\n"
@@ -908,7 +954,13 @@ fn gate_cached_cold_cache_cost_is_linear() {
         let mut cache = SectionEvidenceCache::new();
         let t0 = Instant::now();
         let _ = detect_sections_unified_incremental_cached(
-            &mut cache, &[], &prefix, &new_ids, &[], &sports, &cfg,
+            &mut cache,
+            &[],
+            &prefix,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
         );
         let cached = t0.elapsed().as_micros();
         let t1 = Instant::now();
@@ -920,7 +972,9 @@ fn gate_cached_cold_cache_cost_is_linear() {
     let (c40, b40) = cold(40);
     let (c80, b80) = cold(80);
 
-    println!("\n================ PART C: COLD-cache detect cost (debug, must be O(N)) ================");
+    println!(
+        "\n================ PART C: COLD-cache detect cost (debug, must be O(N)) ================"
+    );
     println!("(empty cache, all N new in one call — the app-start / bulk-expand path)");
     println!(
         "  cold cached  N=20 {c20:>8}us   N=40 {c40:>8}us (x{:.2})   N=80 {c80:>8}us (x{:.2})",
@@ -932,7 +986,9 @@ fn gate_cached_cold_cache_cost_is_linear() {
         safe_ratio(b40 as f64, b20 as f64),
         safe_ratio(b80 as f64, b20 as f64),
     );
-    println!("--------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------"
+    );
     println!(
         "READ: cold cached TRACKS the plain batch — same cost and same growth — because it\n\
          recomputes each touched cluster ONCE over its final membership, which IS the batch's\n\
