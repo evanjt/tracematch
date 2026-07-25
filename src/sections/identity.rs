@@ -225,15 +225,44 @@ pub struct IdentityPlan {
 // plan_identity — the bipartite carry/mint/split/merge/dissolve resolution
 // ============================================================================
 
+/// Tunables for [`plan_identity_tuned`]. The default reproduces the shipped
+/// behaviour exactly; a non-zero floor is an opt-in experiment, never the
+/// default.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct IdentityParams {
+    /// Minimum mutual overlap a prior needs to COMPETE for a candidate's merge
+    /// nomination. At the default 0.0 every same-corridor prior competes, so
+    /// seniority alone decides a merge, and a marginal one-sided edge (a short
+    /// senior mostly inside a long candidate) can out-rank a dominant junior.
+    /// Above 0.0 a prior below the floor cannot capture a candidate's identity
+    /// by seniority, so the dominant junior wins it instead. See the
+    /// marginal-capture stress scenario (`tests/b2_inheritance_stress.rs`).
+    pub merge_mutual_floor: f64,
+}
+
+impl Default for IdentityParams {
+    fn default() -> Self {
+        Self {
+            merge_mutual_floor: 0.0,
+        }
+    }
+}
+
+/// Match a fresh candidate catalogue against the prior ids with the default
+/// params. See [`plan_identity_tuned`] for the resolution rule.
+pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> IdentityPlan {
+    plan_identity_tuned(prior, next, &IdentityParams::default())
+}
+
 /// Match a fresh candidate catalogue against the prior ids and decide which
 /// candidate inherits which id.
 ///
 /// The rule is a mutual-best pairing on the same-corridor graph. Each candidate
-/// nominates the SENIOR prior it shares ground with (the merge rule); each prior
-/// nominates the candidate it overlaps MOST (the split rule). A carry is
-/// confirmed only where the two nominations agree, which yields every case the
-/// design names with the correct side-specific tie-break and no HashMap-order
-/// leak:
+/// nominates the SENIOR prior it shares ground with (the merge rule), among the
+/// priors that clear `params.merge_mutual_floor`; each prior nominates the
+/// candidate it overlaps MOST (the split rule). A carry is confirmed only where
+/// the two nominations agree, which yields every case the design names with the
+/// correct side-specific tie-break and no HashMap-order leak:
 /// - 1:1 -> both nominate each other -> [`Decision::Carry`].
 /// - split (one prior, several candidates) -> the prior nominates its best piece,
 ///   which alone confirms ([`Decision::SplitInherit`]); the rest mint.
@@ -242,9 +271,13 @@ pub struct IdentityPlan {
 ///   `MergedInto` the winner.
 /// - new candidate -> [`Decision::Mint`]; gone prior -> [`Retirement`]`::Dissolved`.
 ///
-/// All tie-breaks are total, so `plan_identity(p, n) == plan_identity(p, n)`
-/// byte for byte.
-pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> IdentityPlan {
+/// All tie-breaks are total, so `plan_identity_tuned(p, n, q)` is byte-identical
+/// across runs and permutation-stable.
+pub fn plan_identity_tuned(
+    prior: &[PriorSection],
+    next: &[CandidateSection],
+    params: &IdentityParams,
+) -> IdentityPlan {
     let np = prior.len();
     let nc = next.len();
 
@@ -262,13 +295,17 @@ pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> Ident
         }
     }
 
-    // Each candidate nominates the senior prior it shares ground with. Seniority
-    // is earliest first_seen, then more visits, then more metres, then smaller id.
+    // Each candidate nominates the senior prior it shares ground with, among the
+    // priors clearing the merge floor. Seniority is earliest first_seen, then
+    // more visits, then more metres, then smaller id.
     let cand_pick: Vec<Option<usize>> = (0..nc)
         .map(|j| {
             let mut best: Option<usize> = None;
             for i in 0..np {
-                if edge[i][j] && (best.is_none() || more_senior(&prior[i], &prior[best.unwrap()])) {
+                if edge[i][j]
+                    && mo[i][j] >= params.merge_mutual_floor
+                    && (best.is_none() || more_senior(&prior[i], &prior[best.unwrap()]))
+                {
                     best = Some(i);
                 }
             }
@@ -432,6 +469,10 @@ pub struct HysteresisParams {
     /// Extents overlapping by at least this adopt geometry immediately; below it
     /// a carried section is a material re-cut and debounces.
     pub recut_agreement: f64,
+    /// Passed through to [`plan_identity_tuned`]'s [`IdentityParams`]. Default
+    /// 0.0 keeps the shipped behaviour; a non-zero floor is the opt-in
+    /// marginal-capture fix.
+    pub merge_mutual_floor: f64,
 }
 
 impl Default for HysteresisParams {
@@ -440,6 +481,7 @@ impl Default for HysteresisParams {
             k: DEFAULT_K,
             dissolve_pressure_hi: DISSOLVE_PRESSURE_HI,
             recut_agreement: RECUT_AGREEMENT,
+            merge_mutual_floor: 0.0,
         }
     }
 }
@@ -550,7 +592,13 @@ impl HysteresisState {
                 visit_count: h.visit_count,
             })
             .collect();
-        let plan = plan_identity(&prior, next);
+        let plan = plan_identity_tuned(
+            &prior,
+            next,
+            &IdentityParams {
+                merge_mutual_floor: self.params.merge_mutual_floor,
+            },
+        );
 
         // Index the plan by prior id: which candidate carried it, and which
         // priors retired and why.
@@ -926,6 +974,67 @@ mod tests {
         let plan = plan_identity(&prior, &next);
         assert_eq!(
             plan.decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }]
+        );
+    }
+
+    #[test]
+    fn merge_floor_lets_the_dominant_junior_win_over_a_marginal_senior() {
+        // A (senior) is a short section marginally inside the long candidate Z;
+        // B (junior) dominantly covers Z. At the default 0.0 floor seniority
+        // wins, so A captures Z. Above A's marginal overlap the dominant junior
+        // B wins instead, and A folds into B.
+        let long = line(46.0, 7.0, 120);
+        let short = long[..20].to_vec();
+        let prior = vec![prior("s_A", short, 1, 3), prior("s_B", long.clone(), 2, 9)];
+        let next = vec![cand(long, 12)];
+
+        let default_plan = plan_identity(&prior, &next);
+        assert_eq!(
+            default_plan.decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }],
+            "default: the marginal senior captures the corridor"
+        );
+
+        let floored = plan_identity_tuned(
+            &prior,
+            &next,
+            &IdentityParams {
+                merge_mutual_floor: 0.4,
+            },
+        );
+        assert_eq!(
+            floored.decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "with the floor: the dominant junior keeps the corridor"
+        );
+        assert_eq!(
+            floored.retired,
+            vec![Retirement {
+                id: "s_A".into(),
+                reason: RetireReason::MergedInto { id: "s_B".into() },
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_floor_preserves_a_genuine_half_and_half_merge() {
+        // Both priors cover half of Z (mutual 0.5 each), so a 0.4 floor leaves
+        // them both competing and seniority still decides.
+        let z = line(46.0, 7.0, 100);
+        let a = z[..50].to_vec();
+        let b = z[50..].to_vec();
+        let prior = vec![prior("s_A", a, 1, 5), prior("s_B", b, 2, 5)];
+        let next = vec![cand(z, 10)];
+        let floored = plan_identity_tuned(
+            &prior,
+            &next,
+            &IdentityParams {
+                merge_mutual_floor: 0.4,
+            },
+        );
+        assert_eq!(
+            floored.decisions,
             vec![Decision::MergeInherit { id: "s_A".into() }]
         );
     }

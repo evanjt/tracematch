@@ -78,8 +78,9 @@ pub use traces::{extract_activity_trace, extract_all_activity_traces};
 // the engine owns the id strings and the persistence.
 pub use identity::{
     CARRY_COVERAGE, CandidateSection, DEFAULT_K, DISSOLVE_PRESSURE_HI, Decision, GROUND_TOL_M,
-    HysteresisParams, HysteresisState, IdentityPlan, PriorSection, RECUT_AGREEMENT, RetireReason,
-    Retirement, StepOutcome, dissolve_pressure, mutual_overlap, plan_identity, shares_ground,
+    HysteresisParams, HysteresisState, IdentityParams, IdentityPlan, PriorSection, RECUT_AGREEMENT,
+    RetireReason, Retirement, StepOutcome, dissolve_pressure, mutual_overlap, plan_identity,
+    plan_identity_tuned, shares_ground,
 };
 
 pub use unified::{
