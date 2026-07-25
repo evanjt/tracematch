@@ -2735,8 +2735,13 @@ fn detect_for_cluster_with_grid(
             // trace — and the extent, counts, and occupied footprint
             // below keep the full portion, so nothing downstream shifts.
             let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
-            let (cs, ce) =
-                minority_end_clip(&sport_tracks[t_idx].1[s..e], &fine, coverage.ref_lat, 25.0, 25.0);
+            let (cs, ce) = minority_end_clip(
+                &sport_tracks[t_idx].1[s..e],
+                &fine,
+                coverage.ref_lat,
+                25.0,
+                25.0,
+            );
             let (rs, re) = if cs > 0 || ce < e - s {
                 let kept = &sport_tracks[t_idx].1[s + cs..s + ce];
                 if crate::matching::calculate_route_distance(kept) >= config.min_section_length {
@@ -2972,7 +2977,12 @@ fn section_bbox_padded(polyline: &[GpsPoint], pad_m: f64) -> (f64, f64, f64, f64
     let mid = ((bb.0 + bb.1) * 0.5).to_radians();
     let pad_lat = pad_m / 111_000.0;
     let pad_lng = pad_m / (111_320.0 * mid.cos().abs().max(0.01));
-    (bb.0 - pad_lat, bb.1 + pad_lat, bb.2 - pad_lng, bb.3 + pad_lng)
+    (
+        bb.0 - pad_lat,
+        bb.1 + pad_lat,
+        bb.2 - pad_lng,
+        bb.3 + pad_lng,
+    )
 }
 
 /// Fraction of `samples` within `tol_m` of any point on `line`.
@@ -3275,7 +3285,12 @@ fn pad_bbox(bb: (f64, f64, f64, f64), gap_m: f64) -> (f64, f64, f64, f64) {
     let pad_lat = gap_m * 0.5 / 111_132.0;
     let mid = ((bb.0 + bb.1) * 0.5).to_radians();
     let pad_lng = gap_m * 0.5 / (111_320.0 * mid.cos().abs().max(0.01));
-    (bb.0 - pad_lat, bb.1 + pad_lat, bb.2 - pad_lng, bb.3 + pad_lng)
+    (
+        bb.0 - pad_lat,
+        bb.1 + pad_lat,
+        bb.2 - pad_lng,
+        bb.3 + pad_lng,
+    )
 }
 
 /// Two padded boxes overlap: the [`geo_clusters`] union relation.
@@ -3699,7 +3714,12 @@ mod tests {
         let braid = row(30.0, 60);
         let with_tail = row(0.0, 120);
         let cross: Vec<GpsPoint> = (0..60)
-            .map(|i| GpsPoint::new(46.0 + 9.0e-5 * 30.0, 7.0 + (i as f64 * 10.0 - 300.0) / 77_000.0))
+            .map(|i| {
+                GpsPoint::new(
+                    46.0 + 9.0e-5 * 30.0,
+                    7.0 + (i as f64 * 10.0 - 300.0) / 77_000.0,
+                )
+            })
             .collect();
         let tracks: Vec<(&str, &[GpsPoint])> = vec![
             ("a", corridor.as_slice()),

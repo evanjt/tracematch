@@ -210,7 +210,11 @@ fn sport_for_mode(mode: &str) -> Option<&'static str> {
 /// dropped. Trajectories under 50 points or over `DEFAULT_MAX_POINTS` are
 /// skipped. The pooled result is sorted chronologically so window and prefix
 /// replays behave as they do for the GPX corpora.
-pub fn load_geolife(root: &Path, max_users: usize, max_per_user: usize) -> (Vec<GeoTrajectory>, GeoStats) {
+pub fn load_geolife(
+    root: &Path,
+    max_users: usize,
+    max_per_user: usize,
+) -> (Vec<GeoTrajectory>, GeoStats) {
     let mut stats = GeoStats::default();
     let mut out = Vec::new();
 
