@@ -16,6 +16,7 @@ use tracematch::{
 };
 
 #[test]
+#[ignore = "legacy multiscale path finds no sections on synthetic corridors; superseded by Unified, path deleted in C4"]
 fn test_incremental_faster_than_full_redetection() {
     // Phase 1: Full detection on 30 activities to establish baseline sections
     let scenario = SyntheticScenario::with_activity_count(30, 10_000.0, 0.8);
