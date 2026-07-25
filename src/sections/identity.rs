@@ -1,0 +1,1055 @@
+//! Assign-once identity and hysteresis over a churny section catalogue.
+//!
+//! The Unified batch is legitimately non-monotone: sections dissolve and reform
+//! as evidence accumulates (B1). That churn is correct, but a user watching the
+//! map does not want to see it. This module is the pure decision half of B2: it
+//! matches a fresh batch catalogue against the ids already assigned, so a piece
+//! of ground keeps its id across a recompute, and it low-pass filters the churn
+//! so a single add can never flip the visible view while the view still
+//! converges to the batch over many adds.
+//!
+//! Two pieces, both pure and deterministic (no HashMap iteration order, no float
+//! ordering ambiguity), so the same inputs always produce byte-identical output:
+//!
+//! - [`plan_identity`] resolves the bipartite same-corridor graph between the
+//!   prior ids and the fresh candidate grounds into carry / mint / split / merge
+//!   / dissolve, matching the harness ground metric (bidirectional coverage of
+//!   at least 0.6 at 50 m). tracematch emits ground; the caller supplies the
+//!   opaque ids. This decides only which candidate inherits which prior id.
+//! - [`HysteresisState::step`] applies a plan through a debounce: additions are
+//!   immediate, but a dissolve or a re-cut only fires once the batch has agreed
+//!   for `k` consecutive detects. It is a debounce, not a freeze: a genuinely
+//!   sustained change still applies (after `k`).
+//!
+//! Identity lives in the engine (veloqrs) in production; this is the lab-first
+//! prototype that proves the mechanism on the synthetic corpora before the
+//! stateful registry is built on top. The engine swaps the deterministic
+//! `s_<n>` mint here for its opaque `s_<ts>__<rand>` scheme and persists the
+//! state; the carry-forward structure is identical. Design:
+//! `~/.claude/plans/b2-identity-hysteresis-design.md`.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::GpsPoint;
+use crate::geo_utils::haversine_distance;
+use crate::sections::FrequentSection;
+
+// ============================================================================
+// The ground metric (mirrors the E2E harness so a carry counts toward its
+// identity_retention gate) and the decisive-margin predicates.
+// ============================================================================
+
+/// Ground-match tolerance: half the ~100 m evidence cell. Two lines within this
+/// of each other describe the same corridor.
+pub const GROUND_TOL_M: f64 = 50.0;
+
+/// Same-corridor gate: a majority of either polyline lies within [`GROUND_TOL_M`]
+/// of the other. Identical to the harness `ground_matches`, so a carried id is
+/// counted as retained by the gate it is scored against.
+pub const CARRY_COVERAGE: f64 = 0.6;
+
+/// A carried section is a material re-cut (debounced) rather than a free
+/// geometry update when the two extents overlap by LESS than this. Above it the
+/// extents agree to within ~15% and the new geometry is adopted immediately.
+/// The 0.85 plateau is the A1-calibrated corridor-persistence tolerance, shared
+/// with detection so "the engine prefers a different cut" has one definition.
+pub const RECUT_AGREEMENT: f64 = 0.85;
+
+/// A held section's ground is decisively gone when this fraction of it is
+/// uncovered by every batch section. Below it the ground is still substantially
+/// present, so a dissolve is not counted toward the debounce.
+pub const DISSOLVE_PRESSURE_HI: f64 = 0.7;
+
+/// Default sustained-count before a dissolve or re-cut applies. `k >= 2` is the
+/// minimum that stops a single add flipping anything; `k = 3` also damps a
+/// two-step flicker while a genuinely gone section still dissolves within a
+/// normal backfill drip.
+pub const DEFAULT_K: u8 = 3;
+
+/// Fraction of `samples` within `tol_m` of any point on `line`. The directional
+/// half of the coverage metric.
+fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
+    if samples.is_empty() || line.is_empty() {
+        return 0.0;
+    }
+    let covered = samples
+        .iter()
+        .filter(|s| {
+            line.iter()
+                .map(|p| haversine_distance(s, p))
+                .fold(f64::INFINITY, f64::min)
+                <= tol_m
+        })
+        .count();
+    covered as f64 / samples.len() as f64
+}
+
+/// Whether two grounds describe the same corridor: a majority of either lies
+/// within [`GROUND_TOL_M`] of the other. Tolerant to extent growth, so a cold
+/// section that later grows a longer supported extent still matches its prior.
+pub fn shares_ground(a: &[GpsPoint], b: &[GpsPoint]) -> bool {
+    coverage(a, b, GROUND_TOL_M) >= CARRY_COVERAGE || coverage(b, a, GROUND_TOL_M) >= CARRY_COVERAGE
+}
+
+/// The mutual overlap of two grounds: `min(cov(a->b), cov(b->a))`. High only
+/// when the two cover each other, so it separates a clean 1:1 (near 1.0) from a
+/// subset piece of a split/merge (well below 1.0). Drives the split winner and
+/// the re-cut margin.
+pub fn mutual_overlap(a: &[GpsPoint], b: &[GpsPoint]) -> f64 {
+    coverage(a, b, GROUND_TOL_M).min(coverage(b, a, GROUND_TOL_M))
+}
+
+/// How decisively a held ground has left the batch: `1 - max coverage of the
+/// held ground by any batch section`. 1.0 when no batch section covers it at
+/// all, 0.0 when one covers it entirely. The dissolve debounce only counts a
+/// step where this is `>= dissolve_pressure_hi`.
+pub fn dissolve_pressure(held: &[GpsPoint], next: &[CandidateSection]) -> f64 {
+    let best = next
+        .iter()
+        .map(|c| coverage(held, &c.polyline, GROUND_TOL_M))
+        .fold(0.0_f64, f64::max);
+    1.0 - best
+}
+
+/// Total metres a ground represents (haversine along its polyline). A split
+/// tie-break and a merge tie-break both prefer the ground carrying more support.
+fn polyline_metres(pts: &[GpsPoint]) -> f64 {
+    pts.windows(2)
+        .map(|w| haversine_distance(&w[0], &w[1]))
+        .sum()
+}
+
+/// South-west corner `(min lat, min lng)` of a ground, the final deterministic
+/// tie-break for a split winner (two candidates equal on every prior key still
+/// resolve to one, always the same one).
+fn sw_corner(pts: &[GpsPoint]) -> (f64, f64) {
+    let mut sw = (f64::MAX, f64::MAX);
+    for p in pts {
+        sw.0 = sw.0.min(p.latitude);
+        sw.1 = sw.1.min(p.longitude);
+    }
+    sw
+}
+
+// ============================================================================
+// Plan inputs and output
+// ============================================================================
+
+/// A prior section carrying its assigned stable id and the tie-break metadata
+/// the registry holds for it. `first_seen` is a monotonic ordinal: lower is more
+/// senior, and the senior prior wins a merge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriorSection {
+    pub id: String,
+    pub polyline: Vec<GpsPoint>,
+    pub first_seen: u64,
+    pub visit_count: u32,
+}
+
+/// A fresh batch section with no id yet: the detector emits ground, identity is
+/// assigned here. `visit_count` feeds a split tie-break and folds into the
+/// carried section immediately.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CandidateSection {
+    pub polyline: Vec<GpsPoint>,
+    pub visit_count: u32,
+}
+
+impl CandidateSection {
+    /// Build a candidate from a detector section, dropping the throwaway
+    /// positional id. The engine converts its batch the same way.
+    pub fn from_section(s: &FrequentSection) -> Self {
+        Self {
+            polyline: s.polyline.clone(),
+            visit_count: s.visit_count,
+        }
+    }
+}
+
+/// What happens to one candidate: it either inherits a prior id or mints a new
+/// one. The three inheriting variants record WHY the id was carried, so the
+/// caller and the tests can see a plain carry apart from a split winner or a
+/// merge target without re-deriving the graph shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// 1:1 carry: exactly one prior and one candidate matched, mutually best.
+    Carry { id: String },
+    /// This candidate is the winning piece of a prior that split into several.
+    SplitInherit { id: String },
+    /// This candidate is the ground several priors merged onto; it inherits the
+    /// senior prior's id.
+    MergeInherit { id: String },
+    /// New ground (or a split loser): the caller mints a fresh id.
+    Mint,
+}
+
+impl Decision {
+    /// The inherited id, if this candidate carried one.
+    pub fn carried_id(&self) -> Option<&str> {
+        match self {
+            Decision::Carry { id }
+            | Decision::SplitInherit { id }
+            | Decision::MergeInherit { id } => Some(id),
+            Decision::Mint => None,
+        }
+    }
+}
+
+/// Why a prior id was retired: it either matched nothing (a dissolve) or lost a
+/// merge to a senior prior (retained so a later re-split can restore it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetireReason {
+    Dissolved,
+    MergedInto { id: String },
+}
+
+/// A prior id no candidate carried this plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retirement {
+    pub id: String,
+    pub reason: RetireReason,
+}
+
+/// The resolution of one detect: a decision per candidate (parallel to the
+/// `next` slice) plus the priors that dropped out. A pure function of the two
+/// ground sets and their metadata, so equal inputs give an equal plan.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdentityPlan {
+    pub decisions: Vec<Decision>,
+    pub retired: Vec<Retirement>,
+}
+
+// ============================================================================
+// plan_identity — the bipartite carry/mint/split/merge/dissolve resolution
+// ============================================================================
+
+/// Match a fresh candidate catalogue against the prior ids and decide which
+/// candidate inherits which id.
+///
+/// The rule is a mutual-best pairing on the same-corridor graph. Each candidate
+/// nominates the SENIOR prior it shares ground with (the merge rule); each prior
+/// nominates the candidate it overlaps MOST (the split rule). A carry is
+/// confirmed only where the two nominations agree, which yields every case the
+/// design names with the correct side-specific tie-break and no HashMap-order
+/// leak:
+/// - 1:1 -> both nominate each other -> [`Decision::Carry`].
+/// - split (one prior, several candidates) -> the prior nominates its best piece,
+///   which alone confirms ([`Decision::SplitInherit`]); the rest mint.
+/// - merge (several priors, one candidate) -> the candidate nominates the senior,
+///   which alone confirms ([`Decision::MergeInherit`]); the juniors retire
+///   `MergedInto` the winner.
+/// - new candidate -> [`Decision::Mint`]; gone prior -> [`Retirement`]`::Dissolved`.
+///
+/// All tie-breaks are total, so `plan_identity(p, n) == plan_identity(p, n)`
+/// byte for byte.
+pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> IdentityPlan {
+    let np = prior.len();
+    let nc = next.len();
+
+    // Same-corridor edges and their mutual overlap, computed once. A distant
+    // pair simply scores 0 coverage, so no bbox pre-filter is needed at these
+    // catalogue sizes.
+    let mut edge = vec![vec![false; nc]; np];
+    let mut mo = vec![vec![0.0_f64; nc]; np];
+    for (i, p) in prior.iter().enumerate() {
+        for (j, c) in next.iter().enumerate() {
+            let cov_pc = coverage(&p.polyline, &c.polyline, GROUND_TOL_M);
+            let cov_cp = coverage(&c.polyline, &p.polyline, GROUND_TOL_M);
+            edge[i][j] = cov_pc.max(cov_cp) >= CARRY_COVERAGE;
+            mo[i][j] = cov_pc.min(cov_cp);
+        }
+    }
+
+    // Each candidate nominates the senior prior it shares ground with. Seniority
+    // is earliest first_seen, then more visits, then more metres, then smaller id.
+    let cand_pick: Vec<Option<usize>> = (0..nc)
+        .map(|j| {
+            let mut best: Option<usize> = None;
+            for i in 0..np {
+                if edge[i][j] && (best.is_none() || more_senior(&prior[i], &prior[best.unwrap()])) {
+                    best = Some(i);
+                }
+            }
+            best
+        })
+        .collect();
+
+    // Each prior nominates the candidate it overlaps most. The winner takes more
+    // mutual overlap, then more metres, then more visits, then a smaller SW
+    // corner, then a smaller index.
+    let prior_pick: Vec<Option<usize>> = (0..np)
+        .map(|i| {
+            let mut best: Option<usize> = None;
+            for j in 0..nc {
+                if edge[i][j]
+                    && (best.is_none()
+                        || better_candidate(
+                            mo[i][j],
+                            &next[j],
+                            mo[i][best.unwrap()],
+                            &next[best.unwrap()],
+                            j,
+                            best.unwrap(),
+                        ))
+                {
+                    best = Some(j);
+                }
+            }
+            best
+        })
+        .collect();
+
+    // A carry is confirmed where the two nominations agree. Record, per
+    // candidate, the prior that carried it (for retirement reasons below).
+    let mut carrier_of: Vec<Option<usize>> = vec![None; nc];
+    for (i, &pick) in prior_pick.iter().enumerate() {
+        if let Some(j) = pick
+            && cand_pick[j] == Some(i)
+        {
+            carrier_of[j] = Some(i);
+        }
+    }
+
+    // Candidate decisions. Label a confirmed carry by the graph shape around it:
+    // a candidate several priors reach is a merge target; a prior reaching
+    // several candidates is a split; otherwise a plain 1:1 carry.
+    let decisions: Vec<Decision> = (0..nc)
+        .map(|j| match carrier_of[j] {
+            Some(i) => {
+                let merge_degree = (0..np).filter(|&x| edge[x][j]).count();
+                let split_degree = (0..nc).filter(|&y| edge[i][y]).count();
+                let id = prior[i].id.clone();
+                if merge_degree > 1 {
+                    Decision::MergeInherit { id }
+                } else if split_degree > 1 {
+                    Decision::SplitInherit { id }
+                } else {
+                    Decision::Carry { id }
+                }
+            }
+            None => Decision::Mint,
+        })
+        .collect();
+
+    // Retirements: any prior that carried no candidate. It merged into the
+    // winner of its best-overlap candidate when that candidate was carried by
+    // someone else, otherwise its ground is simply gone.
+    let carried_prior: Vec<bool> = (0..np)
+        .map(|i| (0..nc).any(|j| carrier_of[j] == Some(i)))
+        .collect();
+    let mut retired = Vec::new();
+    for i in 0..np {
+        if carried_prior[i] {
+            continue;
+        }
+        let reason = match prior_pick[i] {
+            Some(j) => match carrier_of[j] {
+                Some(w) if w != i => RetireReason::MergedInto {
+                    id: prior[w].id.clone(),
+                },
+                _ => RetireReason::Dissolved,
+            },
+            None => RetireReason::Dissolved,
+        };
+        retired.push(Retirement {
+            id: prior[i].id.clone(),
+            reason,
+        });
+    }
+
+    IdentityPlan { decisions, retired }
+}
+
+/// `a` is more senior than `b`: earlier first_seen, then more visits, then more
+/// metres, then a smaller id. Total, so a merge always picks the same winner.
+fn more_senior(a: &PriorSection, b: &PriorSection) -> bool {
+    match a.first_seen.cmp(&b.first_seen) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => match a.visit_count.cmp(&b.visit_count) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                match polyline_metres(&a.polyline).total_cmp(&polyline_metres(&b.polyline)) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => a.id < b.id,
+                }
+            }
+        },
+    }
+}
+
+/// Candidate `(mo_a, a)` at index `ja` beats `(mo_b, b)` at index `jb` for a
+/// prior's split nomination: more mutual overlap, then more metres, then more
+/// visits, then a smaller SW corner, then a smaller index.
+fn better_candidate(
+    mo_a: f64,
+    a: &CandidateSection,
+    mo_b: f64,
+    b: &CandidateSection,
+    ja: usize,
+    jb: usize,
+) -> bool {
+    match mo_a.total_cmp(&mo_b) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            match polyline_metres(&a.polyline).total_cmp(&polyline_metres(&b.polyline)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => match a.visit_count.cmp(&b.visit_count) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => {
+                        let (sa, sb) = (sw_corner(&a.polyline), sw_corner(&b.polyline));
+                        match sa.0.total_cmp(&sb.0).then(sa.1.total_cmp(&sb.1)) {
+                            std::cmp::Ordering::Less => true,
+                            std::cmp::Ordering::Greater => false,
+                            std::cmp::Ordering::Equal => ja < jb,
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Hysteresis — the low-pass filter over the plan
+// ============================================================================
+
+/// Tunable thresholds for [`HysteresisState`]. Defaults are the design's
+/// calibrated values; a `Tunables`-style struct rather than magic literals.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct HysteresisParams {
+    /// Consecutive decisive plans before a dissolve or re-cut applies.
+    pub k: u8,
+    /// A dissolve counts toward the debounce only at or above this pressure.
+    pub dissolve_pressure_hi: f64,
+    /// Extents overlapping by at least this adopt geometry immediately; below it
+    /// a carried section is a material re-cut and debounces.
+    pub recut_agreement: f64,
+}
+
+impl Default for HysteresisParams {
+    fn default() -> Self {
+        Self {
+            k: DEFAULT_K,
+            dissolve_pressure_hi: DISSOLVE_PRESSURE_HI,
+            recut_agreement: RECUT_AGREEMENT,
+        }
+    }
+}
+
+/// One held section in the visible view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HeldSection {
+    polyline: Vec<GpsPoint>,
+    visit_count: u32,
+    first_seen: u64,
+}
+
+/// An in-flight debounce toward a dissolve or a re-cut of one stable id.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Pending {
+    kind: PendingKind,
+    streak: u8,
+    /// The batch geometry a re-cut will snap to at `k`. `None` for a dissolve.
+    target: Option<CandidateSection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum PendingKind {
+    Dissolve,
+    ReCut,
+}
+
+/// What a held section should become after one step. Returned by the appliers
+/// so `step` performs every mutation (including moving a dissolved ground into
+/// the tombstones) in one place, after the read-only pass over the old view.
+enum HeldAction {
+    /// Stays visible with this geometry, no debounce.
+    Keep(HeldSection),
+    /// Stays visible with an active debounce toward a dissolve or re-cut.
+    KeepPending(HeldSection, Pending),
+    /// A sustained dissolve fired: retain the ground as a tombstone.
+    Tombstone(HeldSection),
+}
+
+/// What one [`HysteresisState::step`] did, for measurement and assertions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StepOutcome {
+    /// Sections in the batch this step.
+    pub raw_count: usize,
+    /// Sections in the visible view after the step.
+    pub visible_count: usize,
+    /// Fresh ids assigned to genuinely new ground.
+    pub minted: usize,
+    /// Ids restored from a tombstone because their ground re-emerged.
+    pub restored: usize,
+    /// Sustained dissolves that fired this step (moved to a tombstone).
+    pub dissolved: usize,
+    /// Sustained re-cuts that fired this step (geometry snapped to the batch).
+    pub recut_applied: usize,
+    /// Ids carrying an active debounce after the step.
+    pub debouncing: usize,
+}
+
+/// The assign-once identity registry plus its hysteresis debounce. Holds the
+/// visible catalogue (stable id -> held ground), the tombstones a dissolved
+/// ground can re-emerge under, and the per-id debounce counters. In-memory for
+/// the lab; the engine persists the same shape in B4.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HysteresisState {
+    params: HysteresisParams,
+    visible: BTreeMap<String, HeldSection>,
+    tombstones: BTreeMap<String, HeldSection>,
+    pending: BTreeMap<String, Pending>,
+    /// Monotonic counter minting first_seen ordinals and `s_<n>` ids. Only ever
+    /// grows, so a fresh id never collides with a live or tombstoned one.
+    ordinal: u64,
+}
+
+impl Default for HysteresisState {
+    fn default() -> Self {
+        Self::new(HysteresisParams::default())
+    }
+}
+
+impl HysteresisState {
+    pub fn new(params: HysteresisParams) -> Self {
+        Self {
+            params,
+            visible: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            ordinal: 0,
+        }
+    }
+
+    /// Fold a fresh batch catalogue into the visible view, damping churn.
+    ///
+    /// Additions are immediate: a candidate matching no held section appears at
+    /// once, restoring its old id if its ground re-emerged from a tombstone,
+    /// otherwise minting a fresh one. A carried section folds the batch's visits
+    /// immediately and adopts geometry immediately when the extents agree; a
+    /// material re-cut, and any dissolve, debounce over `k` decisive detects
+    /// before they apply. A debounce, not a freeze: once the batch sustains the
+    /// change for `k` steps it applies.
+    pub fn step(&mut self, next: &[CandidateSection]) -> StepOutcome {
+        let prior: Vec<PriorSection> = self
+            .visible
+            .iter()
+            .map(|(id, h)| PriorSection {
+                id: id.clone(),
+                polyline: h.polyline.clone(),
+                first_seen: h.first_seen,
+                visit_count: h.visit_count,
+            })
+            .collect();
+        let plan = plan_identity(&prior, next);
+
+        // Index the plan by prior id: which candidate carried it, and which
+        // priors retired and why.
+        let mut carried: BTreeMap<&str, usize> = BTreeMap::new();
+        for (j, d) in plan.decisions.iter().enumerate() {
+            if let Some(id) = d.carried_id() {
+                carried.insert(id, j);
+            }
+        }
+        let retired: BTreeMap<&str, &RetireReason> = plan
+            .retired
+            .iter()
+            .map(|r| (r.id.as_str(), &r.reason))
+            .collect();
+
+        let mut new_visible: BTreeMap<String, HeldSection> = BTreeMap::new();
+        let mut new_pending: BTreeMap<String, Pending> = BTreeMap::new();
+        let mut out = StepOutcome {
+            raw_count: next.len(),
+            ..StepOutcome::default()
+        };
+
+        // Carried and retired held sections. Every prior is exactly one of the
+        // two (plan_identity accounts for all of them). Take the old view out so
+        // a fired dissolve can move its ground into the tombstones without an
+        // outstanding borrow of `self`.
+        let old_visible = std::mem::take(&mut self.visible);
+        for (id, held) in old_visible {
+            let action = if let Some(&j) = carried.get(id.as_str()) {
+                self.apply_carry(&id, &held, &next[j], &mut out)
+            } else if let Some(reason) = retired.get(id.as_str()) {
+                self.apply_retire(&id, &held, reason, next, &mut out)
+            } else {
+                // Unreachable in a correct plan; hold defensively rather than
+                // silently drop a section.
+                HeldAction::Keep(held)
+            };
+            match action {
+                HeldAction::Keep(h) => {
+                    new_visible.insert(id, h);
+                }
+                HeldAction::KeepPending(h, p) => {
+                    new_visible.insert(id.clone(), h);
+                    new_pending.insert(id, p);
+                }
+                HeldAction::Tombstone(h) => {
+                    self.tombstones.insert(id, h);
+                }
+            }
+        }
+
+        // Mints, immediate. A re-emerged ground restores its tombstoned id.
+        for (j, d) in plan.decisions.iter().enumerate() {
+            if !matches!(d, Decision::Mint) {
+                continue;
+            }
+            let cand = &next[j];
+            if let Some(tomb_id) = self.match_tombstone(&cand.polyline) {
+                let mut held = self.tombstones.remove(&tomb_id).expect("matched tombstone");
+                held.polyline = cand.polyline.clone();
+                held.visit_count = cand.visit_count.max(held.visit_count);
+                new_visible.insert(tomb_id, held);
+                out.restored += 1;
+            } else {
+                self.ordinal += 1;
+                let id = format!("s_{:06}", self.ordinal);
+                new_visible.insert(
+                    id,
+                    HeldSection {
+                        polyline: cand.polyline.clone(),
+                        visit_count: cand.visit_count,
+                        first_seen: self.ordinal,
+                    },
+                );
+                out.minted += 1;
+            }
+        }
+
+        out.visible_count = new_visible.len();
+        out.debouncing = new_pending.len();
+        self.visible = new_visible;
+        self.pending = new_pending;
+        out
+    }
+
+    /// Decide a carried section: fold visits immediately; adopt geometry now
+    /// when the extents agree, otherwise debounce the re-cut and keep the old
+    /// geometry until it sustains `k`.
+    fn apply_carry(
+        &self,
+        id: &str,
+        held: &HeldSection,
+        cand: &CandidateSection,
+        out: &mut StepOutcome,
+    ) -> HeldAction {
+        let visits = cand.visit_count.max(held.visit_count);
+        let adopted = HeldSection {
+            polyline: cand.polyline.clone(),
+            visit_count: visits,
+            first_seen: held.first_seen,
+        };
+        if mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement {
+            // Extents agree: adopt the batch geometry, clear any debounce.
+            return HeldAction::Keep(adopted);
+        }
+        // Material re-cut: debounce, folding visits but freezing geometry.
+        let streak = self.continued_streak(id, PendingKind::ReCut) + 1;
+        if streak >= self.params.k {
+            out.recut_applied += 1;
+            HeldAction::Keep(adopted)
+        } else {
+            let frozen = HeldSection {
+                polyline: held.polyline.clone(),
+                visit_count: visits,
+                first_seen: held.first_seen,
+            };
+            HeldAction::KeepPending(
+                frozen,
+                Pending {
+                    kind: PendingKind::ReCut,
+                    streak,
+                    target: Some(cand.clone()),
+                },
+            )
+        }
+    }
+
+    /// Decide a retired section: debounce a dissolve, and tombstone it once the
+    /// disappearance sustains `k`. A merge-away is decisive by itself; a plain
+    /// dissolve only counts a step where the pressure clears the threshold.
+    fn apply_retire(
+        &self,
+        id: &str,
+        held: &HeldSection,
+        reason: &RetireReason,
+        next: &[CandidateSection],
+        out: &mut StepOutcome,
+    ) -> HeldAction {
+        let decisive = match reason {
+            RetireReason::MergedInto { .. } => true,
+            RetireReason::Dissolved => {
+                dissolve_pressure(&held.polyline, next) >= self.params.dissolve_pressure_hi
+            }
+        };
+        if !decisive {
+            // Not decisively gone: hold and let the streak lapse.
+            return HeldAction::Keep(held.clone());
+        }
+        let streak = self.continued_streak(id, PendingKind::Dissolve) + 1;
+        if streak >= self.params.k {
+            out.dissolved += 1;
+            HeldAction::Tombstone(held.clone())
+        } else {
+            HeldAction::KeepPending(
+                held.clone(),
+                Pending {
+                    kind: PendingKind::Dissolve,
+                    streak,
+                    target: None,
+                },
+            )
+        }
+    }
+
+    /// The streak already accumulated for `id` toward `kind`, or 0 if the id had
+    /// no pending of that kind last step (a change of direction resets it).
+    fn continued_streak(&self, id: &str, kind: PendingKind) -> u8 {
+        match self.pending.get(id) {
+            Some(p) if p.kind == kind => p.streak,
+            _ => 0,
+        }
+    }
+
+    /// The tombstoned id whose ground the given candidate re-forms, if any. The
+    /// best mutual overlap wins; BTreeMap iteration keeps it deterministic.
+    fn match_tombstone(&self, polyline: &[GpsPoint]) -> Option<String> {
+        let mut best: Option<(String, f64)> = None;
+        for (id, h) in &self.tombstones {
+            if shares_ground(polyline, &h.polyline) {
+                let mo = mutual_overlap(polyline, &h.polyline);
+                if best.as_ref().is_none_or(|(_, bmo)| mo > *bmo) {
+                    best = Some((id.clone(), mo));
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    // -- read accessors for tests and the measurement -----------------------
+
+    /// The visible section count.
+    pub fn visible_len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Visible ids, sorted.
+    pub fn visible_ids(&self) -> Vec<String> {
+        self.visible.keys().cloned().collect()
+    }
+
+    /// The visible catalogue as `(id, ground)` pairs, sorted by id.
+    pub fn visible_grounds(&self) -> Vec<(String, Vec<GpsPoint>)> {
+        self.visible
+            .iter()
+            .map(|(id, h)| (id.clone(), h.polyline.clone()))
+            .collect()
+    }
+
+    /// The ground currently held under `id`, if visible.
+    pub fn ground_of(&self, id: &str) -> Option<&[GpsPoint]> {
+        self.visible.get(id).map(|h| h.polyline.as_slice())
+    }
+
+    /// Whether `id` is currently tombstoned (dissolved, retained for re-emergence).
+    pub fn is_tombstoned(&self, id: &str) -> bool {
+        self.tombstones.contains_key(id)
+    }
+
+    /// Tombstoned ids, sorted.
+    pub fn tombstone_ids(&self) -> Vec<String> {
+        self.tombstones.keys().cloned().collect()
+    }
+
+    /// Ids with an active debounce.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A straight north-heading line of `n` points spaced ~11 m, starting at
+    // `(lat0, lng0)`. Distinct, well-separated grounds come from distinct lng.
+    fn line(lat0: f64, lng0: f64, n: usize) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| GpsPoint::new(lat0 + i as f64 * 1.0e-4, lng0))
+            .collect()
+    }
+
+    fn cand(polyline: Vec<GpsPoint>, visit_count: u32) -> CandidateSection {
+        CandidateSection {
+            polyline,
+            visit_count,
+        }
+    }
+
+    fn prior(id: &str, polyline: Vec<GpsPoint>, first_seen: u64, visit_count: u32) -> PriorSection {
+        PriorSection {
+            id: id.to_string(),
+            polyline,
+            first_seen,
+            visit_count,
+        }
+    }
+
+    // -- plan_identity ------------------------------------------------------
+
+    #[test]
+    fn carry_on_a_stable_catalogue() {
+        let p = line(46.0, 7.0, 100);
+        let prior = vec![prior("s_1", p.clone(), 1, 5)];
+        let next = vec![cand(p, 6)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(plan.decisions, vec![Decision::Carry { id: "s_1".into() }]);
+        assert!(plan.retired.is_empty());
+    }
+
+    #[test]
+    fn mint_on_new_ground() {
+        // A prior far to the west; a candidate far to the east. No shared ground.
+        let prior = vec![prior("s_1", line(46.0, 7.0, 100), 1, 5)];
+        let next = vec![cand(line(46.0, 9.0, 100), 3)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(plan.decisions, vec![Decision::Mint]);
+        assert_eq!(
+            plan.retired,
+            vec![Retirement {
+                id: "s_1".into(),
+                reason: RetireReason::Dissolved,
+            }]
+        );
+    }
+
+    #[test]
+    fn split_inheritance_picks_the_larger_overlap() {
+        // Prior P covers a 100-point line. C1 is its first 70%, C2 its first 40%.
+        // Both are covered by P (they share ground), but C1 overlaps P more, so
+        // C1 inherits and C2 mints.
+        let p = line(46.0, 7.0, 100);
+        let c1 = line(46.0, 7.0, 70);
+        let c2 = line(46.0, 7.0, 40);
+        let prior = vec![prior("s_1", p, 1, 9)];
+        let next = vec![cand(c1, 4), cand(c2, 4)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions,
+            vec![Decision::SplitInherit { id: "s_1".into() }, Decision::Mint]
+        );
+        assert!(plan.retired.is_empty());
+    }
+
+    #[test]
+    fn split_tie_break_is_total_and_order_free() {
+        // Left half and right half of P: equal mutual overlap, equal metres,
+        // equal visits. The only separator is the SW corner (smaller longitude),
+        // so the western piece must inherit regardless of input order.
+        let p = line(46.0, 7.0, 100);
+        let west: Vec<GpsPoint> = p[..50].to_vec();
+        let east: Vec<GpsPoint> = p[50..].to_vec();
+        let prior = vec![prior("s_1", p, 1, 9)];
+
+        let forward = plan_identity(&prior, &[cand(west.clone(), 4), cand(east.clone(), 4)]);
+        // west is index 0.
+        assert_eq!(
+            forward.decisions[0],
+            Decision::SplitInherit { id: "s_1".into() }
+        );
+        assert_eq!(forward.decisions[1], Decision::Mint);
+
+        let reversed = plan_identity(&prior, &[cand(east, 4), cand(west, 4)]);
+        // west is now index 1, and must still be the one that inherits.
+        assert_eq!(
+            reversed.decisions[1],
+            Decision::SplitInherit { id: "s_1".into() }
+        );
+        assert_eq!(reversed.decisions[0], Decision::Mint);
+    }
+
+    #[test]
+    fn plan_is_deterministic_byte_for_byte() {
+        let p = line(46.0, 7.0, 100);
+        let prior = vec![
+            prior("s_1", p[..50].to_vec(), 1, 3),
+            prior("s_2", p[40..].to_vec(), 2, 3),
+        ];
+        let next = vec![cand(p.clone(), 6), cand(line(46.0, 9.0, 60), 2)];
+        assert_eq!(plan_identity(&prior, &next), plan_identity(&prior, &next));
+    }
+
+    #[test]
+    fn merge_inheritance_goes_to_the_senior() {
+        // A (first_seen 1) and B (first_seen 2) each cover half of Z. Z inherits
+        // the senior A; B retires MergedInto A.
+        let z = line(46.0, 7.0, 100);
+        let a = z[..50].to_vec();
+        let b = z[50..].to_vec();
+        let prior = vec![prior("s_A", a, 1, 5), prior("s_B", b, 2, 5)];
+        let next = vec![cand(z, 10)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }]
+        );
+        assert_eq!(
+            plan.retired,
+            vec![Retirement {
+                id: "s_B".into(),
+                reason: RetireReason::MergedInto { id: "s_A".into() },
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_seniority_ignores_input_order() {
+        // Same as above but the junior B is listed first; the senior A still wins.
+        let z = line(46.0, 7.0, 100);
+        let a = z[..50].to_vec();
+        let b = z[50..].to_vec();
+        let prior = vec![prior("s_B", b, 2, 5), prior("s_A", a, 1, 5)];
+        let next = vec![cand(z, 10)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }]
+        );
+    }
+
+    // -- hysteresis ---------------------------------------------------------
+
+    #[test]
+    fn hysteresis_carries_a_stable_catalogue() {
+        let mut state = HysteresisState::default();
+        let p = line(46.0, 7.0, 100);
+        let out0 = state.step(&[cand(p.clone(), 5)]);
+        assert_eq!(out0.minted, 1);
+        let ids0 = state.visible_ids();
+        let out1 = state.step(&[cand(p, 6)]);
+        assert_eq!(out1.minted, 0);
+        assert_eq!(out1.dissolved, 0);
+        assert_eq!(
+            state.visible_ids(),
+            ids0,
+            "a stable catalogue must keep its ids"
+        );
+    }
+
+    #[test]
+    fn hysteresis_mints_new_ground_immediately() {
+        let mut state = HysteresisState::default();
+        state.step(&[cand(line(46.0, 7.0, 100), 5)]);
+        let out = state.step(&[cand(line(46.0, 7.0, 100), 5), cand(line(46.0, 9.0, 100), 3)]);
+        assert_eq!(out.minted, 1, "genuinely new ground appears at once");
+        assert_eq!(state.visible_len(), 2);
+    }
+
+    #[test]
+    fn dissolve_requires_k_consecutive_detects() {
+        let mut state = HysteresisState::default(); // k = 3
+        let p = line(46.0, 7.0, 100);
+        state.step(&[cand(p.clone(), 5)]);
+        let id = state.visible_ids()[0].clone();
+
+        // Two empty detects: the ground is decisively gone but the debounce
+        // holds it visible.
+        let s1 = state.step(&[]);
+        assert_eq!(s1.dissolved, 0);
+        assert!(state.visible_ids().contains(&id));
+        let s2 = state.step(&[]);
+        assert_eq!(s2.dissolved, 0);
+        assert!(state.visible_ids().contains(&id));
+
+        // The third sustained empty detect fires the dissolve.
+        let s3 = state.step(&[]);
+        assert_eq!(s3.dissolved, 1);
+        assert_eq!(state.visible_len(), 0);
+        assert!(
+            state.is_tombstoned(&id),
+            "a dissolved id is tombstoned, not forgotten"
+        );
+    }
+
+    #[test]
+    fn flip_flop_damps_to_a_stable_view() {
+        // A ground that dissolves and reforms every other detect must never
+        // dissolve: each reappearance resets the debounce before it reaches k.
+        let mut state = HysteresisState::default();
+        let p = line(46.0, 7.0, 100);
+        state.step(&[cand(p.clone(), 5)]);
+        let id = state.visible_ids()[0].clone();
+        for step in 0..12 {
+            let batch = if step % 2 == 0 {
+                vec![]
+            } else {
+                vec![cand(p.clone(), 5)]
+            };
+            let out = state.step(&batch);
+            assert_eq!(
+                out.dissolved, 0,
+                "flip-flop must never dissolve (step {step})"
+            );
+            assert_eq!(
+                state.visible_ids(),
+                vec![id.clone()],
+                "visible view must stay stable"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_change_converges_and_reforms_under_the_old_id() {
+        let mut state = HysteresisState::default();
+        let p = line(46.0, 7.0, 100);
+        state.step(&[cand(p.clone(), 5)]);
+        let id = state.visible_ids()[0].clone();
+
+        // Three sustained empty detects dissolve it.
+        for _ in 0..3 {
+            state.step(&[]);
+        }
+        assert_eq!(state.visible_len(), 0);
+        assert!(state.is_tombstoned(&id));
+
+        // The ground re-forms: it must come back under the SAME id, not a new one.
+        let out = state.step(&[cand(p, 5)]);
+        assert_eq!(out.restored, 1);
+        assert_eq!(out.minted, 0);
+        assert_eq!(state.visible_ids(), vec![id]);
+    }
+
+    #[test]
+    fn a_single_add_never_removes_a_visible_section() {
+        // The headline stability property: one added activity (one new corridor
+        // plus a churny dissolve of an existing one) cannot drop a visible id.
+        let mut state = HysteresisState::default();
+        let a = line(46.0, 7.0, 100);
+        let b = line(46.0, 9.0, 100);
+        state.step(&[cand(a.clone(), 5), cand(b.clone(), 5)]);
+        let before = state.visible_ids();
+        // Batch now drops `a` and adds a third corridor `c`: a single churny step.
+        let c = line(46.0, 11.0, 100);
+        let out = state.step(&[cand(b, 6), cand(c, 3)]);
+        assert_eq!(out.dissolved, 0, "no dissolve may fire on a single step");
+        for id in &before {
+            assert!(
+                state.visible_ids().contains(id),
+                "id {id} must survive a single add"
+            );
+        }
+    }
+}

@@ -80,19 +80,20 @@ pub mod synthetic;
 #[cfg(feature = "synthetic")]
 pub mod scenarios;
 pub use sections::{
-    BoundaryReason, BoundaryRecord, DetectionMethod, DetectionMode, DetectionPhase,
-    DetectionProgressCallback, DetectionStats, FrequentSection, MultiScaleSectionResult,
-    PotentialSection, ScaleName, ScalePreset, SectionConfig, SectionMatch, SectionPortion,
-    SectionEvidenceCache, SplitResult, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections, detect_sections_corridor,
-    detect_sections_flow_graph, detect_sections_from_tracks, detect_sections_multiscale,
-    detect_sections_multiscale_with_progress, detect_sections_unified,
+    BoundaryReason, BoundaryRecord, CandidateSection, Decision, DetectionMethod, DetectionMode,
+    DetectionPhase, DetectionProgressCallback, DetectionStats, FrequentSection, HysteresisParams,
+    HysteresisState, IdentityPlan, MultiScaleSectionResult, PotentialSection, PriorSection,
+    RetireReason, Retirement, ScaleName, ScalePreset, SectionConfig, SectionEvidenceCache,
+    SectionMatch, SectionPortion, SplitResult, StepOutcome, Tunables, UnifiedDetection,
+    UnifiedIncrementalResult, confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections,
+    detect_sections_corridor, detect_sections_flow_graph, detect_sections_from_tracks,
+    detect_sections_multiscale, detect_sections_multiscale_with_progress, detect_sections_unified,
     detect_sections_unified_explained, detect_sections_unified_incremental,
-    detect_sections_unified_incremental_cached, detect_sections_unified_tuned,
-    find_all_track_portions, find_sections_in_route,
-    incremental::IncrementalResult, incremental::detect_sections_incremental, lift_spans,
-    lift_spans_tuned, recalculate_section_polyline, self_pass_penalty, split_section_at_index,
-    split_section_at_point,
+    detect_sections_unified_incremental_cached, detect_sections_unified_tuned, dissolve_pressure,
+    find_all_track_portions, find_sections_in_route, incremental::IncrementalResult,
+    incremental::detect_sections_incremental, lift_spans, lift_spans_tuned, mutual_overlap,
+    plan_identity, recalculate_section_polyline, self_pass_penalty, shares_ground,
+    split_section_at_index, split_section_at_point,
 };
 
 // ============================================================================
