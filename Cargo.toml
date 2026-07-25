@@ -71,6 +71,18 @@ required-features = ["synthetic"]
 name = "optimization_efficiency"
 required-features = ["synthetic"]
 
+[[test]]
+name = "b1_foundation"
+required-features = ["synthetic"]
+
+[[test]]
+name = "b2_identity_measure"
+required-features = ["synthetic"]
+
+[[test]]
+name = "pool_incremental_parity"
+required-features = ["synthetic"]
+
 [profile.release]
 lto = true
 codegen-units = 1
