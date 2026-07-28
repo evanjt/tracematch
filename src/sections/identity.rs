@@ -577,6 +577,33 @@ pub struct StepOutcome {
     pub debouncing: usize,
 }
 
+/// How one candidate entered the visible view this step. The mirroring
+/// contract a stateful caller (the veloqrs registry) builds on: for every
+/// fate except [`CarriedFrozen`](CandidateFate::CarriedFrozen), the visible
+/// ground held under the candidate's id IS the candidate's polyline, so the
+/// caller's payload must follow it. A frozen carry keeps the prior geometry
+/// until the re-cut debounce fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateFate {
+    /// Carried a prior and adopted the batch geometry: the extents agreed,
+    /// or a sustained re-cut fired this step.
+    CarriedAdopted,
+    /// Carried a prior mid re-cut debounce; the held geometry stays frozen.
+    CarriedFrozen,
+    /// Fresh ground under a newly minted id.
+    Minted,
+    /// A tombstoned ground re-emerged under its old id.
+    Restored,
+}
+
+/// One candidate's visible stable id and how it got it, parallel to the
+/// `next` slice passed to [`HysteresisState::step_assign`].
+#[derive(Clone, Debug)]
+pub struct CandidateResolution {
+    pub id: String,
+    pub fate: CandidateFate,
+}
+
 /// The assign-once identity registry plus its hysteresis debounce. Holds the
 /// visible catalogue (stable id -> held ground), the tombstones a dissolved
 /// ground can re-emerge under, and the per-id debounce counters. In-memory for
@@ -623,14 +650,20 @@ impl HysteresisState {
     }
 
     /// [`step`](Self::step) that also returns, parallel to `next`, the visible
-    /// stable id each candidate resolved to. Every candidate maps to exactly one
-    /// visible id (a carry/split/merge target inherits its prior's id, a mint or
-    /// a tombstone-restore takes the fresh/restored id), so a stateful caller
-    /// like the veloqrs registry can join its own per-id payload — real DB id,
-    /// members, name — onto the plan without re-deriving the graph. The pure
+    /// stable id each candidate resolved to and its [`CandidateFate`]. Every
+    /// candidate maps to exactly one visible id (a carry/split/merge target
+    /// inherits its prior's id, a mint or a tombstone-restore takes the
+    /// fresh/restored id), so a stateful caller like the veloqrs registry can
+    /// join its own per-id payload — real DB id, members, name — onto the plan
+    /// without re-deriving the graph. The fate carries the geometry contract:
+    /// unless it is `CarriedFrozen`, the visible ground under that id is the
+    /// candidate's polyline, and the caller's payload must follow it. The pure
     /// layer's `s_<n>` id is the join key; the caller keeps the opaque
     /// `s_<ts>__<rand>` id it persists on the side.
-    pub fn step_assign(&mut self, next: &[CandidateSection]) -> (StepOutcome, Vec<String>) {
+    pub fn step_assign(
+        &mut self,
+        next: &[CandidateSection],
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
         // A section mid re-cut competes on the batch geometry it is re-cutting TO
         // (its pending target), not its stale frozen footprint. Presenting the
         // stale, larger footprint lets it capture a neighbouring candidate's
@@ -686,6 +719,7 @@ impl HysteresisState {
         for (&id, &j) in &carried {
             candidate_ids[j] = id.to_string();
         }
+        let mut fates: Vec<Option<CandidateFate>> = vec![None; next.len()];
 
         let mut new_visible: BTreeMap<String, HeldSection> = BTreeMap::new();
         let mut new_pending: BTreeMap<String, Pending> = BTreeMap::new();
@@ -700,7 +734,8 @@ impl HysteresisState {
         // outstanding borrow of `self`.
         let old_visible = std::mem::take(&mut self.visible);
         for (id, held) in old_visible {
-            let action = if let Some(&j) = carried.get(id.as_str()) {
+            let carried_j = carried.get(id.as_str()).copied();
+            let action = if let Some(j) = carried_j {
                 self.apply_carry(&id, &held, &next[j], &mut out)
             } else if retired.contains_key(id.as_str()) {
                 self.apply_retire(&id, &held, &mut out)
@@ -709,6 +744,15 @@ impl HysteresisState {
                 // silently drop a section.
                 HeldAction::Keep(held)
             };
+            if let Some(j) = carried_j {
+                // apply_carry only ever keeps: geometry adopted outright, or
+                // frozen behind a re-cut debounce.
+                fates[j] = Some(match &action {
+                    HeldAction::Keep(_) => CandidateFate::CarriedAdopted,
+                    HeldAction::KeepPending(..) => CandidateFate::CarriedFrozen,
+                    HeldAction::Tombstone(_) => unreachable!("a carried prior is never tombstoned"),
+                });
+            }
             match action {
                 HeldAction::Keep(h) => {
                     new_visible.insert(id, h);
@@ -734,12 +778,14 @@ impl HysteresisState {
                 held.polyline = cand.polyline.clone();
                 held.visit_count = cand.visit_count.max(held.visit_count);
                 candidate_ids[j] = tomb_id.clone();
+                fates[j] = Some(CandidateFate::Restored);
                 new_visible.insert(tomb_id, held);
                 out.restored += 1;
             } else {
                 self.ordinal += 1;
                 let id = format!("s_{:06}", self.ordinal);
                 candidate_ids[j] = id.clone();
+                fates[j] = Some(CandidateFate::Minted);
                 new_visible.insert(
                     id,
                     HeldSection {
@@ -756,7 +802,15 @@ impl HysteresisState {
         out.debouncing = new_pending.len();
         self.visible = new_visible;
         self.pending = new_pending;
-        (out, candidate_ids)
+        let resolutions = candidate_ids
+            .into_iter()
+            .zip(fates)
+            .map(|(id, fate)| CandidateResolution {
+                id,
+                fate: fate.expect("every candidate resolves exactly once"),
+            })
+            .collect();
+        (out, resolutions)
     }
 
     /// Drop an id from the visible view, its debounce, and any tombstone. The
@@ -1241,5 +1295,45 @@ mod tests {
                 "id {id} must survive a single add"
             );
         }
+    }
+
+    #[test]
+    fn fates_mirror_ground_adoption() {
+        let p = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 5)]);
+        assert_eq!(r[0].fate, CandidateFate::Minted);
+        let id = r[0].id.clone();
+
+        // Agreement carry: 95 of 100 points overlap, above RECUT_AGREEMENT,
+        // so the held ground adopts at once.
+        let agree: Vec<GpsPoint> = p[..95].to_vec();
+        let (_, r) = state.step_assign(&[cand(agree.clone(), 6)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(state.ground_of(&id), Some(agree.as_slice()));
+
+        // Material re-cut: frozen on the prior ground until the k-th
+        // consecutive detect, which fires and adopts.
+        let recut: Vec<GpsPoint> = p[..50].to_vec();
+        for _ in 0..(DEFAULT_K - 1) {
+            let (_, r) = state.step_assign(&[cand(recut.clone(), 7)]);
+            assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+            assert_eq!(state.ground_of(&id), Some(agree.as_slice()));
+        }
+        let (out, r) = state.step_assign(&[cand(recut.clone(), 8)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 1);
+        assert_eq!(state.ground_of(&id), Some(recut.as_slice()));
+
+        // Dissolve over k detects, then the ground re-emerges as itself.
+        for _ in 0..DEFAULT_K {
+            let (_, r) = state.step_assign(&[]);
+            assert!(r.is_empty());
+        }
+        assert!(state.is_tombstoned(&id));
+        let (_, r) = state.step_assign(&[cand(recut.clone(), 8)]);
+        assert_eq!(r[0].fate, CandidateFate::Restored);
+        assert_eq!(r[0].id, id);
+        assert_eq!(state.ground_of(&id), Some(recut.as_slice()));
     }
 }
