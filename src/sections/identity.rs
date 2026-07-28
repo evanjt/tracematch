@@ -319,6 +319,7 @@ pub fn plan_identity_tuned(
         .collect();
     let mut edge = vec![vec![false; nc]; np];
     let mut mo = vec![vec![0.0_f64; nc]; np];
+    let mut contained = vec![vec![false; nc]; np];
     for (i, p) in prior.iter().enumerate() {
         for (j, c) in next.iter().enumerate() {
             let (a, b) = (p_bb[i], c_bb[j]);
@@ -329,21 +330,40 @@ pub fn plan_identity_tuned(
             let cov_cp = coverage(&c.polyline, &p.polyline, GROUND_TOL_M);
             edge[i][j] = cov_pc.max(cov_cp) >= CARRY_COVERAGE;
             mo[i][j] = cov_pc.min(cov_cp);
+            contained[i][j] = cov_pc >= CARRY_COVERAGE;
         }
     }
 
-    // Each candidate nominates the senior prior it shares ground with, among the
-    // priors clearing the merge floor. Seniority is earliest first_seen, then
-    // more visits, then more metres, then smaller id.
+    // Each candidate nominates a prior in two tiers: first the senior among
+    // priors CONTAINED in the candidate's corridor (the genuine merge shape —
+    // a retiring prior lies inside its successor), then, when none is
+    // contained, the senior among all same-corridor priors (the split shape —
+    // a piece nominates the prior it came from). Containment first stops a
+    // mere one-way overlap from a senior neighbour out-nominating the
+    // candidate's mutual-best prior, which starved the junior and minted
+    // churn ids on its ground (marginal capture). Seniority is earliest
+    // first_seen, then more visits, then more metres, then smaller id.
     let cand_pick: Vec<Option<usize>> = (0..nc)
         .map(|j| {
             let mut best: Option<usize> = None;
+            let mut best_contained = false;
             for i in 0..np {
-                if edge[i][j]
-                    && mo[i][j] >= params.merge_mutual_floor
-                    && (best.is_none() || more_senior(&prior[i], &prior[best.unwrap()]))
-                {
+                if !(edge[i][j] && mo[i][j] >= params.merge_mutual_floor) {
+                    continue;
+                }
+                let wins = match best {
+                    None => true,
+                    Some(b) => {
+                        if contained[i][j] != best_contained {
+                            contained[i][j]
+                        } else {
+                            more_senior(&prior[i], &prior[b])
+                        }
+                    }
+                };
+                if wins {
                     best = Some(i);
+                    best_contained = contained[i][j];
                 }
             }
             best
@@ -1335,5 +1355,68 @@ mod tests {
         assert_eq!(r[0].fate, CandidateFate::Restored);
         assert_eq!(r[0].id, id);
         assert_eq!(state.ground_of(&id), Some(recut.as_slice()));
+    }
+
+    /// Scenario: a section's ground stops being ridden, but a spur sharing
+    /// 70% of the dead footprint one-way flickers past every second detect.
+    /// Expected behaviour: the dead section still retires. Today the held
+    /// footprint captures the spur (edge on one-way coverage, seniority at
+    /// merge floor 0.0), the pending kind flips Dissolve -> ReCut -> Dissolve,
+    /// and each flip resets the streak, so the section never tombstones.
+    #[test]
+    #[ignore = "known limit: needs a flapping batch (candidate present every second detect), which pool-monotone detection should not produce; measure kind-flip cycles in the D2 corpus replay before designing a fix"]
+    fn flickering_marginal_capture_must_not_pin_a_dead_section() {
+        let ground = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(ground.clone(), 8)]);
+        let id = r[0].id.clone();
+
+        let mut spur: Vec<GpsPoint> = ground[..70].to_vec();
+        spur.extend(line(46.007, 7.02, 60));
+        for _ in 0..4 {
+            state.step_assign(&[]);
+            state.step_assign(&[cand(spur.clone(), 3)]);
+        }
+        assert!(
+            !state.visible_ids().contains(&id),
+            "a ground gone for 8 detects must retire; a flickering marginal \
+             capture must not reset the dissolve debounce forever"
+        );
+    }
+
+    /// Scenario: a senior trunk and a junior neighbour whose ground one-way
+    /// overlaps the trunk's footprint by more than CARRY_COVERAGE; both are
+    /// ridden stably.
+    /// Expected behaviour: each keeps its own id and the catalogue holds
+    /// exactly two sections. Today the neighbour's candidate nominates the
+    /// SENIOR on the one-sided edge (cand_pick is seniority-only at floor
+    /// 0.0), the mutual-best confirmation fails for the junior, and the
+    /// junior starves: it retires while its candidate re-mints fresh ids.
+    #[test]
+    fn a_neighbours_candidate_is_not_captured_by_a_senior_one_way_overlap() {
+        let trunk = line(46.0, 7.0, 100);
+        let mut neighbour: Vec<GpsPoint> = trunk[..50].to_vec();
+        neighbour.extend(line(46.005, 7.012, 30));
+
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(trunk.clone(), 9)]);
+        let trunk_id = r[0].id.clone();
+        let (_, r) = state.step_assign(&[cand(trunk.clone(), 9), cand(neighbour.clone(), 4)]);
+        assert_eq!(r[1].fate, CandidateFate::Minted, "neighbour ground mints");
+        let neighbour_id = r[1].id.clone();
+
+        for step in 0..5 {
+            state.step_assign(&[cand(trunk.clone(), 9), cand(neighbour.clone(), 5)]);
+            let visible = state.visible_ids();
+            assert!(
+                visible.contains(&trunk_id) && visible.contains(&neighbour_id),
+                "step {step}: both ids must survive stable riding, visible = {visible:?}"
+            );
+            assert_eq!(
+                state.visible_len(),
+                2,
+                "step {step}: stable ground must not mint churn ids"
+            );
+        }
     }
 }
