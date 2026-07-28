@@ -3107,7 +3107,7 @@ fn resolve_fold(
     config: &SectionConfig,
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
 ) -> UnifiedIncrementalResult {
-    use super::identity::{CandidateSection, Decision, PriorSection, RetireReason, plan_identity};
+    use super::identity::{CandidateSection, PriorSection, RetireReason, plan_identity};
 
     // The identity plan pairs priors to candidates. Seniority (merge
     // inheritance) is the caller's list order: earlier is more senior.
