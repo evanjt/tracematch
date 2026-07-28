@@ -84,11 +84,13 @@ pub use identity::{
 };
 
 pub use unified::{
-    BoundaryReason, BoundaryRecord, SectionEvidenceCache, Tunables, UnifiedDetection,
-    UnifiedIncrementalResult, confirmed_lift_spans, confirmed_lift_spans_tuned,
-    detect_sections_unified, detect_sections_unified_explained,
-    detect_sections_unified_incremental, detect_sections_unified_incremental_cached,
-    detect_sections_unified_tuned, lift_spans, lift_spans_tuned, self_pass_penalty,
+    BoundaryReason, BoundaryRecord, SectionEvidenceCache, SectionGeometryChange, SectionMergedAway,
+    SectionUpdatePolicy, Tunables, UnifiedDetection, UnifiedIncrementalResult,
+    confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections_unified,
+    detect_sections_unified_explained, detect_sections_unified_incremental,
+    detect_sections_unified_incremental_cached,
+    detect_sections_unified_incremental_cached_with_policy, detect_sections_unified_tuned,
+    lift_spans, lift_spans_tuned, self_pass_penalty,
 };
 
 // Re-export single-route section utilities (find/split known sections).
