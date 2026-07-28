@@ -101,6 +101,28 @@ pub fn mutual_overlap(a: &[GpsPoint], b: &[GpsPoint]) -> f64 {
     coverage(a, b, GROUND_TOL_M).min(coverage(b, a, GROUND_TOL_M))
 }
 
+/// A ground's bounding box padded by [`GROUND_TOL_M`] (longitude scaled by the
+/// box's own mid-latitude). Two grounds within tolerance of each other must
+/// have overlapping padded boxes, so this gates the pairwise coverage scan.
+fn ground_bbox_padded(pts: &[GpsPoint]) -> (f64, f64, f64, f64) {
+    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in pts {
+        bb.0 = bb.0.min(p.latitude);
+        bb.1 = bb.1.max(p.latitude);
+        bb.2 = bb.2.min(p.longitude);
+        bb.3 = bb.3.max(p.longitude);
+    }
+    let pad_lat = GROUND_TOL_M / 111_000.0;
+    let mid = ((bb.0 + bb.1) * 0.5).to_radians();
+    let pad_lng = GROUND_TOL_M / (111_320.0 * mid.cos().abs().max(0.01));
+    (
+        bb.0 - pad_lat,
+        bb.1 + pad_lat,
+        bb.2 - pad_lng,
+        bb.3 + pad_lng,
+    )
+}
+
 /// How decisively a held ground has left the batch: `1 - max coverage of the
 /// held ground by any batch section`. 1.0 when no batch section covers it at
 /// all, 0.0 when one covers it entirely. The dissolve debounce only counts a
@@ -281,13 +303,28 @@ pub fn plan_identity_tuned(
     let np = prior.len();
     let nc = next.len();
 
-    // Same-corridor edges and their mutual overlap, computed once. A distant
-    // pair simply scores 0 coverage, so no bbox pre-filter is needed at these
-    // catalogue sizes.
+    // Same-corridor edges and their mutual overlap, computed once. The padded
+    // bounding boxes gate the O(polyline²) coverage test: two grounds can only
+    // share a corridor within GROUND_TOL_M if their padded boxes overlap, so a
+    // geographically distant pair costs O(1) instead of a full scan. Behaviour
+    // is unchanged — a distant pair scored 0 coverage before — but the plan's
+    // cost now tracks the co-located ground, not the whole catalogue.
+    let p_bb: Vec<(f64, f64, f64, f64)> = prior
+        .iter()
+        .map(|p| ground_bbox_padded(&p.polyline))
+        .collect();
+    let c_bb: Vec<(f64, f64, f64, f64)> = next
+        .iter()
+        .map(|c| ground_bbox_padded(&c.polyline))
+        .collect();
     let mut edge = vec![vec![false; nc]; np];
     let mut mo = vec![vec![0.0_f64; nc]; np];
     for (i, p) in prior.iter().enumerate() {
         for (j, c) in next.iter().enumerate() {
+            let (a, b) = (p_bb[i], c_bb[j]);
+            if a.0 > b.1 || b.0 > a.1 || a.2 > b.3 || b.2 > a.3 {
+                continue;
+            }
             let cov_pc = coverage(&p.polyline, &c.polyline, GROUND_TOL_M);
             let cov_cp = coverage(&c.polyline, &p.polyline, GROUND_TOL_M);
             edge[i][j] = cov_pc.max(cov_cp) >= CARRY_COVERAGE;
