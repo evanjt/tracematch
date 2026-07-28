@@ -253,6 +253,28 @@ pub fn fork_y(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
         .collect()
 }
 
+/// A trunk that only becomes a fork later in the library's life: the
+/// first `early` outings run straight through the junction, then `late`
+/// outings peel east at the midpoint. A batch over the whole set sees a
+/// fork; a drip sees one through-line until the branch arrives, so the
+/// trunk has to re-cut mid-life. This is the ingestion order that a
+/// section-carrying incremental would get wrong.
+pub fn late_fork(early: usize, late: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let leg = |end: (f64, f64)| densify(&[(0.0, 0.0), (0.0, 1000.0), end]);
+    let straight = leg((0.0, 2000.0));
+    let branch = leg((600.0, 1800.0));
+    (0..early + late)
+        .map(|i| {
+            let (name, path) = if i < early {
+                (format!("early_{i}"), &straight)
+            } else {
+                (format!("late_{}", i - early), &branch)
+            };
+            (name, track(&wobble(path, HUMAN_WOBBLE_M, phase(i))))
+        })
+        .collect()
+}
+
 /// Zigzag climb: 8 hairpin legs 30 m apart in plan, 25 m of gain each,
 /// so one coarse cell holds several legs at distinct elevation levels.
 /// Return leg is a detached road well east of the climb.
