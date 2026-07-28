@@ -346,13 +346,14 @@ fn marginal_capture_plan_is_wrong_by_default_and_fixed_by_floor() {
 }
 
 /// The (c2) variant WITH an alternative home for the senior, driven through a
-/// full hysteresis run. The senior A has its own re-emitted short section W, so
-/// it does not even take Z: Z mints and the junior B dissolves. Measured, this
-/// is worse than a one-shot mis-carry, because the debounce holds the displaced
-/// sections while Z re-mints, so the visible view accretes duplicate corridors.
-/// The floor fixes it: both priors carry cleanly, the view stays stable.
+/// full hysteresis run. Historically this shape accreted duplicate corridors
+/// at floor 0.0 (the displaced sections were held by the debounce while Z
+/// re-minted) and only the merge floor kept it bounded. The containment-tier
+/// nomination settles it without the floor: the view converges to two stable
+/// sections with no churn on unchanged input, at both floors, with exactly
+/// one section on the long corridor.
 #[test]
-fn marginal_capture_hysteresis_pathology_and_floor_fix() {
+fn marginal_capture_settles_two_stable_without_the_floor() {
     let (long, short) = marginal_capture_grounds();
     let z = long.clone(); // the long corridor re-detected
     let w = short.clone(); // the senior's short section re-emitted
@@ -396,29 +397,28 @@ fn marginal_capture_hysteresis_pathology_and_floor_fix() {
     println!("floored: {floored_visible} visible, {floored_dups} on the long corridor");
     println!("-----------------------------------------------------------------------------");
     println!(
-        "READ: the marginal senior still captures the corridor at floor 0.0 (only the floor prevents\n\
-         that), so it keeps re-minting - but the displaced held duplicates now RETIRE by the\n\
-         plan-retirement debounce after k, so the visible view converges to a bounded steady state\n\
-         (one in-and-out churn) instead of growing without bound. Pre-fix it grew 2->7 unbounded.\n\
-         The floor additionally prevents the capture, giving the cleanest two-stable view.\n"
+        "READ: the containment-tier nomination settles this shape without the floor. The senior's\n\
+         ground is contained in the long corridor, so its inheritance is the genuine merge shape;\n\
+         the short ground re-mints one junior id, and from there the view is two-stable with no\n\
+         churn on unchanged input. Pre-fix this grew 2->7 unbounded and needed the floor to bound.\n"
     );
 
-    // Fold fix: the accretion STABILISES at the default floor 0.0. The visible
-    // count converges (the last steps hold constant, no unbounded growth) and the
-    // held duplicates retire by count, which is what bounds it.
+    // The view settles to two sections at floor 0.0 with no churn after the
+    // first settle step, and no duplicate accretion on the long corridor.
     let default_visible: Vec<usize> = default_rows[..6].iter().map(|r| r.0).collect();
-    let default_diss: usize = default_rows[..6].iter().map(|r| r.2).sum();
     assert!(
-        default_visible[3] == default_visible[4] && default_visible[4] == default_visible[5],
-        "accretion must stabilise at floor 0.0 (visible per step = {default_visible:?})"
+        default_visible.iter().all(|&v| v == 2),
+        "the view must be two-stable at floor 0.0 (visible per step = {default_visible:?})"
     );
+    let settled = default_rows[1..6].iter().all(|&(_, m, d)| m == 0 && d == 0);
     assert!(
-        default_diss > 0,
-        "held duplicates must retire by count at floor 0.0 (total dissolved = {default_diss})"
+        settled,
+        "an unchanged batch must not mint or dissolve at floor 0.0 after the settle step \
+         (rows = {default_rows:?})"
     );
-    assert!(
-        default_dups <= 1,
-        "the long corridor must not accrete unbounded duplicates at floor 0.0 (got {default_dups})"
+    assert_eq!(
+        default_dups, 1,
+        "the long corridor holds exactly one section at floor 0.0 (got {default_dups})"
     );
     // The floor additionally prevents the capture: exactly the two priors, one
     // section on the corridor, no churn at all.
