@@ -122,8 +122,13 @@ fn fork_split_larger_piece_inherits_and_is_order_free() {
     let plan = plan_identity(&held, &[cand(c1.clone(), 5), cand(c2.clone(), 4)]);
     assert_eq!(
         plan.decisions,
-        vec![Decision::SplitInherit { id: "s_A".into() }, Decision::Mint],
-        "the larger-overlap piece must inherit, the carved piece must mint"
+        vec![
+            Decision::SplitInherit { id: "s_A".into() },
+            Decision::Mint {
+                split_from: Some("s_A".into())
+            }
+        ],
+        "the larger-overlap piece must inherit, the carved piece must mint from it"
     );
     assert!(plan.retired.is_empty(), "a split retires no prior");
 
@@ -133,7 +138,12 @@ fn fork_split_larger_piece_inherits_and_is_order_free() {
         rev.decisions[1],
         Decision::SplitInherit { id: "s_A".into() }
     );
-    assert_eq!(rev.decisions[0], Decision::Mint);
+    assert_eq!(
+        rev.decisions[0],
+        Decision::Mint {
+            split_from: Some("s_A".into())
+        }
+    );
 
     // Through the hysteresis. The larger piece keeps P's id the whole way, and
     // the carved piece resolves to exactly ONE section. The fold fix (a section
