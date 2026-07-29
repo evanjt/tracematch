@@ -203,8 +203,12 @@ pub enum Decision {
     /// This candidate is the ground several priors merged onto; it inherits the
     /// senior prior's id.
     MergeInherit { id: String },
-    /// New ground (or a split loser): the caller mints a fresh id.
-    Mint,
+    /// New ground: the caller mints a fresh id. `split_from` names the prior
+    /// this piece was carved from when the candidate shares a prior's corridor
+    /// but lost the carry to a sibling (a split loser), so the caller can
+    /// record lineage; `None` for genuinely new ground. The link is a pure
+    /// function of the two ground sets, emitted idempotently on every call.
+    Mint { split_from: Option<String> },
 }
 
 impl Decision {
@@ -214,7 +218,17 @@ impl Decision {
             Decision::Carry { id }
             | Decision::SplitInherit { id }
             | Decision::MergeInherit { id } => Some(id),
-            Decision::Mint => None,
+            Decision::Mint { .. } => None,
+        }
+    }
+
+    /// The prior this piece was carved from, if it is a split loser.
+    pub fn split_from(&self) -> Option<&str> {
+        match self {
+            Decision::Mint {
+                split_from: Some(id),
+            } => Some(id),
+            _ => None,
         }
     }
 }
@@ -423,7 +437,14 @@ pub fn plan_identity_tuned(
                     Decision::Carry { id }
                 }
             }
-            None => Decision::Mint,
+            None => Decision::Mint {
+                // A minted candidate that still nominated a same-corridor prior
+                // is a split loser: it shares ground with the prior but lost the
+                // carry to a sibling. Record that prior as the parent so lineage
+                // survives ("split into X and Y"). A candidate that nominated no
+                // prior is genuinely new ground.
+                split_from: cand_pick[j].map(|i| prior[i].id.clone()),
+            },
         })
         .collect();
 
@@ -622,6 +643,11 @@ pub enum CandidateFate {
 pub struct CandidateResolution {
     pub id: String,
     pub fate: CandidateFate,
+    /// The visible id of the prior this candidate was carved from, set only on
+    /// a freshly minted split loser (fate [`Minted`](CandidateFate::Minted)).
+    /// A restored or carried candidate, and genuinely new ground, leave it
+    /// `None`. Lets the caller store lineage without re-deriving the graph.
+    pub split_from: Option<String>,
 }
 
 /// The assign-once identity registry plus its hysteresis debounce. Holds the
@@ -740,6 +766,10 @@ impl HysteresisState {
             candidate_ids[j] = id.to_string();
         }
         let mut fates: Vec<Option<CandidateFate>> = vec![None; next.len()];
+        // Parallel to `next`: the split parent a minted loser carried, surfaced
+        // on its resolution. Only a fresh mint takes one; a restore comes back
+        // as itself.
+        let mut split_froms: Vec<Option<String>> = vec![None; next.len()];
 
         let mut new_visible: BTreeMap<String, HeldSection> = BTreeMap::new();
         let mut new_pending: BTreeMap<String, Pending> = BTreeMap::new();
@@ -789,7 +819,7 @@ impl HysteresisState {
 
         // Mints, immediate. A re-emerged ground restores its tombstoned id.
         for (j, d) in plan.decisions.iter().enumerate() {
-            if !matches!(d, Decision::Mint) {
+            if !matches!(d, Decision::Mint { .. }) {
                 continue;
             }
             let cand = &next[j];
@@ -806,6 +836,7 @@ impl HysteresisState {
                 let id = format!("s_{:06}", self.ordinal);
                 candidate_ids[j] = id.clone();
                 fates[j] = Some(CandidateFate::Minted);
+                split_froms[j] = d.split_from().map(str::to_string);
                 new_visible.insert(
                     id,
                     HeldSection {
@@ -825,9 +856,11 @@ impl HysteresisState {
         let resolutions = candidate_ids
             .into_iter()
             .zip(fates)
-            .map(|(id, fate)| CandidateResolution {
+            .zip(split_froms)
+            .map(|((id, fate), split_from)| CandidateResolution {
                 id,
                 fate: fate.expect("every candidate resolves exactly once"),
+                split_from,
             })
             .collect();
         (out, resolutions)
@@ -1029,7 +1062,8 @@ mod tests {
         let prior = vec![prior("s_1", line(46.0, 7.0, 100), 1, 5)];
         let next = vec![cand(line(46.0, 9.0, 100), 3)];
         let plan = plan_identity(&prior, &next);
-        assert_eq!(plan.decisions, vec![Decision::Mint]);
+        // Disjoint ground: a plain mint with no split parent.
+        assert_eq!(plan.decisions, vec![Decision::Mint { split_from: None }]);
         assert_eq!(
             plan.retired,
             vec![Retirement {
@@ -1050,9 +1084,16 @@ mod tests {
         let prior = vec![prior("s_1", p, 1, 9)];
         let next = vec![cand(c1, 4), cand(c2, 4)];
         let plan = plan_identity(&prior, &next);
+        // C2 shares s_1's corridor but lost the carry to C1, so it mints with
+        // s_1 recorded as its split parent.
         assert_eq!(
             plan.decisions,
-            vec![Decision::SplitInherit { id: "s_1".into() }, Decision::Mint]
+            vec![
+                Decision::SplitInherit { id: "s_1".into() },
+                Decision::Mint {
+                    split_from: Some("s_1".into())
+                }
+            ]
         );
         assert!(plan.retired.is_empty());
     }
@@ -1073,7 +1114,12 @@ mod tests {
             forward.decisions[0],
             Decision::SplitInherit { id: "s_1".into() }
         );
-        assert_eq!(forward.decisions[1], Decision::Mint);
+        assert_eq!(
+            forward.decisions[1],
+            Decision::Mint {
+                split_from: Some("s_1".into())
+            }
+        );
 
         let reversed = plan_identity(&prior, &[cand(east, 4), cand(west, 4)]);
         // west is now index 1, and must still be the one that inherits.
@@ -1081,7 +1127,12 @@ mod tests {
             reversed.decisions[1],
             Decision::SplitInherit { id: "s_1".into() }
         );
-        assert_eq!(reversed.decisions[0], Decision::Mint);
+        assert_eq!(
+            reversed.decisions[0],
+            Decision::Mint {
+                split_from: Some("s_1".into())
+            }
+        );
     }
 
     #[test]

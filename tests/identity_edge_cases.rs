@@ -337,7 +337,12 @@ fn duplicate_candidates_resolve_deterministically() {
     let plan = plan_identity(&held, &next);
     assert_eq!(
         plan.decisions,
-        vec![Decision::SplitInherit { id: "s_1".into() }, Decision::Mint]
+        vec![
+            Decision::SplitInherit { id: "s_1".into() },
+            Decision::Mint {
+                split_from: Some("s_1".into())
+            }
+        ]
     );
     assert!(plan.retired.is_empty());
     assert_eq!(plan, plan_identity(&held, &next));
