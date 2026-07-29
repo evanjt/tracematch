@@ -399,6 +399,60 @@ fn default_policy_delta_is_internally_consistent() {
 }
 
 #[test]
+fn split_loser_carries_its_parent_link_on_the_fold() {
+    // Scenario: the late fork re-cuts the trunk. The piece that does not
+    // inherit the trunk's id is `added`, and its `added_split_from` names
+    // the trunk it was carved from, so a caller can record "split into X
+    // and Y" without re-deriving the graph.
+    let tracks = shapes::late_fork(6, 6);
+    let sports: HashMap<String, String> = shapes::pooled(&tracks);
+    let cfg = SectionConfig::default();
+    let mut cache = SectionEvidenceCache::new();
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut catalogue: Vec<FrequentSection> = Vec::new();
+    let mut saw_split_lineage = false;
+
+    for (id, pts) in &tracks {
+        pool.push((id.clone(), pts.clone()));
+        let new_ids = [pool.last().unwrap().0.as_str()];
+        let prior = catalogue.clone();
+        let res = detect_sections_unified_incremental_cached(
+            &mut cache,
+            &catalogue,
+            &pool,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
+        );
+
+        assert_eq!(
+            res.added_split_from.len(),
+            res.added.len(),
+            "the lineage list is parallel to added"
+        );
+        for parent in res.added_split_from.iter().flatten() {
+            assert!(
+                prior.iter().any(|p| p.id == *parent),
+                "a split parent must be a prior that existed before this step"
+            );
+            // A split: the parent this piece was carved from also inherited
+            // its id onto a sibling this step (it appears on the carried
+            // side), so lineage points at a genuine ancestor, not a stranger.
+            if res.carried.iter().any(|(pid, _)| pid == parent) {
+                saw_split_lineage = true;
+            }
+        }
+        catalogue = res.catalogue;
+    }
+
+    assert!(
+        saw_split_lineage,
+        "the late fork must surface at least one split loser linked to its inheriting parent"
+    );
+}
+
+#[test]
 fn merged_ground_is_not_reported_as_dissolved() {
     // A caller holding two half-corridor sections whose evidence now
     // supports one continuous cut: the senior half carries, the junior's

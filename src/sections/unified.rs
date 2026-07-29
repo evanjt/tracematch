@@ -2899,6 +2899,14 @@ pub struct UnifiedIncrementalResult {
     /// prior partly covered, where a sibling inherited the prior) counts
     /// as added — from the caller's side it is a new list entry.
     pub added: Vec<FrequentSection>,
+    /// Parallel to [`added`](Self::added): the prior id each added section was
+    /// carved from when it is a split loser (it shares a prior's corridor but a
+    /// sibling inherited that prior), else `None`. The caller records lineage
+    /// ("split into X and Y") without re-deriving the graph. On this path the
+    /// prior ids are the caller's own section ids, so no id translation is
+    /// needed; it mirrors [`CandidateResolution::split_from`] on the visible
+    /// path so the lab replay and the engine see the same lineage.
+    pub added_split_from: Vec<Option<String>>,
     /// Prior sections whose ground decisively left the catalogue (the
     /// non-monotone case). Ground that survived under another id is in
     /// `merged`, not here.
@@ -3242,6 +3250,7 @@ fn resolve_fold(
     let reserved: HashSet<String> = frozen_out.iter().map(|s| s.id.clone()).collect();
     let mut catalogue: Vec<FrequentSection> = Vec::with_capacity(fresh.len());
     let mut added = Vec::new();
+    let mut added_split_from = Vec::new();
     for (j, mut cand) in fresh.into_iter().enumerate() {
         if suppressed[j] {
             continue;
@@ -3257,7 +3266,10 @@ fn resolve_fold(
                 }
                 carried.push((prior.id.clone(), cand.id.clone()));
             }
-            None => added.push(cand.clone()),
+            None => {
+                added.push(cand.clone());
+                added_split_from.push(plan.decisions[j].split_from().map(str::to_string));
+            }
         }
         catalogue.push(cand);
     }
@@ -3266,6 +3278,7 @@ fn resolve_fold(
     UnifiedIncrementalResult {
         catalogue,
         added,
+        added_split_from,
         dissolved,
         merged,
         changed,
