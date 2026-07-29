@@ -126,6 +126,119 @@ fn withheld_recuts_are_observable_not_silent() {
     );
 }
 
+/// Order-insensitive catalogue identity, mirroring the batch-parity
+/// helper in `unified_contracts.rs`: everything that defines the
+/// catalogue as a pure function of the activity set.
+fn normalise(sections: &[FrequentSection]) -> String {
+    let mut rows: Vec<String> = sections
+        .iter()
+        .map(|s| {
+            let coords: Vec<(i64, i64)> = s
+                .polyline
+                .iter()
+                .map(|p| {
+                    (
+                        (p.latitude * 1e6).round() as i64,
+                        (p.longitude * 1e6).round() as i64,
+                    )
+                })
+                .collect();
+            let mut acts = s.activity_ids.clone();
+            acts.sort();
+            acts.dedup();
+            format!(
+                "{}|{}|{}|{}|{:.0}|{:?}",
+                s.id,
+                s.representative_activity_id,
+                s.visit_count,
+                acts.join(","),
+                s.distance_meters,
+                coords
+            )
+        })
+        .collect();
+    rows.sort();
+    rows.join("\n")
+}
+
+#[test]
+fn unpin_releases_the_withheld_recut() {
+    // Pin the trunk after the six straight outings, drip the six branch
+    // outings (the junction re-cut is withheld into `held`), then clear
+    // the pin and fold once more over the same pool with no new
+    // activity. The policy is per call and discovery was never altered
+    // by the pin, so the very next fold emits the released re-cut: the
+    // trunk lands in `changed`, nothing stays in `held`, and the
+    // catalogue converges to the from-scratch batch over the pool.
+    use tracematch::detect_sections_unified;
+
+    let tracks = shapes::late_fork(6, 6);
+    let sports: HashMap<String, String> = shapes::pooled(&tracks);
+    let cfg = SectionConfig::default();
+    let mut cache = SectionEvidenceCache::new();
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut catalogue: Vec<FrequentSection> = Vec::new();
+    let mut policy = SectionUpdatePolicy::default();
+    let mut trunk_id = String::new();
+    let mut withheld = false;
+
+    for (step, (id, pts)) in tracks.iter().enumerate() {
+        pool.push((id.clone(), pts.clone()));
+        let new_ids = [pool.last().unwrap().0.as_str()];
+        let res = detect_sections_unified_incremental_cached_with_policy(
+            &mut cache,
+            &catalogue,
+            &pool,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
+            &policy,
+        );
+        if !trunk_id.is_empty() {
+            withheld |= res.held.iter().any(|h| h.previous.id == trunk_id);
+        }
+        catalogue = res.catalogue;
+        if step + 1 == 6 {
+            policy.pinned_ids = catalogue.iter().map(|s| s.id.clone()).collect();
+            assert_eq!(policy.pinned_ids.len(), 1, "one trunk section at pin time");
+            trunk_id = policy.pinned_ids[0].clone();
+        }
+    }
+    assert!(
+        withheld,
+        "the trunk re-cut must have been withheld while pinned"
+    );
+
+    policy.pinned_ids.clear();
+    let res = detect_sections_unified_incremental_cached_with_policy(
+        &mut cache,
+        &catalogue,
+        &pool,
+        &[],
+        &[],
+        &sports,
+        &cfg,
+        &policy,
+    );
+    assert!(res.held.is_empty(), "an unpinned fold withholds nothing");
+    assert!(
+        res.changed.iter().any(|c| c.previous.id == trunk_id),
+        "the released re-cut must land as a visible geometry change on the trunk"
+    );
+    assert!(
+        res.carried.iter().any(|(p, _)| p == &trunk_id),
+        "the trunk's ground survives under the fresh cut"
+    );
+
+    let batch = detect_sections_unified(&pool, &[], &sports, &cfg);
+    assert_eq!(
+        normalise(&res.catalogue),
+        normalise(&batch),
+        "clearing the pin must converge the catalogue to the from-scratch batch"
+    );
+}
+
 #[test]
 fn pinned_evidence_grows_append_only_on_frozen_geometry() {
     // Branch outings still traverse the trunk's first kilometre, so the
