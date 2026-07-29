@@ -1364,7 +1364,7 @@ mod tests {
     /// merge floor 0.0), the pending kind flips Dissolve -> ReCut -> Dissolve,
     /// and each flip resets the streak, so the section never tombstones.
     #[test]
-    #[ignore = "known limit: needs a flapping batch (candidate present every second detect), which pool-monotone detection should not produce; measure kind-flip cycles in the D2 corpus replay before designing a fix"]
+    #[ignore = "known limit: the D2 corpus replay measured the kind flips (sion 85 across 44 ids, max 7 per id; fullcorpus 685 across 208, max 15) and the pinned stale visible sections they cause (sion 10 of 66, fullcorpus 22 of 217); fix rides D5 alongside per-id retire reasons"]
     fn flickering_marginal_capture_must_not_pin_a_dead_section() {
         let ground = line(46.0, 7.0, 100);
         let mut state = HysteresisState::default();
