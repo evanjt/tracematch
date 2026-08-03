@@ -31,6 +31,7 @@ mod flow_graph;
 mod identity;
 pub mod incremental;
 mod medoid;
+mod naming;
 pub mod optimized;
 mod overlap;
 mod portions;
@@ -82,6 +83,13 @@ pub use identity::{
     IdentityParams, IdentityPlan, PriorSection, RECUT_AGREEMENT, RetireReason, Retirement,
     StepOutcome, dissolve_pressure, mutual_overlap, plan_identity, plan_identity_tuned,
     shares_ground,
+};
+// Named-corridor resolution scoring (D3 ride-along): the pure layer decides
+// which visible section carries a name; the engine owns intent storage and
+// SQL.
+pub use naming::{
+    CORE_FLOOR_M, CORE_TRIM_FRAC, COVERAGE_TIE, NamedCandidate, NamedScore, OFFSET_CEILING_M,
+    PART_FLOOR, coverage_and_offset, score_named_candidate, select_candidate, trim_core,
 };
 
 pub use unified::{
