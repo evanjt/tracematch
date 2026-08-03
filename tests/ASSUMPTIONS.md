@@ -64,8 +64,12 @@ ignore reason.
 | `capture_rotation_must_not_pin_a_dead_section` | A marginal capture flips the pending kind and resets the dissolve streak, so a dead section never retires while neighbours keep adopting (sion 10/66 visible pinned, fullcorpus 22/217) |
 | `kind_flip_oscillation_converges` | ReCut and Dissolve pendings alternate without progress (corpus max 15 flips per id); neither ever fires |
 | `empty_candidate_does_not_mint_per_step` | An empty polyline edges with nothing, including its own held copy, so one degenerate detector output mints a fresh id every step |
-| veloqrs `grave_restore_survives_restart` | The identity blob fails its own postcard decode, so every restart reseeds and silently drops graves, tombstones, and debounce streaks |
 | veloqrs `durable_claim_mid_tombstone_clears_the_grave` | Relinquish scans visible rows only, so a durable claim on tombstoned ground pins the grave forever |
+
+Ungated: veloqrs `grave_restore_survives_restart` is green — the identity
+blob is rmp-encoded (blob version 2), whose length-prefixed arrays recover
+the trailing skip-if-None fields that desynced postcard's positional
+stream. A v1 blob reseeds by version tag, the same outcome it always got.
 
 ## Contracts that land with later tranches
 
