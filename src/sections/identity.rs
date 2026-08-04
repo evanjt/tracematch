@@ -17,9 +17,13 @@
 //!   at least 0.6 at 50 m). tracematch emits ground; the caller supplies the
 //!   opaque ids. This decides only which candidate inherits which prior id.
 //! - [`HysteresisState::step`] applies a plan through a debounce: additions are
-//!   immediate, but a dissolve or a re-cut only fires once the batch has agreed
-//!   for `k` consecutive detects. It is a debounce, not a freeze: a genuinely
-//!   sustained change still applies (after `k`).
+//!   immediate, but a dissolve or a re-cut only fires once the batch has
+//!   pressed the change for `k` detects uninterrupted by a decisive
+//!   continuation (an agreement carry, or the other change firing). The two
+//!   streaks accumulate through each other's steps, so a marginal capture
+//!   cannot erase absence evidence and absence cannot erase re-cut evidence.
+//!   It is a debounce, not a freeze: a genuinely sustained change still
+//!   applies (after `k`).
 //!
 //! Identity lives in the engine (veloqrs) in production; this is the lab-first
 //! prototype that proves the mechanism on the synthetic corpora before the
@@ -69,8 +73,14 @@ pub const DISSOLVE_PRESSURE_HI: f64 = 0.7;
 pub const DEFAULT_K: u8 = 3;
 
 /// Fraction of `samples` within `tol_m` of any point on `line`. The directional
-/// half of the coverage metric.
+/// half of the coverage metric. Two empty grounds are indistinguishable, so
+/// both-empty is vacuously full coverage: a degenerate detector output carries
+/// its held copy instead of dissolving and re-minting an id every detect. One
+/// empty side against real ground is no evidence of sharing and scores 0.
 fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
+    if samples.is_empty() && line.is_empty() {
+        return 1.0;
+    }
     if samples.is_empty() || line.is_empty() {
         return 0.0;
     }
@@ -336,6 +346,17 @@ pub fn plan_identity_tuned(
     let mut contained = vec![vec![false; nc]; np];
     for (i, p) in prior.iter().enumerate() {
         for (j, c) in next.iter().enumerate() {
+            // An empty ground has an inverted padded box, so it would never
+            // pass the gate; pair two empties directly (vacuous coverage,
+            // see `coverage`) so the degenerate candidate carries its holder.
+            if p.polyline.is_empty() || c.polyline.is_empty() {
+                if p.polyline.is_empty() && c.polyline.is_empty() {
+                    edge[i][j] = true;
+                    mo[i][j] = 1.0;
+                    contained[i][j] = true;
+                }
+                continue;
+            }
             let (a, b) = (p_bb[i], c_bb[j]);
             if a.0 > b.1 || b.0 > a.1 || a.2 > b.3 || b.2 > a.3 {
                 continue;
@@ -572,19 +593,26 @@ struct HeldSection {
     first_seen: u64,
 }
 
-/// An in-flight debounce toward a dissolve or a re-cut of one stable id.
+/// The debounce ledger of one visible id: both directions' streaks held
+/// together, so neither kind of step erases the other's evidence. A frozen
+/// carry advances the re-cut streak and preserves the dissolve streak; a
+/// retiring plan advances the dissolve streak and preserves the re-cut
+/// streak; only a decisive continuation (an agreement carry, or a fired
+/// change) clears the ledger. The single-`kind` predecessor reset the other
+/// streak on every flip, so a marginal capture rotating with absence pinned a
+/// dead id forever (the D2 corpus replay's stale visible-only sections) and
+/// alternating plans never converged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {
-    kind: PendingKind,
-    streak: u8,
-    /// The batch geometry a re-cut will snap to at `k`. `None` for a dissolve.
+    /// Retiring plans since the last decisive continuation.
+    dissolve_streak: u8,
+    /// Frozen carries since the last decisive continuation.
+    recut_streak: u8,
+    /// The batch geometry a re-cut will snap to at `k`: refreshed on every
+    /// frozen carry, kept through retiring steps (the id keeps competing on
+    /// the geometry it is re-cutting to). `None` while only absence has
+    /// accumulated.
     target: Option<CandidateSection>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum PendingKind {
-    Dissolve,
-    ReCut,
 }
 
 /// What a held section should become after one step. Returned by the appliers
@@ -616,6 +644,15 @@ pub struct StepOutcome {
     pub recut_applied: usize,
     /// Ids carrying an active debounce after the step.
     pub debouncing: usize,
+    /// The fired retirements, each with the reason the plan gave at fire time
+    /// (gone ground, or merged into a named survivor). The emitter's per-id
+    /// record; `dissolved` is its length. Mints and restores need no list —
+    /// the parallel [`CandidateResolution`]s already name them.
+    pub retired: Vec<Retirement>,
+    /// The ids whose sustained re-cut fired this step, in visible-id order.
+    /// `recut_applied` is its length; the adopted geometry is the resolution
+    /// carrying each id.
+    pub recut_ids: Vec<String>,
 }
 
 /// How one candidate entered the visible view this step. The mirroring
@@ -720,13 +757,9 @@ impl HysteresisState {
             .visible
             .iter()
             .map(|(id, h)| {
-                let polyline = match self.pending.get(id) {
-                    Some(Pending {
-                        kind: PendingKind::ReCut,
-                        target: Some(t),
-                        ..
-                    }) => t.polyline.clone(),
-                    _ => h.polyline.clone(),
+                let polyline = match self.pending.get(id).and_then(|p| p.target.as_ref()) {
+                    Some(t) => t.polyline.clone(),
+                    None => h.polyline.clone(),
                 };
                 PriorSection {
                     id: id.clone(),
@@ -787,8 +820,8 @@ impl HysteresisState {
             let carried_j = carried.get(id.as_str()).copied();
             let action = if let Some(j) = carried_j {
                 self.apply_carry(&id, &held, &next[j], &mut out)
-            } else if retired.contains_key(id.as_str()) {
-                self.apply_retire(&id, &held, &mut out)
+            } else if let Some(reason) = retired.get(id.as_str()) {
+                self.apply_retire(&id, &held, reason, &mut out)
             } else {
                 // Unreachable in a correct plan; hold defensively rather than
                 // silently drop a section.
@@ -898,10 +931,14 @@ impl HysteresisState {
             // Extents agree: adopt the batch geometry, clear any debounce.
             return HeldAction::Keep(adopted);
         }
-        // Material re-cut: debounce, folding visits but freezing geometry.
-        let streak = self.continued_streak(id, PendingKind::ReCut) + 1;
+        // Material re-cut: debounce, folding visits but freezing geometry. The
+        // dissolve streak rides along untouched, so a marginal capture cannot
+        // erase the absence evidence a rotation accumulated.
+        let ledger = self.pending.get(id);
+        let streak = ledger.map_or(0, |p| p.recut_streak).saturating_add(1);
         if streak >= self.params.k {
             out.recut_applied += 1;
+            out.recut_ids.push(id.to_string());
             HeldAction::Keep(adopted)
         } else {
             let frozen = HeldSection {
@@ -912,8 +949,8 @@ impl HysteresisState {
             HeldAction::KeepPending(
                 frozen,
                 Pending {
-                    kind: PendingKind::ReCut,
-                    streak,
+                    dissolve_streak: ledger.map_or(0, |p| p.dissolve_streak),
+                    recut_streak: streak,
                     target: Some(cand.clone()),
                 },
             )
@@ -921,8 +958,11 @@ impl HysteresisState {
     }
 
     /// Decide a retired section: debounce the plan's retirement by COUNT and
-    /// tombstone it once the plan has retired it for `k` consecutive detects,
-    /// whether or not its ground stays covered.
+    /// tombstone it once the plan has retired it for `k` detects uninterrupted
+    /// by a decisive continuation, whether or not its ground stays covered.
+    /// The fired retirement is reported per-id with the reason this step's
+    /// plan gave (the fire-time reason: what was true when the change became
+    /// visible, not when the streak began).
     ///
     /// Both a merge-away and a plain dissolve debounce identically here. The old
     /// gate held a dissolve until [`dissolve_pressure`] cleared a threshold, but
@@ -934,42 +974,45 @@ impl HysteresisState {
     /// so retires on the same count. A non-debounced pressure fast-path is
     /// deliberately NOT used: it would let a single detect flip a visible
     /// section, breaking single-add stability.
-    fn apply_retire(&self, id: &str, held: &HeldSection, out: &mut StepOutcome) -> HeldAction {
-        let streak = self.continued_streak(id, PendingKind::Dissolve) + 1;
+    fn apply_retire(
+        &self,
+        id: &str,
+        held: &HeldSection,
+        reason: &RetireReason,
+        out: &mut StepOutcome,
+    ) -> HeldAction {
+        let ledger = self.pending.get(id);
+        let streak = ledger.map_or(0, |p| p.dissolve_streak).saturating_add(1);
         if streak >= self.params.k {
             out.dissolved += 1;
+            out.retired.push(Retirement {
+                id: id.to_string(),
+                reason: reason.clone(),
+            });
             HeldAction::Tombstone(held.clone())
         } else {
             HeldAction::KeepPending(
                 held.clone(),
                 Pending {
-                    kind: PendingKind::Dissolve,
-                    streak,
-                    target: None,
+                    dissolve_streak: streak,
+                    recut_streak: ledger.map_or(0, |p| p.recut_streak),
+                    target: ledger.and_then(|p| p.target.clone()),
                 },
             )
         }
     }
 
-    /// The streak already accumulated for `id` toward `kind`, or 0 if the id had
-    /// no pending of that kind last step (a change of direction resets it).
-    fn continued_streak(&self, id: &str, kind: PendingKind) -> u8 {
-        match self.pending.get(id) {
-            Some(p) if p.kind == kind => p.streak,
-            _ => 0,
-        }
-    }
-
-    /// The tombstoned id whose ground the given candidate re-forms, if any. The
+    /// The tombstoned id whose ground the given candidate re-forms, if any. A
+    /// restore needs MUTUAL coverage: the one-way tolerance `shares_ground`
+    /// grants extent growth would also resurrect a dead id onto a spur that is
+    /// mostly foreign ground (the capture-rotation pinning's second half). The
     /// best mutual overlap wins; BTreeMap iteration keeps it deterministic.
     fn match_tombstone(&self, polyline: &[GpsPoint]) -> Option<String> {
         let mut best: Option<(String, f64)> = None;
         for (id, h) in &self.tombstones {
-            if shares_ground(polyline, &h.polyline) {
-                let mo = mutual_overlap(polyline, &h.polyline);
-                if best.as_ref().is_none_or(|(_, bmo)| mo > *bmo) {
-                    best = Some((id.clone(), mo));
-                }
+            let mo = mutual_overlap(polyline, &h.polyline);
+            if mo >= CARRY_COVERAGE && best.as_ref().is_none_or(|(_, bmo)| mo > *bmo) {
+                best = Some((id.clone(), mo));
             }
         }
         best.map(|(id, _)| id)
@@ -1003,6 +1046,13 @@ impl HysteresisState {
     /// Whether `id` is currently tombstoned (dissolved, retained for re-emergence).
     pub fn is_tombstoned(&self, id: &str) -> bool {
         self.tombstones.contains_key(id)
+    }
+
+    /// The ground retained under a tombstoned `id`, if any. A stateful caller
+    /// sweeps this when ownership of dead ground passes elsewhere (a durable
+    /// user claim), so the tombstone does not outlive the ground it guards.
+    pub fn tombstone_ground_of(&self, id: &str) -> Option<&[GpsPoint]> {
+        self.tombstones.get(id).map(|h| h.polyline.as_slice())
     }
 
     /// Tombstoned ids, sorted.
@@ -1410,12 +1460,13 @@ mod tests {
 
     /// Scenario: a section's ground stops being ridden, but a spur sharing
     /// 70% of the dead footprint one-way flickers past every second detect.
-    /// Expected behaviour: the dead section still retires. Today the held
-    /// footprint captures the spur (edge on one-way coverage, seniority at
-    /// merge floor 0.0), the pending kind flips Dissolve -> ReCut -> Dissolve,
-    /// and each flip resets the streak, so the section never tombstones.
+    /// Expected behaviour: the dead section still retires. The held footprint
+    /// captures the spur (edge on one-way coverage, seniority at merge floor
+    /// 0.0), but a frozen carry preserves the dissolve streak, so the absence
+    /// evidence keeps accumulating through the flicker and the tombstone
+    /// fires; the mostly-foreign spur then fails the mutual restore test and
+    /// mints its own id instead of resurrecting the dead one.
     #[test]
-    #[ignore = "known limit: the D2 corpus replay measured the kind flips (sion 85 across 44 ids, max 7 per id; fullcorpus 685 across 208, max 15) and the pinned stale visible sections they cause (sion 10 of 66, fullcorpus 22 of 217); fix rides D5 alongside per-id retire reasons"]
     fn flickering_marginal_capture_must_not_pin_a_dead_section() {
         let ground = line(46.0, 7.0, 100);
         let mut state = HysteresisState::default();

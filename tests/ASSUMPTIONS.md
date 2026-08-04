@@ -53,23 +53,36 @@ mirror, pinned after the D2 corpus gate. Pure-layer contracts live in
 | Constants sit on plateaus: one-step tunables neighbours keep the catalogue invariant-clean and the count flat | `commuter_corridor_holds_across_pass_neighbours`, `oval_stem_holds_across_pass_neighbours` |
 | The registry mirrors the pure layer mechanically: rows equal pure grounds after every apply, graves track tombstones, every promotion relinquishes, durable rows never collide | veloqrs `mirror_rows_equal_pure_grounds`, `graves_track_tombstones_exactly`, `*_relinquishes_and_survives_resync` (six mutations), `durable_rows_never_collide` |
 
-## Red gates (known defects, `#[ignore]`, fixes ride D5)
+## Red gates
 
-Written red on purpose so the fix ungates them instead of rediscovering
-the defect. Corpus evidence from the D2 gate replay is quoted in each
-ignore reason.
+None open. Each was written red on purpose so the fix ungated it instead
+of rediscovering the defect; corpus evidence from the D2 gate replay is
+quoted in the histories below.
 
-| Gate | Defect it pins |
-|---|---|
-| `capture_rotation_must_not_pin_a_dead_section` | A marginal capture flips the pending kind and resets the dissolve streak, so a dead section never retires while neighbours keep adopting (sion 10/66 visible pinned, fullcorpus 22/217) |
-| `kind_flip_oscillation_converges` | ReCut and Dissolve pendings alternate without progress (corpus max 15 flips per id); neither ever fires |
-| `empty_candidate_does_not_mint_per_step` | An empty polyline edges with nothing, including its own held copy, so one degenerate detector output mints a fresh id every step |
-| veloqrs `durable_claim_mid_tombstone_clears_the_grave` | Relinquish scans visible rows only, so a durable claim on tombstoned ground pins the grave forever |
+Ungated by the D5 grave sweep: veloqrs
+`durable_claim_mid_tombstone_clears_the_grave` — the apply sweeps
+tombstoned ground against the durable-intent grounds, so a user claim on
+dead ground clears the grave/tombstone pair that relinquish (by real id)
+could never reach.
 
-Ungated: veloqrs `grave_restore_survives_restart` is green — the identity
-blob is rmp-encoded (blob version 2), whose length-prefixed arrays recover
-the trailing skip-if-None fields that desynced postcard's positional
+Ungated by the D5 streak ledger (both debounce directions accumulate
+through each other's steps; only a decisive continuation clears them; a
+restore needs mutual coverage; both-empty grounds share vacuously):
+`capture_rotation_must_not_pin_a_dead_section`,
+`kind_flip_oscillation_converges`, `empty_candidate_does_not_mint_per_step`,
+and the module-level `flickering_marginal_capture_must_not_pin_a_dead_section`.
+New contracts pinning the mechanism:
+`foreign_extension_does_not_restore_a_tombstone` (a mostly-foreign spur
+mints, never resurrects a dead id) and
+`fired_changes_report_ids_and_reasons` (per-id retirements with fire-time
+reasons plus fired re-cut ids on `StepOutcome`, the D5 emitter's feed).
+
+Ungated earlier: veloqrs `grave_restore_survives_restart` is green — the
+identity blob is rmp-encoded (blob version 2), whose length-prefixed arrays
+recover the trailing skip-if-None fields that desynced postcard's positional
 stream. A v1 blob reseeds by version tag, the same outcome it always got.
+Blob version 3 accompanies the streak ledger (the debounce record reshaped),
+reseeding v2 blobs by tag.
 
 ## Contracts that land with later tranches
 
@@ -77,7 +90,7 @@ stream. A v1 blob reseeds by version tag, the same outcome it always got.
 |---|---|
 | One engine, no cosmetic method selector | C4 deletion, compiler-verified |
 | Split lineage: a mint carries the prior it was carved from | D3; `fate_membership_property` is the reconcile spec it extends |
-| Per-id retire reasons at fire time | D5, ungating the red gates above |
+| Per-id retire reasons at fire time | Landed with the D5 streak ledger: `fired_changes_report_ids_and_reasons` |
 
 ## Defects these contracts caught at birth (2026-07-21)
 

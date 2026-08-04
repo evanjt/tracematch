@@ -64,7 +64,11 @@ pub fn trim_core(footprint: &[GpsPoint]) -> Vec<GpsPoint> {
         .filter(|(_, d)| **d >= lo && **d <= hi)
         .map(|(p, _)| p.clone())
         .collect();
-    if core.len() < 2 { footprint.to_vec() } else { core }
+    if core.len() < 2 {
+        footprint.to_vec()
+    } else {
+        core
+    }
 }
 
 /// Coverage of `core` by `line` at the ground tolerance, and the mean
