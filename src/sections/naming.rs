@@ -62,7 +62,7 @@ pub fn trim_core(footprint: &[GpsPoint]) -> Vec<GpsPoint> {
         .iter()
         .zip(&cum)
         .filter(|(_, d)| **d >= lo && **d <= hi)
-        .map(|(p, _)| p.clone())
+        .map(|(p, _)| *p)
         .collect();
     if core.len() < 2 {
         footprint.to_vec()
