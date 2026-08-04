@@ -88,8 +88,9 @@ pub use identity::{
 // which visible section carries a name; the engine owns intent storage and
 // SQL.
 pub use naming::{
-    CORE_FLOOR_M, CORE_TRIM_FRAC, COVERAGE_TIE, NamedCandidate, NamedScore, OFFSET_CEILING_M,
-    PART_FLOOR, coverage_and_offset, score_named_candidate, select_candidate, trim_core,
+    CORE_FLOOR_M, CORE_TRIM_FRAC, COVERAGE_TIE, DIRECTION_TOL_DEG, NamedCandidate, NamedScore,
+    OFFSET_CEILING_M, PART_FLOOR, coverage_and_offset, score_named_candidate, select_candidate,
+    split_direction, trim_core,
 };
 
 pub use unified::{

@@ -160,6 +160,46 @@ pub fn select_candidate(candidates: &[NamedCandidate]) -> Option<(usize, f64)> {
         .map(|(i, c)| (i, c.score.coverage))
 }
 
+/// Angular half-width around a cardinal within which a split sibling earns a
+/// directional discriminator. Beyond it the direction word would be a guess,
+/// so the caller falls back to an ordinal.
+pub const DIRECTION_TOL_DEG: f64 = 30.0;
+
+/// The locale-neutral direction token of a freshly split sibling relative to
+/// the piece that kept the id: `Some("north" | "east" | "south" | "west")`
+/// when the bearing between the two midpoints lies within
+/// [`DIRECTION_TOL_DEG`] of that cardinal, `None` when it is diagonal or the
+/// midpoints coincide (the caller renders an ordinal instead). Pure geometry;
+/// the app renders the token in-locale at read time.
+pub fn split_direction(parent: &[GpsPoint], sibling: &[GpsPoint]) -> Option<&'static str> {
+    let mid = |pts: &[GpsPoint]| -> Option<GpsPoint> {
+        let n = pts.len();
+        (n > 0).then(|| pts[n / 2])
+    };
+    let (p, s) = (mid(parent)?, mid(sibling)?);
+    let dy = s.latitude - p.latitude;
+    let dx = (s.longitude - p.longitude) * p.latitude.to_radians().cos();
+    if dx == 0.0 && dy == 0.0 {
+        return None;
+    }
+    // Compass bearing: 0 = north, clockwise.
+    let bearing = dx.atan2(dy).to_degrees().rem_euclid(360.0);
+    for (cardinal, name) in [
+        (0.0, "north"),
+        (90.0, "east"),
+        (180.0, "south"),
+        (270.0, "west"),
+    ] {
+        let sep = (bearing - cardinal)
+            .abs()
+            .min(360.0 - (bearing - cardinal).abs());
+        if sep <= DIRECTION_TOL_DEG {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +222,28 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn split_direction_names_cardinals_and_refuses_diagonals() {
+        let parent = line(50, 10.0, 0.0);
+        // Same line, continuing north: sibling midpoint due north.
+        let north_piece: Vec<GpsPoint> = (0..50)
+            .map(|i| pt(46.005 + (i as f64 * 10.0) / 111_320.0, 7.0))
+            .collect();
+        assert_eq!(split_direction(&parent, &north_piece), Some("north"));
+        // A parallel corridor 500 m east at the same latitudes: due east.
+        let east_piece = line(50, 10.0, 500.0);
+        assert_eq!(split_direction(&parent, &east_piece), Some("east"));
+        // A 45-degree diagonal sits outside every cardinal's 30-degree band.
+        let diagonal: Vec<GpsPoint> = (0..50)
+            .map(|i| pt(46.005 + (i as f64 * 10.0) / 111_320.0, 7.0065))
+            .collect();
+        assert_eq!(split_direction(&parent, &diagonal), None);
+        // Degenerate inputs never invent a direction.
+        assert_eq!(split_direction(&parent, &[]), None);
+        assert_eq!(split_direction(&[], &parent), None);
+        assert_eq!(split_direction(&parent, &parent), None);
     }
 
     #[test]
