@@ -3,13 +3,13 @@
 //! Every scenario is hand-drawn synthetic ground driven through
 //! `plan_identity` and `HysteresisState`; no corpus data is required.
 //!
-//! The red-gated tests pin defects quantified by the D2 gate replay on both
-//! corpora under the shipped config: pinned stale visible-only sections that
-//! never retire (sion 10 of 66 visible, fullcorpus 22 of 217, settle
-//! trajectories flat) and ReCut <-> Dissolve kind flips (sion 85 across 44
-//! ids, max 7 per id; fullcorpus 685 across 208 ids, max 15). Their fix rides
-//! D5. Everything else is a green contract the veloqrs registry (D3/B4)
-//! builds on.
+//! The pinning pathologies the D2 gate replay quantified on both corpora
+//! (stale visible-only sections that never retire: sion 10 of 66 visible,
+//! fullcorpus 22 of 217; re-cut/dissolve kind flips: sion 85 across 44 ids,
+//! fullcorpus 685 across 208) are fixed by the D5 streak ledger: both
+//! debounce directions accumulate through each other's steps and only a
+//! decisive continuation clears them. Every test here is a green contract
+//! the veloqrs registry and the D5 emitter build on.
 
 use tracematch::geo_utils::haversine_distance;
 use tracematch::sections::{CARRY_COVERAGE, DEFAULT_K, GROUND_TOL_M, RECUT_AGREEMENT};
@@ -70,17 +70,18 @@ fn spur_of(ground: &[GpsPoint]) -> Vec<GpsPoint> {
 }
 
 // ============================================================================
-// Red gates: pinning pathologies measured by the D2 corpus replay
+// Pinning pathologies measured by the D2 corpus replay (fixed in D5)
 // ============================================================================
 
 /// Scenario: a section's ground stops being ridden. The batch is empty for two
-/// detects, then the marginal spur captures the id as a ReCut carry on the
+/// detects, then the marginal spur captures the id as a re-cut carry on the
 /// third, and the cycle repeats: the ground is gone from 8 of 12 detects.
-/// Expected behaviour: the id retires within the run. Today each capture flips
-/// the pending kind and `continued_streak` returns 0 on the flip, so the
-/// dissolve streak never reaches k and the dead id stays visible forever.
+/// Expected behaviour: the id retires within the run. The dissolve streak
+/// survives the marginal capture (a frozen carry preserves it), so the
+/// rotation cannot reset the debounce forever. The D2 corpus replay measured
+/// the pinning this fixes: stale visible-only sections, sion 10 of 66,
+/// fullcorpus 22 of 217, settle trajectories flat.
 #[test]
-#[ignore = "known limit: a marginal capture flips the pending kind and continued_streak resets on the flip, so a rotating spur pins a dead id; D2 corpus replay measured the pinning (stale visible-only sections: sion 10 of 66, fullcorpus 22 of 217, settle flat); fix rides D5 alongside per-id retire reasons"]
 fn capture_rotation_must_not_pin_a_dead_section() {
     let ground = north(46.0, 7.0, 100);
     let spur = spur_of(&ground);
@@ -104,11 +105,12 @@ fn capture_rotation_must_not_pin_a_dead_section() {
 /// Scenario: after minting a full corridor, the batch alternates between the
 /// marginal spur and nothing for 30 detects.
 /// Expected behaviour: the view converges: the id either tombstones or adopts
-/// the spur geometry. Today each alternation flips ReCut <-> Dissolve, each
-/// flip resets the other streak, and neither ever fires, so the id sits on
-/// stale geometry indefinitely.
+/// the spur geometry. Both streaks accumulate through each other's steps
+/// (only a decisive continuation clears the ledger), so one of the two fires
+/// within 2k detects. The D2 corpus replay measured the oscillation this
+/// fixes: 85 kind flips across 44 ids on sion (max 7 per id), 685 across 208
+/// on fullcorpus (max 15).
 #[test]
-#[ignore = "known limit: alternating ReCut <-> Dissolve plans reset each other's streak so neither ever fires; D2 corpus replay: 85 kind flips across 44 ids on sion (max 7 per id), 685 across 208 on fullcorpus (max 15); fix rides D5"]
 fn kind_flip_oscillation_converges() {
     let ground = north(46.0, 7.0, 100);
     let spur = spur_of(&ground);
@@ -134,12 +136,11 @@ fn kind_flip_oscillation_converges() {
 
 /// Scenario: the detector emits one degenerate section with an empty polyline
 /// for six consecutive detects.
-/// Expected behaviour: at most one id is ever minted for it. Today an empty
-/// polyline edges nothing, not even the held copy of itself (`coverage` is 0.0
-/// on empty input and its padded bounding box is inverted), so every detect
-/// retires the previous holder and mints again.
+/// Expected behaviour: at most one id is ever minted for it. Two empty
+/// grounds are indistinguishable, so they share a corridor vacuously
+/// (`coverage` is 1.0 when both sides are empty) and the held copy carries
+/// the id instead of dissolving and re-minting every detect.
 #[test]
-#[ignore = "defect: an empty polyline edges nothing, including its own held copy (coverage 0.0 on empty input, inverted padded bbox), so each detect retires the holder and mints a fresh id; unbounded id churn from one degenerate detector output; fix rides D5"]
 fn empty_candidate_does_not_mint_per_step() {
     let mut state = HysteresisState::default();
     let mut total_minted = 0;
@@ -439,13 +440,53 @@ fn grown_ground_restores_under_old_id() {
     }
     assert!(state.is_tombstoned(&id));
 
-    // shares_ground is one-way tolerant: the tombstoned 100-point ground lies
-    // entirely inside the grown line, so the old id restores and adopts it.
+    // The tombstoned 100-point ground lies entirely inside the grown line and
+    // covers 100/160 of it, so the mutual overlap clears CARRY_COVERAGE: the
+    // old id restores and adopts the grown extent.
     let (out, r) = state.step_assign(&[cand(grown.clone(), 6)]);
     assert_eq!(out.restored, 1);
     assert_eq!(out.minted, 0);
     assert_eq!(r[0].id, id);
     assert_eq!(state.ground_of(&id), Some(grown.as_slice()));
+}
+
+/// Scenario: a dead section's tombstoned ground is one-way covered 70% by a
+/// spur that continues onto a distant corridor, so most of the spur is foreign
+/// ground.
+/// Expected behaviour: the spur mints its own id. Restoring the dead id onto
+/// it would resurrect a section the athlete stopped riding under a corridor
+/// that is mostly somewhere else; a restore needs MUTUAL coverage, not the
+/// one-way tolerance extent growth enjoys.
+#[test]
+fn foreign_extension_does_not_restore_a_tombstone() {
+    let ground = north(46.0, 7.0, 100);
+    let spur = spur_of(&ground);
+    assert!(
+        shares_ground(&ground, &spur),
+        "precondition: the spur passes the one-way ground test"
+    );
+    assert!(
+        mutual_overlap(&ground, &spur) < CARRY_COVERAGE,
+        "precondition: the spur fails the mutual test"
+    );
+
+    let mut state = HysteresisState::default();
+    let (_, r) = state.step_assign(&[cand(ground, 8)]);
+    let id = r[0].id.clone();
+    for _ in 0..DEFAULT_K {
+        state.step(&[]);
+    }
+    assert!(state.is_tombstoned(&id));
+
+    let (out, r) = state.step_assign(&[cand(spur, 3)]);
+    assert_eq!(out.restored, 0, "a mostly-foreign spur must not restore");
+    assert_eq!(out.minted, 1);
+    assert_eq!(r[0].fate, CandidateFate::Minted);
+    assert_ne!(r[0].id, id);
+    assert!(
+        state.is_tombstoned(&id),
+        "the tombstone stays for real ground"
+    );
 }
 
 /// Scenario: a candidate covers both a live prior's ground and a tombstoned
@@ -549,6 +590,66 @@ fn forget_releases_id_forever() {
     assert_eq!(r[0].fate, CandidateFate::Minted);
     assert_ne!(r[0].id, first);
     assert_ne!(r[0].id, second);
+}
+
+// ============================================================================
+// Per-id fire-time reporting (the D5 emitter contract)
+// ============================================================================
+
+/// Scenario: four held corridors; the batch then sustains a union of the
+/// first two (a merge), drops the third (a dissolve), and halves the fourth
+/// (a re-cut) for k detects.
+/// Expected behaviour: nothing is reported per-id until the debounce fires;
+/// on the k-th detect the outcome names each fired id with the reason the
+/// plan gave at fire time. The counts are the lengths of the id lists.
+#[test]
+fn fired_changes_report_ids_and_reasons() {
+    let z = north(46.0, 7.0, 100);
+    let a_half: Vec<GpsPoint> = z[..50].to_vec();
+    let b_half: Vec<GpsPoint> = z[50..].to_vec();
+    let c = north(46.0, 7.02, 100);
+    let d = north(46.0, 7.04, 100);
+    let d_half: Vec<GpsPoint> = d[..50].to_vec();
+
+    let mut state = HysteresisState::default();
+    let (_, r) = state.step_assign(&[cand(a_half, 5), cand(b_half, 5), cand(c, 5), cand(d, 5)]);
+    let (a_id, b_id, c_id, d_id) = (
+        r[0].id.clone(),
+        r[1].id.clone(),
+        r[2].id.clone(),
+        r[3].id.clone(),
+    );
+
+    let batch = vec![cand(z, 10), cand(d_half.clone(), 6)];
+    for step in 0..(DEFAULT_K - 1) {
+        let out = state.step(&batch);
+        assert!(out.retired.is_empty(), "step {step}: nothing fired yet");
+        assert!(out.recut_ids.is_empty(), "step {step}: nothing fired yet");
+    }
+
+    let out = state.step(&batch);
+    assert_eq!(
+        out.retired,
+        vec![
+            Retirement {
+                id: b_id,
+                reason: RetireReason::MergedInto { id: a_id.clone() },
+            },
+            Retirement {
+                id: c_id,
+                reason: RetireReason::Dissolved,
+            },
+        ],
+        "each fired retirement carries its fire-time reason"
+    );
+    assert_eq!(out.dissolved, out.retired.len());
+    assert_eq!(
+        out.recut_ids,
+        vec![a_id.clone(), d_id.clone()],
+        "the union adoption and the halving both fire as re-cuts"
+    );
+    assert_eq!(out.recut_applied, out.recut_ids.len());
+    assert_eq!(state.ground_of(&d_id), Some(d_half.as_slice()));
 }
 
 // ============================================================================
