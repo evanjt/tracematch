@@ -323,13 +323,109 @@ pub fn short_strand(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoint>
 pub fn plain_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
         .map(|i| {
-            let path = densify(&[(-100.0 - 8.0 * i as f64, 0.0), (900.0 + 8.0 * i as f64, 0.0)]);
+            let path = densify(&[
+                (-100.0 - 8.0 * i as f64, 0.0),
+                (900.0 + 8.0 * i as f64, 0.0),
+            ]);
             (
                 format!("cor_{}", i),
                 track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
             )
         })
         .collect()
+}
+
+/// A busy corridor whose traffic scatters wide and incoherently: every
+/// outing rides the full length, but each drifts laterally through its
+/// own deterministic knot sequence (±55 m, knots every 150 m), the way
+/// riders spread across a boulevard's parallel paths. Any one evidence
+/// cell records only the subset that crossed it, and no two outings
+/// share a lane long enough to fake a parallel corridor. The travelling
+/// population is identical everywhere along the corridor; the per-cell
+/// counts are not.
+pub fn scattered_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let lateral = |i: usize, x: f64| -> f64 {
+        let seg = (x / 150.0).floor();
+        let t = x / 150.0 - seg;
+        let knot = |k: f64| {
+            ((i * 73 + (k as i64).rem_euclid(1_000_003) as usize * 37) % 97) as f64 / 96.0 * 110.0
+                - 55.0
+        };
+        let a = knot(seg);
+        let b = knot(seg + 1.0);
+        a + (b - a) * t
+    };
+    (0..outings)
+        .map(|i| {
+            let x0 = -100.0 - 8.0 * i as f64;
+            let x1 = 2900.0 + 8.0 * i as f64;
+            let n = ((x1 - x0) / 10.0).ceil() as usize;
+            let path: Vec<(f64, f64)> = (0..=n)
+                .map(|s| {
+                    let x = x0 + (x1 - x0) * s as f64 / n as f64;
+                    (x, lateral(i, x))
+                })
+                .collect();
+            (
+                format!("scat_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// Two parallel streets 180 m apart spanning the same corridor, west
+/// of them a much busier trunk ending where the busy street begins.
+/// The trunk is accepted first and edge-trims the busy street's
+/// candidate, so the busy street's default becomes its LONGEST pass —
+/// and the longest passes are the swap outings, which cross onto the
+/// quiet street for the middle stretch and run unbroken through the
+/// busy street's capture ring. The shape of a displaced render
+/// claiming ground it never draws.
+pub fn parallel_street(busy: usize, quiet: usize, swap: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out = Vec::new();
+    for i in 0..30 {
+        let path = densify(&[(-900.0 - 8.0 * i as f64, 0.0), (250.0, 0.0)]);
+        out.push((
+            format!("trunk_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(50 + i))),
+        ));
+    }
+    for i in 0..busy {
+        let path = densify(&[
+            (-100.0 - 8.0 * i as f64, 0.0),
+            (1700.0 + 8.0 * i as f64, 0.0),
+        ]);
+        out.push((
+            format!("busy_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+        ));
+    }
+    for i in 0..quiet {
+        let path = densify(&[
+            (-80.0 - 8.0 * i as f64, 180.0),
+            (1680.0 + 8.0 * i as f64, 180.0),
+        ]);
+        out.push((
+            format!("quiet_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(busy + i))),
+        ));
+    }
+    for i in 0..swap {
+        let path = densify(&[
+            (-320.0 - 8.0 * i as f64, 0.0),
+            (560.0, 0.0),
+            (640.0, 180.0),
+            (960.0, 180.0),
+            (1040.0, 0.0),
+            (1920.0 + 8.0 * i as f64, 0.0),
+        ]);
+        out.push((
+            format!("swap_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(busy + quiet + i))),
+        ));
+    }
+    out
 }
 
 /// A shared trunk splitting into two worthy branches: half the outings

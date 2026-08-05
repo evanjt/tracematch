@@ -3264,7 +3264,18 @@ fn detect_for_cluster_with_grid(
                 section.visit_count,
             );
             *section_idx += 1;
-            for p in footprint.iter().step_by(3) {
+            // Occupy the ground of the line the section actually SHOWS,
+            // not the default portion's. The default can run wide of
+            // the render (a trimmed candidate's longest pass walks
+            // every ring-captured excursion, and rules B and D displace
+            // unfaithful or folded defaults), and ground occupied by a
+            // line nobody sees pinches real neighbours into backing off
+            // with nothing drawn in their place. The old default-line
+            // occupation guarded a junction re-rendering short and
+            // bleeding its milling into a re-expanding neighbour; the
+            // faithfulness and fold guards on every render now police
+            // that directly.
+            for p in section.polyline.iter().step_by(3) {
                 accepted_pts
                     .entry(backoff_grid.cell_of(p.latitude, p.longitude))
                     .or_default()

@@ -368,6 +368,63 @@ fn usage_cliff_ends_the_busy_corridor() {
 }
 
 #[test]
+fn scattered_traffic_is_still_one_corridor() {
+    // Scenario: twelve outings ride one corridor, each drifting across
+    // a wide lane band, so any single evidence cell records only the
+    // subset whose lane crossed it. The travelling population is the
+    // same everywhere along the corridor.
+    // Expected behaviour: per-cell count noise is not a usage boundary.
+    // The corridor surfaces whole with an honest count instead of
+    // shattering into fragments that all die below the support floor.
+    let tracks = shapes::scattered_corridor(12);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    let spine = metre_samples(&[(100.0, 0.0), (2800.0, 0.0)], 10.0);
+    assert!(
+        coverage(&spine, &sections, 90.0) >= 0.9,
+        "scattered corridor ground must survive whole (coverage {:.0}%)",
+        coverage(&spine, &sections, 90.0) * 100.0
+    );
+    let busiest = sections.iter().map(|s| s.visit_count).max().unwrap_or(0);
+    assert!(
+        busiest >= 9,
+        "the corridor's population must be counted, not one cell's sample (max {} visits)",
+        busiest
+    );
+}
+
+#[test]
+fn displaced_render_does_not_pinch_the_parallel_street() {
+    // Scenario: a busy street and a quieter parallel street 180 m
+    // away, plus three outings that swap across for the middle stretch.
+    // The swap portions run unbroken through the busy street's capture
+    // ring, so its longest pass walks the quiet street's middle while
+    // the drawn line stays on the busy street (rule B).
+    // Expected behaviour: ground is occupied by the line a section
+    // SHOWS. The quiet street keeps its whole extent — its middle must
+    // not back off against a line nobody sees.
+    let tracks = shapes::parallel_street(16, 5, 3);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_majority_rendered(&tracks, &sections);
+
+    let busy_mid = metre_samples(&[(200.0, 0.0), (1400.0, 0.0)], 10.0);
+    let quiet_mid = metre_samples(&[(700.0, 180.0), (900.0, 180.0)], 10.0);
+    assert!(
+        coverage(&busy_mid, &sections, 60.0) >= 0.8,
+        "the busy street must surface"
+    );
+    assert!(
+        coverage(&quiet_mid, &sections, 60.0) >= 0.8,
+        "quiet street's middle backed off against unrendered ground (coverage {:.0}%)",
+        coverage(&quiet_mid, &sections, 60.0) * 100.0
+    );
+}
+
+#[test]
 fn minority_braid_strand_stays_off_the_body() {
     // Scenario: fourteen outings run one body; five swap onto a strand
     // 180 m north for the middle stretch. The strand is real minority
@@ -463,7 +520,11 @@ fn short_strand_fragment_does_not_bend_the_line() {
     let strand_mid = metre_samples(&[(540.0, 120.0), (580.0, 120.0)], 10.0);
     for s in &sections {
         let on_strand = strand_mid.iter().any(|p| min_dist(p, &s.polyline) < 60.0);
-        assert!(!on_strand, "{}: rendered line walks the minority strand", s.id);
+        assert!(
+            !on_strand,
+            "{}: rendered line walks the minority strand",
+            s.id
+        );
     }
     assert_majority_rendered(&tracks, &sections);
 }
@@ -624,8 +685,7 @@ fn one_trip_ground_is_not_a_section() {
     use tracematch::{Tunables, detect_sections_unified_dated};
     let tracks = shapes::plain_corridor(2);
     let detect_at = |epochs: &[(&str, i64)]| {
-        let map: HashMap<String, i64> =
-            epochs.iter().map(|&(id, e)| (id.to_string(), e)).collect();
+        let map: HashMap<String, i64> = epochs.iter().map(|&(id, e)| (id.to_string(), e)).collect();
         detect_sections_unified_dated(
             &tracks,
             &[],
@@ -1100,4 +1160,3 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
         out.boundaries
     );
 }
-
