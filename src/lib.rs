@@ -91,14 +91,13 @@ pub use sections::{
     detect_sections_from_tracks, detect_sections_multiscale,
     detect_sections_multiscale_with_progress, detect_sections_unified,
     detect_sections_unified_dated, detect_sections_unified_explained,
-    detect_sections_unified_incremental, detect_sections_unified_incremental_dated,
-    detect_sections_unified_incremental_cached,
-    detect_sections_unified_incremental_cached_with_policy, detect_sections_unified_tuned,
-    dissolve_pressure, find_all_track_portions, find_sections_in_route,
-    incremental::IncrementalResult, incremental::detect_sections_incremental, lift_spans,
-    lift_spans_tuned, mutual_overlap, plan_identity, plan_identity_tuned,
-    recalculate_section_polyline, self_pass_penalty, shares_ground, split_section_at_index,
-    split_section_at_point,
+    detect_sections_unified_incremental, detect_sections_unified_incremental_cached,
+    detect_sections_unified_incremental_cached_with_policy,
+    detect_sections_unified_incremental_dated, detect_sections_unified_tuned, dissolve_pressure,
+    find_all_track_portions, find_sections_in_route, incremental::IncrementalResult,
+    incremental::detect_sections_incremental, lift_spans, lift_spans_tuned, mutual_overlap,
+    plan_identity, plan_identity_tuned, recalculate_section_polyline, self_pass_penalty,
+    shares_ground, split_section_at_index, split_section_at_point,
 };
 
 // ============================================================================
