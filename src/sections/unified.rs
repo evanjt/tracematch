@@ -563,6 +563,18 @@ pub fn confirmed_lift_spans_tuned(
         .enumerate()
         .map(|(i, (_, pts))| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
         .collect();
+    rescue_confirmed(candidates, tracks, tun)
+}
+
+/// The cross-track half of [`confirmed_lift_spans_tuned`]: drop any candidate
+/// span some track descends straight (lift lines are never descended). Split
+/// from the per-track candidate scan so the incremental path can reuse cached
+/// candidates while recomputing the rescue over the current membership.
+fn rescue_confirmed(
+    candidates: Vec<Vec<(usize, usize)>>,
+    tracks: &[(&str, &[GpsPoint])],
+    tun: &Tunables,
+) -> Vec<Vec<(usize, usize)>> {
     if candidates.iter().all(|c| c.is_empty()) {
         return candidates;
     }
@@ -661,6 +673,7 @@ fn build_coverage_grid(
     seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
+    lift_memo: &mut HashMap<String, Vec<(usize, usize)>>,
 ) -> CoverageGrid {
     let ref_lat: f64 = {
         // Summed in sorted order: float addition is not permutation
@@ -684,7 +697,20 @@ fn build_coverage_grid(
 
     let fine = CellGrid::new(cell_size_m / tun.pass_subgrid, ref_lat);
 
-    let lift = confirmed_lift_spans_tuned(tracks, seconds, tun);
+    // Candidate spans come from the memo (pure per track); the cross-track
+    // rescue is recomputed over the present membership, so a late straight
+    // descender still clears a span whose candidates were cached earlier.
+    let candidates: Vec<Vec<(usize, usize)>> = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (id, pts))| {
+            lift_memo
+                .entry((*id).to_string())
+                .or_insert_with(|| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
+                .clone()
+        })
+        .collect();
+    let lift = rescue_confirmed(candidates, tracks, tun);
     let keep: Vec<Vec<(usize, usize)>> = tracks
         .iter()
         .enumerate()
@@ -2272,7 +2298,13 @@ fn detect_for_cluster(
         return Vec::new();
     }
     let cell_size = cluster_cell_size(config);
-    let coverage = build_coverage_grid(sport_tracks, sport_seconds, cell_size, tun);
+    let coverage = build_coverage_grid(
+        sport_tracks,
+        sport_seconds,
+        cell_size,
+        tun,
+        &mut HashMap::new(),
+    );
     detect_for_cluster_with_grid(
         sport,
         sport_tracks,
@@ -3410,6 +3442,15 @@ pub struct SectionEvidenceCache {
     /// clusters. Sport is a bucketing key here only, never part of a section's
     /// identity (that is the engine's concern).
     sports: HashMap<String, Vec<ClusterEvidence>>,
+    /// Per-track lift candidate spans ([`lift_spans_tuned`]), keyed by
+    /// activity id. Pure per track, so a cluster rebuild reuses them instead
+    /// of re-scanning every member's points; the cross-track descent rescue
+    /// is recomputed per rebuild (bbox-gated, and free while no member
+    /// carries a candidate). Keyed on id alone: track data is immutable per
+    /// id (the engine drops the whole cache when a track's GPS changes) and
+    /// the tunables are fixed for a cache's lifetime.
+    #[serde(default)]
+    lift_candidates: HashMap<String, Vec<(usize, usize)>>,
 }
 
 impl Default for SectionEvidenceCache {
@@ -3417,6 +3458,7 @@ impl Default for SectionEvidenceCache {
         Self {
             version: EVIDENCE_CACHE_VERSION,
             sports: HashMap::new(),
+            lift_candidates: HashMap::new(),
         }
     }
 }
@@ -3604,10 +3646,11 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     // of touched clusters) = O(N), not the O(N²) of recomputing per new activity.
     // Recompute-once over the final membership equals the batch's per-cluster
     // detect, so `cached == batch` is preserved (the oracle guards it).
+    let lift_memo = &mut cache.lift_candidates;
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
             if c.dirty {
-                recompute_cluster(c, sport, &lookup, config, cell_size, &tun);
+                recompute_cluster(c, sport, &lookup, config, cell_size, &tun, lift_memo);
                 c.dirty = false;
             }
         }
@@ -3735,6 +3778,7 @@ fn recompute_cluster(
     config: &SectionConfig,
     cell_size: f64,
     tun: &Tunables,
+    lift_memo: &mut HashMap<String, Vec<(usize, usize)>>,
 ) {
     if cluster.member_ids.len() < config.min_activities as usize {
         cluster.sections.clear();
@@ -3748,7 +3792,7 @@ fn recompute_cluster(
         .collect();
     let sport_seconds: Vec<&[f64]> = members.iter().map(|id| lookup[id.as_str()].1).collect();
 
-    let coverage = build_coverage_grid(&sport_tracks, &sport_seconds, cell_size, tun);
+    let coverage = build_coverage_grid(&sport_tracks, &sport_seconds, cell_size, tun, lift_memo);
     let ref_lat = coverage.ref_lat;
     let mut idx = 0usize;
     let mut records = Vec::new();
@@ -3829,8 +3873,8 @@ mod tests {
             .collect();
         let one: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice())];
         let two: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice()), ("b", b.as_slice())];
-        let g1 = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT);
-        let g2 = build_coverage_grid(&two, &[], 100.0, &Tunables::DEFAULT);
+        let g1 = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let g2 = build_coverage_grid(&two, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
         assert_eq!(
             g1.ref_lat, g2.ref_lat,
             "an add inside the band must not move the projection"
@@ -3864,6 +3908,50 @@ mod tests {
             );
             lat += 0.5;
         }
+    }
+
+    #[test]
+    fn lift_memo_matches_fresh_computation() {
+        // The memoised candidate path must be observationally identical to
+        // the fresh scan: same keep ranges cold, warm, and re-warmed.
+        let up = climb(9.0e-5, 5.0, false, 80);
+        let flat: Vec<GpsPoint> = (0..80)
+            .map(|i| GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, 7.02, 500.0))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice()), ("flat", &flat)];
+        let fresh =
+            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let mut memo = HashMap::new();
+        let cold = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        let warm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(fresh.keep, cold.keep);
+        assert_eq!(fresh.keep, warm.keep);
+        assert!(memo.contains_key("up") && memo.contains_key("flat"));
+    }
+
+    #[test]
+    fn late_descender_rescue_survives_the_candidate_memo() {
+        // A lift span whose candidates were cached before the rescuing
+        // descent arrived must still be rescued: the rescue is recomputed
+        // over the present membership, never cached with the candidates.
+        let up = climb(9.0e-5, 5.0, false, 80);
+        let mut down = up.clone();
+        down.reverse();
+        let one: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice())];
+        let both: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice()), ("down", &down)];
+        let mut memo = HashMap::new();
+        let alone = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_ne!(
+            alone.keep[0],
+            vec![(0usize, 79usize)],
+            "the straight steep ascent must be excluded while unrescued"
+        );
+        let rescued = build_coverage_grid(&both, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(
+            rescued.keep[0],
+            vec![(0usize, 79usize)],
+            "a straight descent over the same line rescues the cached span"
+        );
     }
 
     #[test]
@@ -4132,7 +4220,8 @@ mod tests {
             ("c", with_tail.as_slice()),
             ("x", cross.as_slice()),
         ];
-        let coverage = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT);
+        let coverage =
+            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
         let cell_set: HashSet<Cell> = with_tail
             .iter()
             .chain(braid.iter())
