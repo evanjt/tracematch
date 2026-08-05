@@ -324,16 +324,18 @@ pub struct Tunables {
     /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
     /// floor; plateau sweep beside `self_pass_max`.
     pub minority_run_m: f64,
-    /// Occasion separation gap, in hours. Support floors count the
-    /// largest set of visits whose starts sit PAIRWISE at least this
-    /// far apart ([`distinct_occasions`]): a two-day trip's recordings
-    /// collapse to one occasion, while a daily habit keeps an occasion
-    /// every other day (deliberately not transitive chaining, which
-    /// would collapse a daily athlete's whole history). 48 h folds a
-    /// weekend trip; sweep 24-72 beside the other floors. Tracks with
-    /// no known start each count as their own occasion, so dateless
-    /// corpora keep activity-counting semantics.
-    pub occasion_gap_h: f64,
+    /// Occasion span floor, in hours. Support counts distinct calendar
+    /// DAYS, and — when every visit is dated — additionally requires
+    /// the days to stretch beyond one stay: ground visited only within
+    /// this window was one trip to a place, not repetition, however
+    /// many recordings the trip produced ([`occasion_support`]). A gap
+    /// threshold cannot draw this line (a two-day trip and two commute
+    /// days are both ~24 h apart; pairwise separation halves a daily
+    /// commuter's support); the span can — a stay is compact, routine
+    /// stretches over weeks. One week; sweep 72-336 beside the other
+    /// floors. Tracks with no known start count as their own day and
+    /// waive the span, so dateless corpora keep activity counting.
+    pub occasion_span_h: f64,
     /// Projection latitude quantisation, in degrees. A cluster's
     /// `ref_lat` snaps to the nearest multiple, so the metre projection
     /// is a step function of the activity set: a routine add leaves
@@ -367,7 +369,7 @@ impl Tunables {
         cluster_gap_m: 50_000.0,
         self_pass_max: 0.25,
         self_pass_clean: 0.05,
-        occasion_gap_h: 48.0,
+        occasion_span_h: 168.0,
         minority_run_m: 60.0,
         ref_lat_quant_deg: 0.1,
     };
@@ -1798,44 +1800,51 @@ fn opportunity(node: &Supernode, coverage: &CoverageGrid) -> usize {
 
 /// Support test: enough activities traverse this stretch for it to be a
 /// section, with the visit floor scaling by length and opportunity.
-/// Distinct occasions among the portions' tracks: the largest set of
-/// known starts sitting pairwise at least `gap_s` apart (greedy over
-/// the sorted starts — optimal for interval separation), plus one
-/// occasion per track with no known start. A two-day trip's recordings
-/// collapse to one occasion; a daily habit keeps an occasion every
-/// other day. Deliberately NOT transitive chaining: under chaining a
-/// daily athlete's entire history collapses into one occasion, which
-/// inverts the rule's intent.
-fn distinct_occasions(
+/// Occasion support for a set of portions: the count of distinct
+/// calendar DAYS among known starts (plus one per track with no known
+/// start), and the span between the earliest and latest known start.
+/// Together they answer the support question: ground is repeated when
+/// it is visited on enough separate days AND those days stretch beyond
+/// one stay ([`Tunables::occasion_span_h`]). Day counting alone cannot
+/// tell a two-day trip from two commute days; the span can — a trip is
+/// compact, routine stretches over weeks.
+fn occasion_support(
     portions: &[Portion],
     sport_tracks: &[(&str, &[GpsPoint])],
     starts: &HashMap<String, i64>,
-    gap_s: i64,
-) -> usize {
-    let mut dated: Vec<i64> = Vec::with_capacity(portions.len());
+) -> (usize, Option<i64>, usize) {
+    let mut days: HashSet<i64> = HashSet::with_capacity(portions.len());
     let mut undated = 0usize;
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
     for &(t, ..) in portions {
         match starts.get(sport_tracks[t].0) {
-            Some(&e) => dated.push(e),
+            Some(&e) => {
+                days.insert(e.div_euclid(86_400));
+                lo = lo.min(e);
+                hi = hi.max(e);
+            }
             None => undated += 1,
         }
     }
-    undated + separated_count(&mut dated, gap_s)
+    let span = (days.len() >= 2).then(|| hi - lo);
+    (undated + days.len(), span, undated)
 }
 
-/// The greedy count of starts pairwise separated by at least `gap_s`.
-/// Sorts in place; reused by the per-cell support sweep on small sets.
-fn separated_count(starts: &mut Vec<i64>, gap_s: i64) -> usize {
-    starts.sort_unstable();
-    let mut n = 0usize;
-    let mut last: Option<i64> = None;
-    for &s in starts.iter() {
-        if last.is_none_or(|l| s - l >= gap_s) {
-            n += 1;
-            last = Some(s);
+/// Distinct support days for one cell's contributing track ids: known
+/// starts count by calendar day, unknown starts each count alone. The
+/// span requirement binds at the candidate level, not per cell.
+fn cell_support_days(ids: &[&str], starts: &HashMap<String, i64>) -> usize {
+    let mut days: HashSet<i64> = HashSet::with_capacity(ids.len());
+    let mut undated = 0usize;
+    for id in ids {
+        match starts.get(*id) {
+            Some(&e) => {
+                days.insert(e.div_euclid(86_400));
+            }
+            None => undated += 1,
         }
     }
-    n
+    undated + days.len()
 }
 
 fn has_support(
@@ -1845,14 +1854,24 @@ fn has_support(
     corpus: usize,
     sport_tracks: &[(&str, &[GpsPoint])],
     starts: &HashMap<String, i64>,
-    gap_s: i64,
+    span_s: i64,
 ) -> bool {
     let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
     lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_len = lens.get(lens.len() / 2).copied().unwrap_or(fallback_len);
     let required = required_visits_for_length(median_len, corpus) as usize;
-    distinct_occasions(portions, sport_tracks, starts, gap_s)
-        >= required.max(config.min_activities as usize)
+    let (days, span, undated) = occasion_support(portions, sport_tracks, starts);
+    if days < required.max(config.min_activities as usize) {
+        return false;
+    }
+    // The span binds only when every contributing visit is dated: a
+    // fully-known history that fits inside one stay is one visit to
+    // the place, however many days it filled. Any unknown start
+    // restores the classic activity-counting benefit of the doubt.
+    match span {
+        Some(s) if undated == 0 => s >= span_s,
+        _ => true,
+    }
 }
 
 /// A fine-resolution spatial index of every contributing portion's
@@ -2086,7 +2105,6 @@ fn candidate_support(
     sport_tracks: &[(&str, &[GpsPoint])],
     pass_min_m: f64,
     starts: &HashMap<String, i64>,
-    gap_s: i64,
 ) -> HashMap<Cell, u32> {
     let contributors: HashSet<usize> = portions.iter().map(|p| p.0).collect();
     // Cell bounding box: most of a contributor's outing is nowhere near
@@ -2143,17 +2161,7 @@ fn candidate_support(
     }
     cell_tracks_local
         .into_iter()
-        .map(|(c, ids)| {
-            let mut dated: Vec<i64> = Vec::with_capacity(ids.len());
-            let mut undated = 0usize;
-            for id in ids {
-                match starts.get(id) {
-                    Some(&e) => dated.push(e),
-                    None => undated += 1,
-                }
-            }
-            (c, (undated + separated_count(&mut dated, gap_s)) as u32)
-        })
+        .map(|(c, ids)| (c, cell_support_days(&ids, starts) as u32))
         .collect()
 }
 
@@ -2182,7 +2190,7 @@ fn section_worthiness(
                 opportunity(n, coverage),
                 sport_tracks,
                 starts,
-                (tun.occasion_gap_h * 3600.0) as i64,
+                (tun.occasion_span_h * 3600.0) as i64,
             )
         })
         .collect()
@@ -2678,7 +2686,7 @@ fn detect_for_cluster_with_grid(
     }
 
     let divergence = config.divergence_threshold.clamp(0.05, 0.5);
-    let gap_s = (tun.occasion_gap_h * 3600.0) as i64;
+    let span_s = (tun.occasion_span_h * 3600.0) as i64;
     let same_traffic = 1.0 - divergence;
 
     let mut supernodes = partition_supernodes(&hot_cells, coverage, same_traffic);
@@ -2761,7 +2769,7 @@ fn detect_for_cluster_with_grid(
                 opportunity(node, coverage),
                 sport_tracks,
                 starts,
-                gap_s,
+                span_s,
             )
         {
             continue;
@@ -2807,15 +2815,8 @@ fn detect_for_cluster_with_grid(
                     (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
                 })
                 .collect();
-            let support = candidate_support(
-                &portions,
-                &cell_set,
-                coverage,
-                sport_tracks,
-                pass_min_m,
-                starts,
-                gap_s,
-            );
+            let support =
+                candidate_support(&portions, &cell_set, coverage, sport_tracks, pass_min_m, starts);
             let kept: Vec<Cell> = node
                 .cells
                 .iter()
@@ -2864,7 +2865,7 @@ fn detect_for_cluster_with_grid(
                 opportunity(&node, coverage),
                 sport_tracks,
                 starts,
-                gap_s,
+                span_s,
             )
         {
             continue;
@@ -2972,7 +2973,7 @@ fn detect_for_cluster_with_grid(
                         opportunity(&reduced, coverage),
                         sport_tracks,
                         starts,
-                        gap_s,
+                        span_s,
                     )
                 {
                     let mid = probe[probe.len() / 2];

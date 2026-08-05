@@ -654,28 +654,48 @@ fn one_trip_ground_is_not_a_section() {
 }
 
 #[test]
-fn a_daily_habit_is_repetition_not_one_occasion() {
-    // Scenario: the same corridor walked every single day for a week.
-    // Consecutive starts sit within the occasion gap of each other, but
-    // a daily habit is the strongest possible repetition — occasion
-    // counting must not chain the whole streak into one visit.
+fn a_daily_habit_is_repetition_but_one_stay_is_not() {
+    // Scenario: the same corridor walked every day. Ten days of it is
+    // routine (the days stretch past one stay); six days of it is a
+    // holiday's jogging loop — one visit to a place, however many
+    // recordings the stay produced. Day gaps cannot draw this line
+    // (trip days and commute days are both ~24 h apart); the span can.
     use tracematch::{Tunables, detect_sections_unified_dated};
-    let tracks = shapes::plain_corridor(7);
     const DAY: i64 = 86_400;
-    let map: HashMap<String, i64> = (0..7)
+    let habit = shapes::plain_corridor(10);
+    let map: HashMap<String, i64> = (0..10)
         .map(|i| (format!("cor_{}", i), i as i64 * DAY))
         .collect();
     let out = detect_sections_unified_dated(
-        &tracks,
+        &habit,
         &[],
-        &shapes::pooled(&tracks),
+        &shapes::pooled(&habit),
         &map,
         &config(),
         &Tunables::DEFAULT,
     )
     .sections;
     assert_eq!(out.len(), 1, "a daily habit must surface");
-    assert_eq!(out[0].visit_count, 7);
+    assert_eq!(out[0].visit_count, 10);
+
+    let stay = shapes::plain_corridor(6);
+    let map: HashMap<String, i64> = (0..6)
+        .map(|i| (format!("cor_{}", i), i as i64 * DAY))
+        .collect();
+    let out = detect_sections_unified_dated(
+        &stay,
+        &[],
+        &shapes::pooled(&stay),
+        &map,
+        &config(),
+        &Tunables::DEFAULT,
+    )
+    .sections;
+    assert!(
+        out.is_empty(),
+        "a single stay's daily loop minted a section: {:?}",
+        out.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
 }
 
 #[test]
