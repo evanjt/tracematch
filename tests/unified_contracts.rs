@@ -612,6 +612,74 @@ fn grid_city_respects_floors_and_forks() {
     }
 }
 
+// ------------------------------------------- occasions: support floor
+
+#[test]
+fn one_trip_ground_is_not_a_section() {
+    // Scenario: the same corridor walked twice — once as a single
+    // weekend trip (two recordings 25 h apart), once as a fortnightly
+    // habit. The evidence is identical; only the calendar differs.
+    // Expected behaviour: a trip's files chain into one occasion and
+    // one occasion is not repetition; the habit is.
+    use tracematch::{Tunables, detect_sections_unified_dated};
+    let tracks = shapes::plain_corridor(2);
+    let detect_at = |epochs: &[(&str, i64)]| {
+        let map: HashMap<String, i64> =
+            epochs.iter().map(|&(id, e)| (id.to_string(), e)).collect();
+        detect_sections_unified_dated(
+            &tracks,
+            &[],
+            &shapes::pooled(&tracks),
+            &map,
+            &config(),
+            &Tunables::DEFAULT,
+        )
+        .sections
+    };
+    const DAY: i64 = 86_400;
+
+    let trip = detect_at(&[("cor_0", 0), ("cor_1", 25 * 3600)]);
+    assert!(
+        trip.is_empty(),
+        "one trip minted a section: {:?}",
+        trip.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+
+    let habit = detect_at(&[("cor_0", 0), ("cor_1", 14 * DAY)]);
+    assert_eq!(habit.len(), 1, "the fortnightly habit must surface");
+    assert_eq!(habit[0].visit_count, 2, "visits stay real traversals");
+
+    let undated = detect(&tracks);
+    assert_eq!(undated.len(), 1, "dateless corpora keep activity counting");
+}
+
+#[test]
+fn occasions_chain_transitively_and_a_later_return_unlocks() {
+    // Three recordings: two on consecutive days (one trip), a third a
+    // fortnight later. Two occasions clear the floor — the ground was
+    // genuinely returned to.
+    use tracematch::{Tunables, detect_sections_unified_dated};
+    let tracks = shapes::plain_corridor(3);
+    const DAY: i64 = 86_400;
+    let map: HashMap<String, i64> = [
+        ("cor_0".to_string(), 0),
+        ("cor_1".to_string(), 25 * 3600),
+        ("cor_2".to_string(), 14 * DAY),
+    ]
+    .into();
+    let out = detect_sections_unified_dated(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &map,
+        &config(),
+        &Tunables::DEFAULT,
+    )
+    .sections;
+    assert_eq!(out.len(), 1, "two occasions are repetition");
+    assert_eq!(out[0].visit_count, 3, "all three traversals count");
+}
+
 // ------------------------------------------- rule 2: lift exclusion
 
 #[test]
