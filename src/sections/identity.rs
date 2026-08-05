@@ -32,7 +32,7 @@
 //! state; the carry-forward structure is identical. Design:
 //! `~/.claude/plans/b2-identity-hysteresis-design.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -84,13 +84,42 @@ fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
     if samples.is_empty() || line.is_empty() {
         return 0.0;
     }
+    // Exact accelerator: bucket the line's points into a degree grid whose
+    // cells span at least `tol_m` in both axes, so any line point within
+    // tolerance of a sample must sit in the sample's 3x3 cell ring. The
+    // haversine predicate is unchanged — the grid only prunes candidates —
+    // so the fraction is identical to the plain double scan (the oracle
+    // test pins it), at O(A + B) instead of O(A x B).
+    let cell_lat = tol_m / 110_574.0;
+    let max_abs_lat = samples
+        .iter()
+        .chain(line.iter())
+        .map(|p| p.latitude.abs())
+        .fold(0.0f64, f64::max)
+        .min(85.0);
+    let cell_lng = tol_m / (111_320.0 * max_abs_lat.to_radians().cos()).max(1.0);
+    let key = |lat: f64, lng: f64| {
+        (
+            (lat / cell_lat).floor() as i64,
+            (lng / cell_lng).floor() as i64,
+        )
+    };
+    let mut grid: HashMap<(i64, i64), Vec<&GpsPoint>> = HashMap::new();
+    for p in line {
+        grid.entry(key(p.latitude, p.longitude))
+            .or_default()
+            .push(p);
+    }
     let covered = samples
         .iter()
         .filter(|s| {
-            line.iter()
-                .map(|p| haversine_distance(s, p))
-                .fold(f64::INFINITY, f64::min)
-                <= tol_m
+            let (cy, cx) = key(s.latitude, s.longitude);
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dx| {
+                    grid.get(&(cy + dy, cx + dx))
+                        .is_some_and(|pts| pts.iter().any(|p| haversine_distance(s, p) <= tol_m))
+                })
+            })
         })
         .count();
     covered as f64 / samples.len() as f64
@@ -1076,6 +1105,57 @@ mod tests {
         (0..n)
             .map(|i| GpsPoint::new(lat0 + i as f64 * 1.0e-4, lng0))
             .collect()
+    }
+
+    /// The plain double scan the grid-accelerated [`coverage`] must equal
+    /// exactly: same haversine predicate, no pruning.
+    fn coverage_naive(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
+        if samples.is_empty() && line.is_empty() {
+            return 1.0;
+        }
+        if samples.is_empty() || line.is_empty() {
+            return 0.0;
+        }
+        let covered = samples
+            .iter()
+            .filter(|s| line.iter().any(|p| haversine_distance(s, p) <= tol_m))
+            .count();
+        covered as f64 / samples.len() as f64
+    }
+
+    #[test]
+    fn grid_coverage_equals_the_plain_scan() {
+        // Deterministic scatter of shapes around the tolerance boundary:
+        // wobbled parallels at offsets straddling GROUND_TOL_M, a crossing,
+        // and a far line. Every pair and direction must agree exactly with
+        // the unpruned scan.
+        let base = line(46.0, 7.0, 400);
+        let mut shapes: Vec<Vec<GpsPoint>> = vec![base.clone()];
+        for (k, off_m) in [8.0, 45.0, 49.9, 50.1, 62.0, 300.0].iter().enumerate() {
+            let wob: Vec<GpsPoint> = base
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let wobble = ((i as f64 * 0.7) + k as f64).sin() * 6.0;
+                    GpsPoint::new(p.latitude, p.longitude + (off_m + wobble) / 77_000.0)
+                })
+                .collect();
+            shapes.push(wob);
+        }
+        shapes.push(line(46.017, 6.999, 120));
+        for a in &shapes {
+            for b in &shapes {
+                for tol in [25.0, GROUND_TOL_M, 80.0] {
+                    assert_eq!(
+                        coverage(a, b, tol),
+                        coverage_naive(a, b, tol),
+                        "grid and plain coverage diverged at tol {tol}"
+                    );
+                }
+            }
+        }
+        assert_eq!(coverage(&[], &[], 50.0), coverage_naive(&[], &[], 50.0));
+        assert_eq!(coverage(&base, &[], 50.0), coverage_naive(&base, &[], 50.0));
     }
 
     fn cand(polyline: Vec<GpsPoint>, visit_count: u32) -> CandidateSection {
