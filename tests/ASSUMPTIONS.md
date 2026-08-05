@@ -53,7 +53,23 @@ mirror, pinned after the D2 corpus gate. Pure-layer contracts live in
 | Constants sit on plateaus: one-step tunables neighbours keep the catalogue invariant-clean and the count flat | `commuter_corridor_holds_across_pass_neighbours`, `oval_stem_holds_across_pass_neighbours` |
 | The registry mirrors the pure layer mechanically: rows equal pure grounds after every apply, graves track tombstones, every promotion relinquishes, durable rows never collide | veloqrs `mirror_rows_equal_pure_grounds`, `graves_track_tombstones_exactly`, `*_relinquishes_and_survives_resync` (six mutations), `durable_rows_never_collide` |
 
-## Red gates
+## Input contract: candidates are corridor-disjoint (2026-08-05)
+
+The identity layer assumes each step's candidates obey rule 8
+(corridor-disjoint at the matching tolerance), which one pooled detection
+guarantees. Violating it — feeding per-sport catalogues into one registry,
+so two or three sports' sections duplicate the same corridor — produces a
+zombie rotation observed on both real corpora: a senior neighbour contained
+in a foreign duplicate candidate wins that candidate's containment-tier
+nomination but nominates its own candidate, so the duplicate never confirms
+a carrier, the plan dissolves the visible holder (reason Dissolved), and
+the uncarried candidate immediately restores the freshest tombstone in the
+same step — twin ids cycling fire-and-restore forever, phase-shifted. No
+pure-layer guard is added: under disjoint candidates the containment tier
+cannot be poisoned (a disjoint neighbour is never contained), and the
+duplicate-mint tripwire row above already pins duplicate-candidate
+behaviour as conscious. The fix is pooled detection (locked ruling 2);
+per-sport feeding is the defect, not the registry.
 
 None open. Each was written red on purpose so the fix ungated it instead
 of rediscovering the defect; corpus evidence from the D2 gate replay is
