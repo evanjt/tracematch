@@ -2167,7 +2167,6 @@ fn candidate_support(
 
 /// Which components would survive as sections on their own evidence.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn section_worthiness(
     supernodes: &[Supernode],
     coverage: &CoverageGrid,
@@ -2815,8 +2814,14 @@ fn detect_for_cluster_with_grid(
                     (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
                 })
                 .collect();
-            let support =
-                candidate_support(&portions, &cell_set, coverage, sport_tracks, pass_min_m, starts);
+            let support = candidate_support(
+                &portions,
+                &cell_set,
+                coverage,
+                sport_tracks,
+                pass_min_m,
+                starts,
+            );
             let kept: Vec<Cell> = node
                 .cells
                 .iter()
@@ -3181,7 +3186,11 @@ fn detect_for_cluster_with_grid(
                     runs[a]
                         .partial_cmp(&runs[b])
                         .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(pens[a].partial_cmp(&pens[b]).unwrap_or(std::cmp::Ordering::Equal))
+                        .then(
+                            pens[a]
+                                .partial_cmp(&pens[b])
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
                         .then(
                             portions[b]
                                 .3
@@ -4204,7 +4213,16 @@ pub fn detect_sections_unified_incremental_dated(
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
             if c.dirty {
-                recompute_cluster(c, sport, &lookup, config, cell_size, &tun, leaves, start_epochs);
+                recompute_cluster(
+                    c,
+                    sport,
+                    &lookup,
+                    config,
+                    cell_size,
+                    &tun,
+                    leaves,
+                    start_epochs,
+                );
                 c.dirty = false;
             }
         }
@@ -4493,7 +4511,7 @@ mod tests {
             &Tunables::DEFAULT,
             &mut leaves.lift_candidates,
         );
-        let mut run = |leaves: &mut LeafMemos| {
+        let run = |leaves: &mut LeafMemos| {
             let mut idx = 0usize;
             let mut records = Vec::new();
             detect_for_cluster_with_grid(
@@ -4846,8 +4864,14 @@ mod tests {
         // status is irrelevant here — every qualifying pass counts.
         let portions: Vec<Portion> =
             vec![(0, 0, 60, 600.0), (1, 0, 60, 600.0), (2, 0, 120, 1200.0)];
-        let support =
-            candidate_support(&portions, &cell_set, &coverage, &tracks, 100.0, &HashMap::new(), 0);
+        let support = candidate_support(
+            &portions,
+            &cell_set,
+            &coverage,
+            &tracks,
+            100.0,
+            &HashMap::new(),
+        );
         let mid = coverage
             .grid
             .cell_of(corridor[30].latitude, corridor[30].longitude);

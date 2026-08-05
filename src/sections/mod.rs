@@ -98,10 +98,10 @@ pub use unified::{
     SectionUpdatePolicy, Tunables, UnifiedDetection, UnifiedIncrementalResult,
     confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections_unified,
     detect_sections_unified_dated, detect_sections_unified_explained,
-    detect_sections_unified_incremental, detect_sections_unified_incremental_dated,
-    detect_sections_unified_incremental_cached,
-    detect_sections_unified_incremental_cached_with_policy, detect_sections_unified_tuned,
-    lift_spans, lift_spans_tuned, self_pass_penalty,
+    detect_sections_unified_incremental, detect_sections_unified_incremental_cached,
+    detect_sections_unified_incremental_cached_with_policy,
+    detect_sections_unified_incremental_dated, detect_sections_unified_tuned, lift_spans,
+    lift_spans_tuned, self_pass_penalty,
 };
 
 // Re-export single-route section utilities (find/split known sections).
