@@ -314,6 +314,161 @@ fn deviation_emerges_from_unique_outings() {
 // ------------------------------- rules 5+6: real geometry, never merged
 
 #[test]
+fn usage_cliff_ends_the_busy_corridor() {
+    // Scenario: ten outings share a corridor; three continue past its
+    // end for another 1.5 km while seven disperse on unique exits. No
+    // turnaround, no shared third corridor — the visible reason the
+    // busy section ends is that most of its traffic stops there.
+    // Expected behaviour: no section spans the cliff; the busy stretch
+    // keeps its own honest visit count and any quiet-tail section
+    // carries only its minority's.
+    let tracks = shapes::cliff_tail(10, 4);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!(!sections.is_empty());
+    assert_majority_rendered(&tracks, &sections);
+
+    let busy_core = metre_samples(&[(200.0, 0.0), (1300.0, 0.0)], 10.0);
+    let quiet_deep = metre_samples(&[(1900.0, 0.0), (2900.0, 0.0)], 10.0);
+    assert!(
+        coverage(&busy_core, &sections, 100.0) >= 0.8,
+        "the busy corridor must surface"
+    );
+    assert!(
+        coverage(&quiet_deep, &sections, 100.0) >= 0.8,
+        "the minority tail is real repeated ground and must surface on its own"
+    );
+    for s in &sections {
+        let in_busy = busy_core.iter().any(|p| min_dist(p, &s.polyline) < 100.0);
+        let in_quiet = quiet_deep.iter().any(|p| min_dist(p, &s.polyline) < 100.0);
+        assert!(
+            !(in_busy && in_quiet),
+            "{}: spans the usage cliff ({} visits)",
+            s.id,
+            s.visit_count
+        );
+        if in_busy {
+            assert!(
+                s.visit_count >= 9,
+                "{}: busy section under-counted ({} visits)",
+                s.id,
+                s.visit_count
+            );
+        }
+        if in_quiet {
+            assert!(
+                s.visit_count <= 5,
+                "{}: quiet tail inherited the corridor's visits ({})",
+                s.id,
+                s.visit_count
+            );
+        }
+    }
+}
+
+#[test]
+fn minority_braid_strand_stays_off_the_body() {
+    // Scenario: fourteen outings run one body; five swap onto a strand
+    // 180 m north for the middle stretch. The strand is real minority
+    // ground; the body keeps the majority everywhere.
+    // Expected behaviour: no emitted line mixes the two — a body
+    // section stays on the body with the majority's count, and any
+    // strand section carries only its minority's.
+    let tracks = shapes::minority_braid(14, 5);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_majority_rendered(&tracks, &sections);
+
+    let body_mid = metre_samples(&[(550.0, 0.0), (1250.0, 0.0)], 10.0);
+    let strand_mid = metre_samples(&[(550.0, 180.0), (1250.0, 180.0)], 10.0);
+    assert!(
+        coverage(&body_mid, &sections, 100.0) >= 0.8,
+        "the body must surface"
+    );
+    for s in &sections {
+        let on_body = body_mid.iter().any(|p| min_dist(p, &s.polyline) < 60.0);
+        let on_strand = strand_mid.iter().any(|p| min_dist(p, &s.polyline) < 60.0);
+        assert!(
+            !(on_body && on_strand),
+            "{}: one line walks both braid strands",
+            s.id
+        );
+        if on_strand {
+            assert!(
+                s.visit_count <= 6,
+                "{}: minority strand inherited the body's visits ({})",
+                s.id,
+                s.visit_count
+            );
+        }
+        if on_body {
+            assert!(
+                s.visit_count >= 9,
+                "{}: body section under-counted ({} visits)",
+                s.id,
+                s.visit_count
+            );
+        }
+    }
+}
+
+/// Every rendered point must lie on ground that at least half the
+/// section's own visits traverse: the drawn line is where the majority
+/// went, never a minority variant or a private tail.
+fn assert_majority_rendered(tracks: &[(String, Vec<GpsPoint>)], sections: &[FrequentSection]) {
+    for s in sections {
+        let mut low = 0usize;
+        let mut total = 0usize;
+        for p in s.polyline.iter().step_by(5) {
+            total += 1;
+            let sup = tracks
+                .iter()
+                .filter(|(_, pts)| pts.iter().any(|q| haversine_distance(p, q) < 50.0))
+                .count();
+            if (sup as f64) < 0.5 * s.visit_count as f64 {
+                low += 1;
+            }
+        }
+        assert!(
+            low * 10 <= total,
+            "{}: {}/{} rendered points sit on minority ground ({} visits)",
+            s.id,
+            low,
+            total,
+            s.visit_count
+        );
+    }
+}
+
+#[test]
+fn short_strand_fragment_does_not_bend_the_line() {
+    // Scenario: fourteen outings on one busy line; five swap onto a
+    // 200 m variant strand mid-way — real minority evidence, but far
+    // too short to ever be a section of its own.
+    // Expected behaviour: the fragment is not absorbed into the busy
+    // sections around it — no rendered line leaves the majority path,
+    // and no extent quietly carries the strand's ground.
+    let tracks = shapes::short_strand(14, 5);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    let body_mid = metre_samples(&[(400.0, 0.0), (720.0, 0.0)], 10.0);
+    assert!(
+        coverage(&body_mid, &sections, 100.0) >= 0.8,
+        "the body must surface"
+    );
+    let strand_mid = metre_samples(&[(540.0, 120.0), (580.0, 120.0)], 10.0);
+    for s in &sections {
+        let on_strand = strand_mid.iter().any(|p| min_dist(p, &s.polyline) < 60.0);
+        assert!(!on_strand, "{}: rendered line walks the minority strand", s.id);
+    }
+    assert_majority_rendered(&tracks, &sections);
+}
+
+#[test]
 fn braid_variants_read_as_real_lines_not_a_midline() {
     // Two lanes 30 m apart, every outing rides both. Whatever extent is
     // emitted, its points must lie on one real lane at a time — a
@@ -832,3 +987,4 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
         out.boundaries
     );
 }
+
