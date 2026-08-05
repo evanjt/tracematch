@@ -654,10 +654,35 @@ fn one_trip_ground_is_not_a_section() {
 }
 
 #[test]
-fn occasions_chain_transitively_and_a_later_return_unlocks() {
+fn a_daily_habit_is_repetition_not_one_occasion() {
+    // Scenario: the same corridor walked every single day for a week.
+    // Consecutive starts sit within the occasion gap of each other, but
+    // a daily habit is the strongest possible repetition — occasion
+    // counting must not chain the whole streak into one visit.
+    use tracematch::{Tunables, detect_sections_unified_dated};
+    let tracks = shapes::plain_corridor(7);
+    const DAY: i64 = 86_400;
+    let map: HashMap<String, i64> = (0..7)
+        .map(|i| (format!("cor_{}", i), i as i64 * DAY))
+        .collect();
+    let out = detect_sections_unified_dated(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &map,
+        &config(),
+        &Tunables::DEFAULT,
+    )
+    .sections;
+    assert_eq!(out.len(), 1, "a daily habit must surface");
+    assert_eq!(out[0].visit_count, 7);
+}
+
+#[test]
+fn a_trip_plus_a_later_return_clears_the_floor() {
     // Three recordings: two on consecutive days (one trip), a third a
-    // fortnight later. Two occasions clear the floor — the ground was
-    // genuinely returned to.
+    // fortnight later. The trip collapses to one occasion; the return
+    // makes two — the ground was genuinely returned to.
     use tracematch::{Tunables, detect_sections_unified_dated};
     let tracks = shapes::plain_corridor(3);
     const DAY: i64 = 86_400;
