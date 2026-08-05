@@ -317,6 +317,21 @@ pub fn short_strand(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoint>
         .collect()
 }
 
+/// A bare straight corridor, one pass per outing, collinear staggered
+/// starts and ends: no boundary mechanism anywhere, so what surfaces is
+/// purely a question of support.
+pub fn plain_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let path = densify(&[(-100.0 - 8.0 * i as f64, 0.0), (900.0 + 8.0 * i as f64, 0.0)]);
+            (
+                format!("cor_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
 /// A shared trunk splitting into two worthy branches: half the outings
 /// take each. Point-to-point, one pass everywhere, so the only boundary
 /// mechanism available at the join is the fork.

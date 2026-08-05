@@ -324,6 +324,15 @@ pub struct Tunables {
     /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
     /// floor; plateau sweep beside `self_pass_max`.
     pub minority_run_m: f64,
+    /// Occasion chaining gap, in hours. Activities whose starts sit
+    /// within this gap chain into ONE occasion, and support floors
+    /// count occasions, not activities: a two-day trip's out-and-back
+    /// recorded as separate files is one visit to that ground, not
+    /// repetition. 48 h chains a weekend trip while leaving a weekly
+    /// habit's outings distinct; sweep 24-72 beside the other floors.
+    /// Tracks with no known start each count as their own occasion, so
+    /// dateless corpora keep activity-counting semantics.
+    pub occasion_gap_h: f64,
     /// Projection latitude quantisation, in degrees. A cluster's
     /// `ref_lat` snaps to the nearest multiple, so the metre projection
     /// is a step function of the activity set: a routine add leaves
@@ -357,6 +366,7 @@ impl Tunables {
         cluster_gap_m: 50_000.0,
         self_pass_max: 0.25,
         self_pass_clean: 0.05,
+        occasion_gap_h: 48.0,
         minority_run_m: 60.0,
         ref_lat_quant_deg: 0.1,
     };
@@ -1787,17 +1797,64 @@ fn opportunity(node: &Supernode, coverage: &CoverageGrid) -> usize {
 
 /// Support test: enough activities traverse this stretch for it to be a
 /// section, with the visit floor scaling by length and opportunity.
+/// Chain activity starts into occasions: starts within
+/// [`Tunables::occasion_gap_h`] of the previous start share an
+/// occasion. A pure function of the epoch set (sorted by time then id),
+/// so the catalogue stays order-free. Ids absent from `start_epochs`
+/// are simply left out of the map; [`distinct_occasions`] counts each
+/// unknown as its own occasion.
+fn occasions_for(start_epochs: &HashMap<String, i64>, gap_h: f64) -> HashMap<String, u32> {
+    let mut dated: Vec<(&String, i64)> = start_epochs.iter().map(|(id, &e)| (id, e)).collect();
+    dated.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
+    let gap = (gap_h * 3600.0) as i64;
+    let mut occ: HashMap<String, u32> = HashMap::with_capacity(dated.len());
+    let mut current = 0u32;
+    let mut prev: Option<i64> = None;
+    for (id, e) in dated {
+        if let Some(p) = prev
+            && e - p >= gap
+        {
+            current += 1;
+        }
+        occ.insert(id.clone(), current);
+        prev = Some(e);
+    }
+    occ
+}
+
+/// Distinct occasions among the portions' tracks: known starts count by
+/// occasion, unknown starts each count alone. This is the number the
+/// support floors compare — ground is REPEATED when separate occasions
+/// keep returning to it, however many files one trip produced.
+fn distinct_occasions(
+    portions: &[Portion],
+    sport_tracks: &[(&str, &[GpsPoint])],
+    occ: &HashMap<String, u32>,
+) -> usize {
+    let mut seen: HashSet<(u32, &str)> = HashSet::with_capacity(portions.len());
+    for &(t, ..) in portions {
+        let id = sport_tracks[t].0;
+        match occ.get(id) {
+            Some(&o) => seen.insert((o, "")),
+            None => seen.insert((u32::MAX, id)),
+        };
+    }
+    seen.len()
+}
+
 fn has_support(
     portions: &[Portion],
     fallback_len: f64,
     config: &SectionConfig,
     corpus: usize,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    occ: &HashMap<String, u32>,
 ) -> bool {
     let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
     lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_len = lens.get(lens.len() / 2).copied().unwrap_or(fallback_len);
     let required = required_visits_for_length(median_len, corpus) as usize;
-    portions.len() >= required.max(config.min_activities as usize)
+    distinct_occasions(portions, sport_tracks, occ) >= required.max(config.min_activities as usize)
 }
 
 /// A fine-resolution spatial index of every contributing portion's
@@ -2030,6 +2087,7 @@ fn candidate_support(
     coverage: &CoverageGrid,
     sport_tracks: &[(&str, &[GpsPoint])],
     pass_min_m: f64,
+    occ: &HashMap<String, u32>,
 ) -> HashMap<Cell, u32> {
     let contributors: HashSet<usize> = portions.iter().map(|p| p.0).collect();
     // Cell bounding box: most of a contributor's outing is nowhere near
@@ -2041,7 +2099,7 @@ fn candidate_support(
         x0 = x0.min(c.1);
         x1 = x1.max(c.1);
     }
-    let mut support: HashMap<Cell, u32> = HashMap::new();
+    let mut cell_occasions: HashMap<Cell, HashSet<(u32, &str)>> = HashMap::new();
     for &t in &contributors {
         let pts = sport_tracks[t].1;
         let mut touched: HashSet<Cell> = HashSet::new();
@@ -2079,14 +2137,23 @@ fn candidate_support(
                 (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
             })
             .collect();
+        let id = sport_tracks[t].0;
+        let key = match occ.get(id) {
+            Some(&o) => (o, ""),
+            None => (u32::MAX, id),
+        };
         for c in dilated {
-            *support.entry(c).or_insert(0) += 1;
+            cell_occasions.entry(c).or_default().insert(key);
         }
     }
-    support
+    cell_occasions
+        .into_iter()
+        .map(|(c, s)| (c, s.len() as u32))
+        .collect()
 }
 
 /// Which components would survive as sections on their own evidence.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn section_worthiness(
     supernodes: &[Supernode],
@@ -2096,6 +2163,7 @@ fn section_worthiness(
     cell_size: f64,
     tun: &Tunables,
     leaves: &mut LeafMemos,
+    occ: &HashMap<String, u32>,
 ) -> Vec<bool> {
     supernodes
         .iter()
@@ -2107,6 +2175,8 @@ fn section_worthiness(
                 n.cells.len() as f64 * cell_size,
                 config,
                 opportunity(n, coverage),
+                sport_tracks,
+                occ,
             )
         })
         .collect()
@@ -2489,6 +2559,7 @@ fn unify_chain_references(
 /// on another continent shift every cell boundary at home; local
 /// projection removes both, and makes each region's catalogue
 /// independent of the rest of the corpus.
+#[allow(clippy::too_many_arguments)]
 fn detect_for_sport(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -2497,6 +2568,7 @@ fn detect_for_sport(
     tun: &Tunables,
     section_idx: &mut usize,
     records: &mut Vec<BoundaryRecord>,
+    occ: &HashMap<String, u32>,
 ) -> Vec<FrequentSection> {
     if sport_tracks.len() < config.min_activities as usize {
         return Vec::new();
@@ -2516,6 +2588,7 @@ fn detect_for_sport(
             tun,
             section_idx,
             records,
+            occ,
         ));
     }
     sections
@@ -2528,6 +2601,7 @@ fn detect_for_sport(
 /// verbatim with the cached incremental
 /// ([`detect_sections_unified_incremental_cached`]) so a touched cluster's
 /// recompute is byte-identical to the batch's.
+#[allow(clippy::too_many_arguments)]
 fn detect_for_cluster(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -2536,6 +2610,7 @@ fn detect_for_cluster(
     tun: &Tunables,
     section_idx: &mut usize,
     records: &mut Vec<BoundaryRecord>,
+    occ: &HashMap<String, u32>,
 ) -> Vec<FrequentSection> {
     if sport_tracks.len() < config.min_activities as usize {
         return Vec::new();
@@ -2559,6 +2634,7 @@ fn detect_for_cluster(
         section_idx,
         records,
         &mut leaves,
+        occ,
     )
 }
 
@@ -2579,6 +2655,7 @@ fn detect_for_cluster_with_grid(
     section_idx: &mut usize,
     records: &mut Vec<BoundaryRecord>,
     leaves: &mut LeafMemos,
+    occ: &HashMap<String, u32>,
 ) -> Vec<FrequentSection> {
     // Hot cells: adaptive floor, never an absolute constant.
     let hot_min = (config.min_activities as usize).max(2);
@@ -2613,6 +2690,7 @@ fn detect_for_cluster_with_grid(
         cell_size,
         tun,
         leaves,
+        occ,
     );
     for _ in 0..5 {
         let before = supernodes.len();
@@ -2636,6 +2714,7 @@ fn detect_for_cluster_with_grid(
             cell_size,
             tun,
             leaves,
+            occ,
         );
     }
 
@@ -2668,7 +2747,14 @@ fn detect_for_cluster_with_grid(
         let mut portions =
             portions_for_memo(leaves, node, coverage, sport_tracks, config, cell_size, tun);
         if portions.is_empty()
-            || !has_support(&portions, approx_len, config, opportunity(node, coverage))
+            || !has_support(
+                &portions,
+                approx_len,
+                config,
+                opportunity(node, coverage),
+                sport_tracks,
+                occ,
+            )
         {
             continue;
         }
@@ -2714,7 +2800,7 @@ fn detect_for_cluster_with_grid(
                 })
                 .collect();
             let support =
-                candidate_support(&portions, &cell_set, coverage, sport_tracks, pass_min_m);
+                candidate_support(&portions, &cell_set, coverage, sport_tracks, pass_min_m, occ);
             let kept: Vec<Cell> = node
                 .cells
                 .iter()
@@ -2756,7 +2842,14 @@ fn detect_for_cluster_with_grid(
         let approx_len = node.cells.len() as f64 * cell_size;
         if portions.is_empty()
             || approx_len < config.min_section_length
-            || !has_support(&portions, approx_len, config, opportunity(&node, coverage))
+            || !has_support(
+                &portions,
+                approx_len,
+                config,
+                opportunity(&node, coverage),
+                sport_tracks,
+                occ,
+            )
         {
             continue;
         }
@@ -2856,7 +2949,14 @@ fn detect_for_cluster_with_grid(
                     portions_for(&reduced, coverage, sport_tracks, config, cell_size, tun);
                 if reduced.cells.is_empty()
                     || trimmed.is_empty()
-                    || !has_support(&trimmed, approx, config, opportunity(&reduced, coverage))
+                    || !has_support(
+                        &trimmed,
+                        approx,
+                        config,
+                        opportunity(&reduced, coverage),
+                        sport_tracks,
+                        occ,
+                    )
                 {
                     let mid = probe[probe.len() / 2];
                     records.push(BoundaryRecord {
@@ -3197,6 +3297,24 @@ pub fn detect_sections_unified_explained(
     config: &SectionConfig,
     tun: &Tunables,
 ) -> UnifiedDetection {
+    detect_sections_unified_dated(tracks, seconds, sport_types, &HashMap::new(), config, tun)
+}
+
+/// [`detect_sections_unified_explained`] with per-activity start times.
+/// Starts chaining within [`Tunables::occasion_gap_h`] form one
+/// OCCASION, and every support floor counts occasions instead of
+/// activities: a multi-day trip's files are one visit to their ground.
+/// Ids absent from `start_epochs` each count as their own occasion, so
+/// a dateless call is exactly the classic entry.
+pub fn detect_sections_unified_dated(
+    tracks: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    start_epochs: &HashMap<String, i64>,
+    config: &SectionConfig,
+    tun: &Tunables,
+) -> UnifiedDetection {
+    let occ = occasions_for(start_epochs, tun.occasion_gap_h);
     const NO_TIME: &[f64] = &[];
     // Partition tracks per sport; sections never span sports.
     type SportTracks<'a> = (Vec<(&'a str, &'a [GpsPoint])>, Vec<&'a [f64]>);
@@ -3224,6 +3342,7 @@ pub fn detect_sections_unified_explained(
             tun,
             &mut idx,
             &mut boundaries,
+            &occ,
         );
         all_sections.extend(sections);
     }
@@ -3990,7 +4109,37 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
 ) -> UnifiedIncrementalResult {
+    detect_sections_unified_incremental_dated(
+        cache,
+        existing,
+        pool,
+        new_activity_ids,
+        seconds,
+        sport_types,
+        &HashMap::new(),
+        config,
+        policy,
+    )
+}
+
+/// [`detect_sections_unified_incremental_cached_with_policy`] with
+/// per-activity start times: the incremental twin of
+/// [`detect_sections_unified_dated`], so drip and batch count occasions
+/// identically and the parity gates keep holding under dated corpora.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_sections_unified_incremental_dated(
+    cache: &mut SectionEvidenceCache,
+    existing: &[FrequentSection],
+    pool: &[(String, Vec<GpsPoint>)],
+    new_activity_ids: &[&str],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    start_epochs: &HashMap<String, i64>,
+    config: &SectionConfig,
+    policy: &SectionUpdatePolicy,
+) -> UnifiedIncrementalResult {
     let tun = Tunables::DEFAULT;
+    let occ = occasions_for(start_epochs, tun.occasion_gap_h);
     let cell_size = cluster_cell_size(config);
 
     // Pool lookup: id → (points, seconds). Empty slice when a stream is absent,
@@ -4039,7 +4188,7 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
             if c.dirty {
-                recompute_cluster(c, sport, &lookup, config, cell_size, &tun, leaves);
+                recompute_cluster(c, sport, &lookup, config, cell_size, &tun, leaves, &occ);
                 c.dirty = false;
             }
         }
@@ -4160,6 +4309,7 @@ fn bridge_only(
 /// [`detect_for_cluster_with_grid`]), so the cluster's sections equal what the
 /// batch would emit for it. Below `min_activities` the cluster emits nothing,
 /// matching the batch's per-cluster gate.
+#[allow(clippy::too_many_arguments)]
 fn recompute_cluster(
     cluster: &mut ClusterEvidence,
     sport: &str,
@@ -4168,6 +4318,7 @@ fn recompute_cluster(
     cell_size: f64,
     tun: &Tunables,
     leaves: &mut LeafMemos,
+    occ: &HashMap<String, u32>,
 ) {
     if cluster.member_ids.len() < config.min_activities as usize {
         cluster.sections.clear();
@@ -4201,6 +4352,7 @@ fn recompute_cluster(
         &mut idx,
         &mut records,
         leaves,
+        occ,
     );
 
     cluster.member_ids = members;
@@ -4338,6 +4490,7 @@ mod tests {
                 &mut idx,
                 &mut records,
                 leaves,
+                &HashMap::new(),
             )
         };
         let cold = run(&mut leaves);
@@ -4677,7 +4830,8 @@ mod tests {
         // status is irrelevant here — every qualifying pass counts.
         let portions: Vec<Portion> =
             vec![(0, 0, 60, 600.0), (1, 0, 60, 600.0), (2, 0, 120, 1200.0)];
-        let support = candidate_support(&portions, &cell_set, &coverage, &tracks, 100.0);
+        let support =
+            candidate_support(&portions, &cell_set, &coverage, &tracks, 100.0, &HashMap::new());
         let mid = coverage
             .grid
             .cell_of(corridor[30].latitude, corridor[30].longitude);
