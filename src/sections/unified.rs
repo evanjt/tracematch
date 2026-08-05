@@ -1522,43 +1522,67 @@ fn portions_for(
     let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
         let pts = sport_tracks[t_idx as usize].1;
+        if let Some((s, e, dist)) = track_portion(
+            pts,
+            &coverage.keep[t_idx as usize],
+            &core,
+            &cell_set,
+            &coverage.grid,
+            &pass_grid,
+            cell_size,
+            config,
+            tun,
+        ) {
+            portions.push((t_idx as usize, s, e, dist));
+        }
+    }
+    portions
+}
+
+/// One track's single-pass portion over one supernode's ground: the
+/// per-track half of [`portions_for`], independent of every other track.
+#[allow(clippy::too_many_arguments)]
+fn track_portion(
+    pts: &[GpsPoint],
+    keep: &[(usize, usize)],
+    core: &HashSet<Cell>,
+    cell_set: &HashSet<Cell>,
+    grid: &CellGrid,
+    pass_grid: &CellGrid,
+    cell_size: f64,
+    config: &SectionConfig,
+    tun: &Tunables,
+) -> Option<(usize, usize, f64)> {
+    {
         // Walk each lift-free range on its own: excluded ground is not
         // usable geometry even when the component touches both of its
         // ends (a base station and a summit do exactly that).
         let mut best: Option<(usize, usize, f64)> = None;
-        for &(rs, re) in &coverage.keep[t_idx as usize] {
-            if let Some((s, e, d)) = longest_run_in_cells(&pts[rs..=re], &cell_set, &coverage.grid)
+        for &(rs, re) in keep {
+            if let Some((s, e, d)) = longest_run_in_cells(&pts[rs..=re], cell_set, grid)
                 && best.as_ref().is_none_or(|b| d > b.2)
             {
                 best = Some((rs + s, rs + e, d));
             }
         }
-        let Some((mut s, mut e, _)) = best else {
-            continue;
-        };
-        while s < e && !core.contains(&coverage.grid.cell_of(pts[s].latitude, pts[s].longitude)) {
+        let (mut s, mut e, _) = best?;
+        while s < e && !core.contains(&grid.cell_of(pts[s].latitude, pts[s].longitude)) {
             s += 1;
         }
-        while e > s
-            && !core.contains(
-                &coverage
-                    .grid
-                    .cell_of(pts[e - 1].latitude, pts[e - 1].longitude),
-            )
-        {
+        while e > s && !core.contains(&grid.cell_of(pts[e - 1].latitude, pts[e - 1].longitude)) {
             e -= 1;
         }
         if e <= s + 1 {
-            continue;
+            return None;
         }
         // Single pass only: laps, return legs, and loop stems are
         // traversals, not section geometry.
-        let (ps, pe) = simple_pass_range(&pts[s..e], &pass_grid, tun);
+        let (ps, pe) = simple_pass_range(&pts[s..e], pass_grid, tun);
         let limit = e;
         e = s + pe;
         s += ps;
         if e <= s + 1 {
-            continue;
+            return None;
         }
         let mut dist = crate::matching::calculate_route_distance(&pts[s..e]);
         // Closure snap: the cut lands on a coarse cell boundary, which
@@ -1588,20 +1612,22 @@ fn portions_for(
             }
         }
         if dist >= config.min_section_length && dist <= config.max_section_length {
-            portions.push((t_idx as usize, s, e, dist));
+            Some((s, e, dist))
+        } else {
+            None
         }
     }
-    portions
 }
 
-/// [`portions_for`] through the leaf memo: hit on the complete input
-/// fingerprint, convert stored activity ids back to this rebuild's track
-/// indices, miss computes and stores. Observationally identical to the
-/// direct call (the warm/cold certificate test pins it).
+/// [`portions_for`] through the per-track leaf memo: the node's cell set
+/// is interned once, then each member track hits on its own complete
+/// fingerprint or computes via the same [`track_portion`] the direct path
+/// uses. Observationally identical to [`portions_for`] (the warm/cold
+/// certificate pins it); on saturated ground a new activity leaves every
+/// existing member's entry valid and pays only for its own cut.
 #[allow(clippy::too_many_arguments)]
 fn portions_for_memo(
     leaves: &mut LeafMemos,
-    idx_of: &HashMap<&str, usize>,
     node: &Supernode,
     coverage: &CoverageGrid,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -1609,42 +1635,60 @@ fn portions_for_memo(
     cell_size: f64,
     tun: &Tunables,
 ) -> Vec<Portion> {
-    let mut cells = node.cells.clone();
-    cells.sort_unstable();
-    let mut tracks: Vec<(String, Vec<(usize, usize)>)> = node
-        .tracks
-        .iter()
-        .map(|&t| {
-            (
-                sport_tracks[t as usize].0.to_string(),
-                coverage.keep[t as usize].clone(),
-            )
-        })
-        .collect();
-    tracks.sort();
-    let key = PortionsKey {
-        cells,
-        tracks,
-        ref_lat_bits: coverage.ref_lat.to_bits(),
-        cell_size_bits: cell_size.to_bits(),
-        min_len_bits: config.min_section_length.to_bits(),
-        max_len_bits: config.max_section_length.to_bits(),
-    };
-    if let Some(hit) = leaves.portions.get(&key) {
-        return hit
-            .iter()
-            .map(|(id, ps, pe, m)| (idx_of[id.as_str()], *ps, *pe, *m))
-            .collect();
+    let core: HashSet<Cell> = node.cells.iter().copied().collect();
+    let mut cell_set: HashSet<Cell> = HashSet::with_capacity(node.cells.len() * 9);
+    for c in &node.cells {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                cell_set.insert((c.0 + dy, c.1 + dx));
+            }
+        }
     }
-    let fresh = portions_for(node, coverage, sport_tracks, config, cell_size, tun);
-    leaves.portions.insert(
-        key,
-        fresh
-            .iter()
-            .map(|&(t, ps, pe, m)| (sport_tracks[t].0.to_string(), ps, pe, m))
-            .collect(),
-    );
-    fresh
+    let pass_grid = CellGrid::new(cell_size / tun.pass_subgrid, coverage.ref_lat);
+
+    let mut cells_sorted = node.cells.clone();
+    cells_sorted.sort_unstable();
+    let next_id = leaves.cell_sets.len() as u32;
+    let cells_id = *leaves.cell_sets.entry(cells_sorted).or_insert(next_id);
+
+    let mut t_indices: Vec<u32> = node.tracks.iter().copied().collect();
+    t_indices.sort_unstable_by(|&a, &b| sport_tracks[a as usize].0.cmp(sport_tracks[b as usize].0));
+
+    let mut portions: Vec<Portion> = Vec::new();
+    for &t_idx in &t_indices {
+        let (id, pts) = sport_tracks[t_idx as usize];
+        let key = TrackPortionKey {
+            track: id.to_string(),
+            cells: cells_id,
+            keep: coverage.keep[t_idx as usize].clone(),
+            ref_lat_bits: coverage.ref_lat.to_bits(),
+            cell_size_bits: cell_size.to_bits(),
+            min_len_bits: config.min_section_length.to_bits(),
+            max_len_bits: config.max_section_length.to_bits(),
+        };
+        let cut = match leaves.track_portions.get(&key) {
+            Some(hit) => *hit,
+            None => {
+                let fresh = track_portion(
+                    pts,
+                    &coverage.keep[t_idx as usize],
+                    &core,
+                    &cell_set,
+                    &coverage.grid,
+                    &pass_grid,
+                    cell_size,
+                    config,
+                    tun,
+                );
+                leaves.track_portions.insert(key, fresh);
+                fresh
+            }
+        };
+        if let Some((ps, pe, dist)) = cut {
+            portions.push((t_idx as usize, ps, pe, dist));
+        }
+    }
+    portions
 }
 
 /// Tracks passing within ~2 cells of the component: the population
@@ -1909,21 +1953,12 @@ fn section_worthiness(
     cell_size: f64,
     tun: &Tunables,
     leaves: &mut LeafMemos,
-    idx_of: &HashMap<&str, usize>,
 ) -> Vec<bool> {
     supernodes
         .iter()
         .map(|n| {
-            let portions = portions_for_memo(
-                leaves,
-                idx_of,
-                n,
-                coverage,
-                sport_tracks,
-                config,
-                cell_size,
-                tun,
-            );
+            let portions =
+                portions_for_memo(leaves, n, coverage, sport_tracks, config, cell_size, tun);
             has_support(
                 &portions,
                 n.cells.len() as f64 * cell_size,
@@ -2402,11 +2437,6 @@ fn detect_for_cluster_with_grid(
     records: &mut Vec<BoundaryRecord>,
     leaves: &mut LeafMemos,
 ) -> Vec<FrequentSection> {
-    let idx_of: HashMap<&str, usize> = sport_tracks
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _))| (*id, i))
-        .collect();
     // Hot cells: adaptive floor, never an absolute constant.
     let hot_min = (config.min_activities as usize).max(2);
     let mut hot_cells: Vec<Cell> = coverage
@@ -2440,7 +2470,6 @@ fn detect_for_cluster_with_grid(
         cell_size,
         tun,
         leaves,
-        &idx_of,
     );
     for _ in 0..5 {
         let before = supernodes.len();
@@ -2464,7 +2493,6 @@ fn detect_for_cluster_with_grid(
             cell_size,
             tun,
             leaves,
-            &idx_of,
         );
     }
 
@@ -2494,16 +2522,8 @@ fn detect_for_cluster_with_grid(
             continue;
         }
 
-        let mut portions = portions_for_memo(
-            leaves,
-            &idx_of,
-            node,
-            coverage,
-            sport_tracks,
-            config,
-            cell_size,
-            tun,
-        );
+        let mut portions =
+            portions_for_memo(leaves, node, coverage, sport_tracks, config, cell_size, tun);
         if portions.is_empty()
             || !has_support(&portions, approx_len, config, opportunity(node, coverage))
         {
@@ -3591,28 +3611,45 @@ struct LeafMemos {
     /// activity id. The cross-track descent rescue is recomputed per rebuild
     /// (bbox-gated, and free while no member carries a candidate).
     lift_candidates: HashMap<String, Vec<(usize, usize)>>,
-    /// [`portions_for`] results keyed by the supernode's complete input
-    /// fingerprint. Values carry activity ids, not track indices: indices
-    /// depend on cluster member ordering, which a bridge merge reshuffles.
-    portions: HashMap<PortionsKey, Vec<(String, usize, usize, f64)>>,
+    /// Interned supernode cell sets: full-equality mapping from the sorted
+    /// cell list to a stable small id, so per-track keys stay exact without
+    /// hashing the whole cell list per track. Append-only between sweeps;
+    /// cleared ONLY together with `track_portions` (a reused intern id under
+    /// a live key would alias two different cell sets).
+    cell_sets: HashMap<Vec<Cell>, u32>,
+    /// Per-track [`track_portion`] results keyed by (activity id, interned
+    /// cell set, lift-free keep ranges, projection, length bounds). Portions
+    /// are computed per track independently, so on saturated ground a new
+    /// activity leaves every existing track's entry valid and pays only for
+    /// its own cut.
+    track_portions: HashMap<TrackPortionKey, Option<(usize, usize, f64)>>,
     /// [`process_cluster`] results keyed by the candidate's portion set,
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.
     consensus: HashMap<ConsensusKey, Option<FrequentSection>>,
 }
 
-/// Complete input fingerprint of one [`portions_for`] call: the node's
-/// cells, its member tracks (activity id + lift-free keep ranges), the
-/// projection, and the config fields the cut reads.
+/// Complete input fingerprint of one [`track_portion`] call: the activity,
+/// the supernode's interned cell set, the track's lift-free keep ranges,
+/// the projection, and the config fields the cut reads.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct PortionsKey {
-    cells: Vec<Cell>,
-    tracks: Vec<(String, Vec<(usize, usize)>)>,
+struct TrackPortionKey {
+    track: String,
+    cells: u32,
+    keep: Vec<(usize, usize)>,
     ref_lat_bits: u64,
     cell_size_bits: u64,
     min_len_bits: u64,
     max_len_bits: u64,
 }
+
+/// Memory bounds for the leaf memos, in entries. Blunt and exact: tripping
+/// a cap clears the affected maps whole (one cold rebuild re-warms them),
+/// never evicts selectively. `cell_sets` and `track_portions` clear
+/// together — intern ids must not outlive their table.
+const MEMO_CELL_SETS_CAP: usize = 20_000;
+const MEMO_TRACK_PORTIONS_CAP: usize = 200_000;
+const MEMO_CONSENSUS_CAP: usize = 10_000;
 
 /// Complete input fingerprint of one [`process_cluster`] call: the portion
 /// set (activity id + range), the sport label baked into the id and the
@@ -3820,6 +3857,17 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     // Recompute-once over the final membership equals the batch's per-cluster
     // detect, so `cached == batch` is preserved (the oracle guards it).
     let leaves = &mut cache.leaves;
+    // Blunt cap sweeps: a full clear costs one cold rebuild and keeps every
+    // hit exact. The intern table and its dependent keys clear together.
+    if leaves.cell_sets.len() > MEMO_CELL_SETS_CAP
+        || leaves.track_portions.len() > MEMO_TRACK_PORTIONS_CAP
+    {
+        leaves.cell_sets.clear();
+        leaves.track_portions.clear();
+    }
+    if leaves.consensus.len() > MEMO_CONSENSUS_CAP {
+        leaves.consensus.clear();
+    }
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
             if c.dirty {
@@ -4132,7 +4180,7 @@ mod tests {
         assert_eq!(enc(&cold), enc(&warm));
         assert_eq!(enc(&cold), enc(&rewarm));
         assert!(
-            !leaves.portions.is_empty() && !leaves.consensus.is_empty(),
+            !leaves.track_portions.is_empty() && !leaves.consensus.is_empty(),
             "the warm runs must actually have consulted the memos"
         );
     }
