@@ -233,6 +233,90 @@ pub fn parallel_variants(outings: usize, offset: f64) -> Vec<(String, Vec<GpsPoi
         .collect()
 }
 
+/// A busy corridor whose continuation keeps only a minority of its
+/// traffic: all `heavy` outings run the west stretch (x 0..1500), the
+/// first `light` of them continue east to 3000. Everything is
+/// collinear with staggered starts and stops (no turnaround, no third
+/// corridor anywhere), so the only visible reason for the busy section
+/// to end near 1500 is the majority usage change there.
+pub fn cliff_tail(heavy: usize, light: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..heavy)
+        .map(|i| {
+            let start = (-200.0 - 8.0 * i as f64, 0.0);
+            let end = if i < light {
+                (3000.0 + 8.0 * i as f64, 0.0)
+            } else {
+                (1500.0, 0.0)
+            };
+            let path = densify(&[start, end]);
+            (
+                format!("cliff_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// A straight body with a minority mid-life variant: every outing runs
+/// x 0..1200 along y=0, but the first `divert` swap onto a parallel
+/// strand 180 m north between x 400 and 800. The strand is real
+/// repeated ground for its minority; the body keeps the majority. The
+/// braid mouths are the only joins — no turnaround, no third corridor.
+pub fn minority_braid(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let start = (-200.0 - 8.0 * i as f64, 0.0);
+            let end = (2400.0 + 8.0 * i as f64, 0.0);
+            let path = if i < divert {
+                vec![
+                    start,
+                    (400.0, 0.0),
+                    (460.0, 180.0),
+                    (1340.0, 180.0),
+                    (1400.0, 0.0),
+                    end,
+                ]
+            } else {
+                vec![start, end]
+            };
+            (
+                format!("braid_{}", i),
+                track(&wobble(&densify(&path), HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// The short-strand braid: every outing runs the same busy line, but
+/// the first `divert` swap onto a ~90 m variant 120 m north — far below
+/// section length, so the strand can only ever be a fragment. Its
+/// ground is real minority evidence, but the sections around it belong
+/// to the majority line.
+pub fn short_strand(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let start = (-200.0 - 8.0 * i as f64, 0.0);
+            let end = (1400.0 + 8.0 * i as f64, 0.0);
+            let path = if i < divert {
+                vec![
+                    start,
+                    (500.0, 0.0),
+                    (530.0, 120.0),
+                    (590.0, 120.0),
+                    (620.0, 0.0),
+                    end,
+                ]
+            } else {
+                vec![start, end]
+            };
+            (
+                format!("strand_{}", i),
+                track(&wobble(&densify(&path), HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
 /// A shared trunk splitting into two worthy branches: half the outings
 /// take each. Point-to-point, one pass everywhere, so the only boundary
 /// mechanism available at the join is the fork.

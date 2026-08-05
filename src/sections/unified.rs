@@ -134,6 +134,13 @@ pub enum BoundaryReason {
     /// junction. The stretch is cut; the section stands on the
     /// supported remnant.
     LowSupport { floor: u32, dropped_cells: u32 },
+    /// The join-local traffic halves: most of the thick side's users
+    /// never reach the thin side, and their departure is the visible
+    /// reason the section ends — a braid mouth rejoining wide, a
+    /// popular stopping point, a corridor shedding most of its traffic
+    /// at once. Rule 9's majority usage change measured as volume,
+    /// where [`BoundaryReason::UsageChange`] measures it as pass class.
+    TrafficCliff { thin: u32, thick: u32 },
 }
 
 /// A detection outcome that carries its explanations.
@@ -295,6 +302,28 @@ pub struct Tunables {
     /// mid-line spin 0.34, a directionless junction 0.60; the plateau
     /// sweep lands with A1.
     pub self_pass_max: f64,
+    /// Clean-render bar: the default render (longest portion, or the
+    /// medoid) keeps its stability privilege only while essentially
+    /// fold-free — under this share of revisiting points. Between here
+    /// and [`Tunables::self_pass_max`] a legal but visibly folded
+    /// default is displaced by the cleanest contributing pass (the
+    /// penalty's blind band: a knot 100-200 m along-trace is charged
+    /// by [`self_pass_penalty`] but too tight for the dwell cut).
+    /// Sits above the clean-line noise floor (straight passes measure
+    /// < 0.02); plateau sweep beside `self_pass_max`.
+    pub self_pass_clean: f64,
+    /// Majority-render bar: the longest contiguous stretch of a
+    /// rendered line allowed on minority ground (supported by fewer
+    /// than half the section's own contributing portions) before the
+    /// render prefers a majority-faithful portion instead. The
+    /// coverage ring's lane-width capture can thread one contributor's
+    /// braid variant through a candidate; the drawn line is the
+    /// section's public face and must be where the majority went. A
+    /// sustained run marks a variant walk; scattered single samples (a
+    /// staircase jog, an end taper) never trip it. Three samples at
+    /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
+    /// floor; plateau sweep beside `self_pass_max`.
+    pub minority_run_m: f64,
     /// Projection latitude quantisation, in degrees. A cluster's
     /// `ref_lat` snaps to the nearest multiple, so the metre projection
     /// is a step function of the activity set: a routine add leaves
@@ -327,6 +356,8 @@ impl Tunables {
         descent_match_m: 60.0,
         cluster_gap_m: 50_000.0,
         self_pass_max: 0.25,
+        self_pass_clean: 0.05,
+        minority_run_m: 60.0,
         ref_lat_quant_deg: 0.1,
     };
 }
@@ -1129,6 +1160,36 @@ fn is_usage_boundary(shared: usize, mismatch: usize) -> bool {
     shared > 0 && mismatch as f64 > (0.5 * shared as f64).max(1.0)
 }
 
+/// Join-local traffic on each side: the union of tracks over the
+/// boundary-touching cells. The join is a cliff when the thin side
+/// carries less than half the thick side's traffic — the majority's
+/// experience of the ground ends there (rule 9's majority usage
+/// change, measured as volume), even when the leavers' alternative is
+/// not visible at the join: a braid mouth rejoining wide, unique
+/// dispersal exits, activities simply ending. The majority bar mirrors
+/// [`is_usage_boundary`]; the one-track absolute slack mirrors
+/// [`same_traffic_sets`] so tiny corridors never fragment. Gradual
+/// attrition (traffic shed one track at a time along the corridor)
+/// never trips it — each join's local sets stay within the slack.
+fn traffic_cliff(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> Option<(u32, u32)> {
+    let mut la: HashSet<u32> = HashSet::new();
+    let mut lb: HashSet<u32> = HashSet::new();
+    for &(ca, cb) in pairs {
+        if let Some(t) = coverage.cell_tracks.get(&ca) {
+            la.extend(t.iter().copied());
+        }
+        if let Some(t) = coverage.cell_tracks.get(&cb) {
+            lb.extend(t.iter().copied());
+        }
+    }
+    let (thin, thick) = if la.len() <= lb.len() {
+        (la.len(), lb.len())
+    } else {
+        (lb.len(), la.len())
+    };
+    (thick - thin > 1 && 2 * thin < thick).then_some((thin as u32, thick as u32))
+}
+
 /// The departing traffic collected by the best section-worthy third
 /// corridor at the join, when any collects enough to make the fork
 /// real.
@@ -1207,6 +1268,14 @@ fn explain_boundaries(
             });
             continue;
         }
+        if let Some((thin, thick)) = traffic_cliff(pairs, coverage) {
+            records.push(BoundaryRecord {
+                latitude: lat,
+                longitude: lng,
+                reason: BoundaryReason::TrafficCliff { thin, thick },
+            });
+            continue;
+        }
         if !section_worthy[a] || !section_worthy[b] {
             continue;
         }
@@ -1281,6 +1350,12 @@ fn merge_non_fork_boundaries(
         let pairs = &boundary[&(a, b)];
         let (shared, mismatch) = join_usage_mismatch(pairs, coverage);
         if is_usage_boundary(shared, mismatch) {
+            continue;
+        }
+        // A majority usage change is a boundary in its own right: the
+        // join neither merges nor lets a fragment absorb across it, or
+        // the thin side's ground would wear the thick side's counts.
+        if traffic_cliff(pairs, coverage).is_some() {
             continue;
         }
 
@@ -1753,6 +1828,74 @@ fn portion_point_index(
         }
     }
     idx
+}
+
+/// Longest contiguous run (metres) of a line's ~20 m samples on
+/// minority ground: supported by fewer than half of `contributors`
+/// distinct portions within `near_m` at metre resolution. A braid
+/// variant captured by the coverage ring's lane width, or a private
+/// tail, reads as a sustained run; a staircase jog or an end taper
+/// reads as scattered single samples. The render choice prefers lines
+/// without a sustained minority run — the drawn line is the section's
+/// public face and must be where the majority went (rule 9's majority
+/// principle applied to the DISPLAY).
+fn minority_run_m(
+    line: &[GpsPoint],
+    index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
+    ref_lat: f64,
+    near_m: f64,
+    cell_m: f64,
+    contributors: usize,
+) -> f64 {
+    const STEP_M: f64 = 20.0;
+    if line.len() < 2 || contributors < 3 {
+        return 0.0;
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let reach = (near_m / cell_m).ceil() as i32;
+    let mut longest = 0.0f64;
+    let mut run_start: Option<f64> = None;
+    let mut acc = 0.0;
+    let mut last = -STEP_M;
+    for (i, p) in line.iter().enumerate() {
+        if i > 0 {
+            let (dx, dy) = (
+                (p.latitude - line[i - 1].latitude) * m_lat,
+                (p.longitude - line[i - 1].longitude) * m_lng,
+            );
+            acc += (dx * dx + dy * dy).sqrt();
+        }
+        if acc - last < STEP_M {
+            continue;
+        }
+        last = acc;
+        let (px, py) = (p.latitude * m_lat, p.longitude * m_lng);
+        let c = (
+            (p.latitude * m_lat / cell_m).floor() as i32,
+            (p.longitude * m_lng / cell_m).floor() as i32,
+        );
+        let mut sup: HashSet<u32> = HashSet::new();
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                if let Some(v) = index.get(&(c.0 + dy, c.1 + dx)) {
+                    for &(t, lat, lng) in v {
+                        if ((lat * m_lat - px).powi(2) + (lng * m_lng - py).powi(2)).sqrt() < near_m
+                        {
+                            sup.insert(t);
+                        }
+                    }
+                }
+            }
+        }
+        if 2 * sup.len() < contributors {
+            let start = *run_start.get_or_insert(acc);
+            longest = longest.max(acc - start + STEP_M);
+        } else {
+            run_start = None;
+        }
+    }
+    longest
 }
 
 /// The point-index range of a rendered line that keeps only its
@@ -2884,24 +3027,50 @@ fn detect_for_cluster_with_grid(
                     sport_tracks[t].1[s..e].to_vec()
                 })
                 .unwrap_or_else(|| section.polyline.clone());
-            let cleanest_i = (0..portions.len()).min_by(|&a, &b| {
-                pens[a]
-                    .partial_cmp(&pens[b])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(
-                        portions[b]
-                            .3
-                            .partial_cmp(&portions[a].3)
-                            .unwrap_or(std::cmp::Ordering::Equal),
+            // The default render (longest/medoid) keeps its stability
+            // privilege only while essentially clean AND on majority
+            // ground. Otherwise the render falls to the best legal
+            // pass: majority-faithful first, then cleanest, then
+            // longest — a visibly folded or minority-walking default
+            // must not be the section's public face. A candidate whose
+            // every pass is over the fold floor backs off as a blob.
+            let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
+            let runs: Vec<f64> = portions
+                .iter()
+                .map(|&(t, s, e, _)| {
+                    minority_run_m(
+                        &sport_tracks[t].1[s..e],
+                        &fine,
+                        coverage.ref_lat,
+                        25.0,
+                        25.0,
+                        portions.len(),
                     )
-            });
-            // The default render (longest/medoid) stands when it is a
-            // single pass; above the floor the cleanest contributing pass
-            // is displayed instead, and a candidate whose cleanest pass is
-            // still over the floor backs off as a blob.
+                })
+                .collect();
+            let faithful = |i: usize| runs[i] < tun.minority_run_m;
+            let legal = |i: usize| pens[i] <= tun.self_pass_max;
+            // A faithful default under the clean bar keeps its
+            // stability privilege. Otherwise the render falls to the
+            // legal pass with the shortest sustained minority run,
+            // cleanest then longest among ties: a variant-walking or
+            // silent-ground-bridging line must not be the section's
+            // public face when a truer one exists. A candidate with no
+            // legal pass at all backs off as a blob.
             let chosen = match default_i {
-                Some(i) if pens[i] <= tun.self_pass_max => Some(i),
-                _ => cleanest_i.filter(|&i| pens[i] <= tun.self_pass_max),
+                Some(d) if legal(d) && faithful(d) && pens[d] <= tun.self_pass_clean => Some(d),
+                _ => (0..portions.len()).filter(|&i| legal(i)).min_by(|&a, &b| {
+                    runs[a]
+                        .partial_cmp(&runs[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(pens[a].partial_cmp(&pens[b]).unwrap_or(std::cmp::Ordering::Equal))
+                        .then(
+                            portions[b]
+                                .3
+                                .partial_cmp(&portions[a].3)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                }),
             };
             let Some(i) = chosen else {
                 // No pass is a single traversal: the candidate backs off,
@@ -2933,7 +3102,6 @@ fn detect_for_cluster_with_grid(
             // still one real single pass — a sub-range of the same
             // trace — and the extent, counts, and occupied footprint
             // below keep the full portion, so nothing downstream shifts.
-            let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
             let (cs, ce) = minority_end_clip(
                 &sport_tracks[t_idx].1[s..e],
                 &fine,
