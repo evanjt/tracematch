@@ -295,6 +295,18 @@ pub struct Tunables {
     /// mid-line spin 0.34, a directionless junction 0.60; the plateau
     /// sweep lands with A1.
     pub self_pass_max: f64,
+    /// Projection latitude quantisation, in degrees. A cluster's
+    /// `ref_lat` snaps to the nearest multiple, so the metre projection
+    /// is a step function of the activity set: a routine add leaves
+    /// every cell boundary in place, which is what makes per-track and
+    /// per-cluster leaves cacheable at all. Derivation-anchored, like
+    /// `cluster_gap_m`: the snap moves the projection latitude at most
+    /// half a band, an east-west scale error of tan(lat) x half-band —
+    /// about 0.15% at 60 degrees, an order under the 1% budget that
+    /// sized `cluster_gap_m`. When a mean does cross a band edge the
+    /// cluster re-projects once and the hysteresis layer absorbs the
+    /// re-cut like any other evidence shift.
+    pub ref_lat_quant_deg: f64,
 }
 
 impl Tunables {
@@ -315,6 +327,7 @@ impl Tunables {
         descent_match_m: 60.0,
         cluster_gap_m: 50_000.0,
         self_pass_max: 0.25,
+        ref_lat_quant_deg: 0.1,
     };
 }
 
@@ -661,7 +674,10 @@ fn build_coverage_grid(
         if lats.is_empty() {
             0.0
         } else {
-            lats.iter().sum::<f64>() / lats.len() as f64
+            // Snap to the quantisation lattice so the projection is a step
+            // function of the activity set (see `Tunables::ref_lat_quant_deg`).
+            let mean = lats.iter().sum::<f64>() / lats.len() as f64;
+            (mean / tun.ref_lat_quant_deg).round() * tun.ref_lat_quant_deg
         }
     };
     let grid = CellGrid::new(cell_size_m, ref_lat);
@@ -3797,6 +3813,57 @@ mod tests {
                 GpsPoint::with_elevation(46.0 + step_deg * i as f64, 7.0 + lng, ele_step * i as f64)
             })
             .collect()
+    }
+
+    #[test]
+    fn ref_lat_is_quantised_and_add_stable() {
+        // Two track sets whose latitude means differ but sit inside one
+        // quantisation band must project identically: the grid is a step
+        // function of the activity set, so a routine add moves no cell
+        // boundary. Scenario: home ground near 46.02; a new ride at 46.04.
+        let a: Vec<GpsPoint> = (0..200)
+            .map(|i| GpsPoint::new(46.02 + 1.0e-5 * i as f64, 7.0))
+            .collect();
+        let b: Vec<GpsPoint> = (0..200)
+            .map(|i| GpsPoint::new(46.04 + 1.0e-5 * i as f64, 7.01))
+            .collect();
+        let one: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice())];
+        let two: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice()), ("b", b.as_slice())];
+        let g1 = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT);
+        let g2 = build_coverage_grid(&two, &[], 100.0, &Tunables::DEFAULT);
+        assert_eq!(
+            g1.ref_lat, g2.ref_lat,
+            "an add inside the band must not move the projection"
+        );
+        let bands = g1.ref_lat / Tunables::DEFAULT.ref_lat_quant_deg;
+        assert!(
+            (bands - bands.round()).abs() < 1e-9,
+            "ref_lat {} is not on the quantisation lattice",
+            g1.ref_lat
+        );
+    }
+
+    #[test]
+    fn ref_lat_quantisation_error_is_negligible() {
+        // Snapping the projection latitude moves it at most half a band;
+        // the resulting east-west scale error must stay an order under the
+        // 1% budget that sized cluster_gap_m, out to polar-circle latitudes.
+        let half_band = Tunables::DEFAULT.ref_lat_quant_deg / 2.0;
+        let mut lat: f64 = 0.0;
+        while lat <= 66.5 {
+            let snapped = (lat + half_band).to_radians().cos();
+            let true_scale = lat.to_radians().cos();
+            let err = (snapped / true_scale - 1.0).abs();
+            // tan(66.5 deg) x half a band = 0.201%, the polar-circle worst
+            // case; still five times under the 1% cluster_gap_m budget.
+            assert!(
+                err < 0.0025,
+                "scale error {:.4} at latitude {} exceeds the bound",
+                err,
+                lat
+            );
+            lat += 0.5;
+        }
     }
 
     #[test]
