@@ -335,6 +335,26 @@ pub fn plain_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
         .collect()
 }
 
+/// A long corridor no one traverses end to end: outing i covers a
+/// 1500 m window starting 110 m after outing i-1's, the way a valley
+/// path collects travellers who each join and leave at their own
+/// points. Local traffic is steady through the interior and changes by
+/// single tracks along the way, so no join is ever a cliff and the
+/// ground is one corridor — but the longest single pass covers barely
+/// a third of it.
+pub fn sliding_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let x0 = 110.0 * i as f64;
+            let path = densify(&[(x0, 0.0), (x0 + 1500.0, 0.0)]);
+            (
+                format!("slide_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
 /// A busy corridor whose traffic scatters wide and incoherently: every
 /// outing rides the full length, but each drifts laterally through its
 /// own deterministic knot sequence (±55 m, knots every 150 m), the way
