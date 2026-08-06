@@ -396,6 +396,31 @@ fn scattered_traffic_is_still_one_corridor() {
 }
 
 #[test]
+fn corridor_no_one_runs_end_to_end_is_still_covered() {
+    // Scenario: a 4 km valley corridor where every outing covers only
+    // its own 1.5 km window, joining and leaving at its own points.
+    // Interior traffic is 8-14 tracks and only ever changes by one
+    // track at a join, so no boundary fires and the ground is one
+    // corridor — while the longest single pass spans barely a third.
+    // Expected behaviour: a section draws one real pass, so the
+    // corridor is covered by a chain of honest single-pass sections.
+    // Ground a section owns but cannot draw must re-enter the
+    // candidate pool, not vanish behind the one rendered line.
+    let tracks = shapes::sliding_corridor(24);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    let interior = metre_samples(&[(800.0, 0.0), (3200.0, 0.0)], 40.0);
+    let cov = coverage(&interior, &sections, 90.0);
+    assert!(
+        cov >= 0.9,
+        "busy interior must stay covered by the section chain (coverage {:.0}%)",
+        cov * 100.0
+    );
+}
+
+#[test]
 fn displaced_render_does_not_pinch_the_parallel_street() {
     // Scenario: a busy street and a quieter parallel street 180 m
     // away, plus three outings that swap across for the middle stretch.
@@ -661,13 +686,19 @@ fn grid_city_respects_floors_and_forks() {
             "shared terminal ground missing from the catalogue"
         );
     }
+    // The guard is the matching corridor half-width (one evidence
+    // cell): quiet ground is IN a section when a line runs within its
+    // corridor. Remainder re-queue surfaces the 3-visit bottom-street
+    // continuation, whose honest end may stop one ring short of the
+    // quiet stretch — outside the corridor, but nearer than padding
+    // would allow.
     let silent = [
         shapes::to_gps(625.0, 0.0),   // 1 visit: never hot ground
         shapes::to_gps(250.0, 625.0), // 1 visit
     ];
     for p in &silent {
         assert!(
-            sections.iter().all(|s| min_dist(p, &s.polyline) > 130.0),
+            sections.iter().all(|s| min_dist(p, &s.polyline) > 100.0),
             "once-visited ground appeared in a section"
         );
     }

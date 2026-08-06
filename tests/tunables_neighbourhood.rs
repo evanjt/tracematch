@@ -172,21 +172,45 @@ fn assert_catalogue_invariants(
 fn commuter_corridor_holds_across_pass_neighbours() {
     // The commuter road has no laps, no forks, and no usage change, so
     // no pass tunable should have anything to decide: one section at
-    // the default and at every neighbour.
+    // the default. A neighbour that reads the corner as a re-entry
+    // (reach 2 triples the lateral reach) may split the road's passes
+    // there and draw it as a two-link chain — what it must never do is
+    // lose the road: before remainder re-queue that same neighbour
+    // silently dropped a 560 m stretch of a 12-track road, and a
+    // count-only assertion could not see it.
     let tracks = shapes::persona_commuter();
     let base = detect_with(&tracks, &Tunables::DEFAULT);
     assert_catalogue_invariants("default", &tracks, &base);
     assert_eq!(base.len(), 1, "one commuter corridor at the default");
+    let spine = metre_road_samples();
 
     for (name, tun) in neighbours() {
         let sections = detect_with(&tracks, &tun);
         assert_catalogue_invariants(name, &tracks, &sections);
-        assert_eq!(
-            sections.len(),
-            base.len(),
-            "{name}: the commuter corridor is not on the plateau"
+        assert!(
+            sections.len() <= 2,
+            "{name}: the commuter corridor shattered ({} sections)",
+            sections.len()
+        );
+        let cov = spine
+            .iter()
+            .filter(|p| sections.iter().any(|s| min_dist(p, &s.polyline) < 90.0))
+            .count() as f64
+            / spine.len() as f64;
+        assert!(
+            cov >= 0.95,
+            "{name}: commuter road ground lost (coverage {:.0}%)",
+            cov * 100.0
         );
     }
+}
+
+fn metre_road_samples() -> Vec<GpsPoint> {
+    shapes::densify(&[(0.0, 0.0), (600.0, 0.0), (600.0, 500.0), (1300.0, 500.0)])
+        .iter()
+        .step_by(8)
+        .map(|&(x, y)| shapes::to_gps(x, y))
+        .collect()
 }
 
 #[test]

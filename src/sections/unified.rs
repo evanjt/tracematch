@@ -141,6 +141,11 @@ pub enum BoundaryReason {
     /// at once. Rule 9's majority usage change measured as volume,
     /// where [`BoundaryReason::UsageChange`] measures it as pass class.
     TrafficCliff { thin: u32, thick: u32 },
+    /// The section's one real pass ended here but its corridor's
+    /// ground runs on. The ground beyond re-entered the candidate
+    /// queue on its own merits; this record marks the seam between a
+    /// section and the next link of its chain.
+    PassEnd { requeued_cells: u32 },
 }
 
 /// A detection outcome that carries its explanations.
@@ -2281,6 +2286,140 @@ fn geo_clusters(tracks: &[(&str, &[GpsPoint])], gap_m: f64) -> Vec<Vec<usize>> {
 /// candidate here, while comparing absolute elevations across
 /// activities recorded on different days is barometric-drift noise
 /// that makes every trim decision flicker.
+/// Every bar a would-be candidate must clear before it may compete for
+/// a render: whole-candidate support, per-cell support pruning, and the
+/// post-prune gates. One implementation shared by the supernode sweep
+/// and by remainder re-queue, so ground a render could not draw faces
+/// exactly the bars a fresh candidate does.
+#[allow(clippy::too_many_arguments)]
+fn qualify_candidate(
+    node: Supernode,
+    mut portions: Vec<Portion>,
+    coverage: &CoverageGrid,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    config: &SectionConfig,
+    cell_size: f64,
+    tun: &Tunables,
+    starts: &HashMap<String, i64>,
+    span_s: i64,
+    records: &mut Vec<BoundaryRecord>,
+) -> Option<(Supernode, Vec<Portion>, f64)> {
+    let approx_len = node.cells.len() as f64 * cell_size;
+    if portions.is_empty()
+        || !has_support(
+            &portions,
+            approx_len,
+            config,
+            opportunity(&node, coverage),
+            sport_tracks,
+            starts,
+            span_s,
+        )
+    {
+        return None;
+    }
+
+    // Pre-trim score: ordering must not depend on the trim below,
+    // or a trimmed candidate sinks in the backoff queue and every
+    // later candidate's represented-ground trim reshuffles. The
+    // trim corrects a candidate's extent, never its priority.
+    let score: f64 = portions.iter().map(|p| p.3).sum();
+
+    // Support binds along the length, not just in total (rule 5): a
+    // stretch of a candidate's ground traversed by fewer of its OWN
+    // contributors than the floor is not this section's ground,
+    // however hot stranger traffic made its cells. Without this, a
+    // near-private spur welds onto a busy corridor through the
+    // traffic gradient at their junction (adjacent thin cells always
+    // pass the one-missing-track rule), inherits the corridor's
+    // visit count, and can be rendered. The floor is the same bar
+    // the whole section must meet in [`has_support`], fixed from
+    // the pre-trim portions: recomputing it as portions shorten
+    // would ratchet the length tier stricter each round and spiral
+    // a legitimate short section to death. A qualifying pass must
+    // cover two cells of arc, scaled down for candidates shorter
+    // than that so a genuine pass over a short section still
+    // counts. Cells and portions only ever shrink, so the loop
+    // terminates.
+    let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
+    lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_len = lens[lens.len() / 2];
+    let required = required_visits_for_length(median_len, opportunity(&node, coverage)) as usize;
+    let floor = required.max(config.min_activities as usize) as u32;
+    let pass_min_m = (2.0 * cell_size).min(0.5 * median_len);
+    let mut node = node;
+    loop {
+        let cell_set: HashSet<Cell> = node
+            .cells
+            .iter()
+            .flat_map(|c| {
+                (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
+            })
+            .collect();
+        let support = candidate_support(
+            &portions,
+            &cell_set,
+            coverage,
+            sport_tracks,
+            pass_min_m,
+            starts,
+        );
+        let kept: Vec<Cell> = node
+            .cells
+            .iter()
+            .copied()
+            .filter(|c| support.get(c).copied().unwrap_or(0) >= floor)
+            .collect();
+        if kept.len() == node.cells.len() {
+            break;
+        }
+        let kept_set: HashSet<Cell> = kept.iter().copied().collect();
+        let dropped: Vec<Cell> = node
+            .cells
+            .iter()
+            .copied()
+            .filter(|c| !kept_set.contains(c))
+            .collect();
+        let (lat, lng) = dropped.iter().fold((0.0, 0.0), |(la, ln), c| {
+            let (cla, cln) = coverage.grid.centre_of(*c);
+            (la + cla, ln + cln)
+        });
+        records.push(BoundaryRecord {
+            latitude: lat / dropped.len() as f64,
+            longitude: lng / dropped.len() as f64,
+            reason: BoundaryReason::LowSupport {
+                floor,
+                dropped_cells: dropped.len() as u32,
+            },
+        });
+        if kept.is_empty() {
+            portions.clear();
+            break;
+        }
+        node.cells = kept;
+        portions = portions_for(&node, coverage, sport_tracks, config, cell_size, tun);
+        if portions.is_empty() {
+            break;
+        }
+    }
+    let approx_len = node.cells.len() as f64 * cell_size;
+    if portions.is_empty()
+        || approx_len < config.min_section_length
+        || !has_support(
+            &portions,
+            approx_len,
+            config,
+            opportunity(&node, coverage),
+            sport_tracks,
+            starts,
+            span_s,
+        )
+    {
+        return None;
+    }
+    Some((node, portions, score))
+}
+
 fn probe_mask(
     probe: &[GpsPoint],
     accepted: &HashMap<Cell, Vec<GpsPoint>>,
@@ -2758,124 +2897,27 @@ fn detect_for_cluster_with_grid(
             continue;
         }
 
-        let mut portions =
+        let portions =
             portions_for_memo(leaves, node, coverage, sport_tracks, config, cell_size, tun);
-        if portions.is_empty()
-            || !has_support(
-                &portions,
-                approx_len,
-                config,
-                opportunity(node, coverage),
-                sport_tracks,
-                starts,
-                span_s,
-            )
-        {
-            continue;
-        }
-
-        // Pre-trim score: ordering must not depend on the trim below,
-        // or a trimmed candidate sinks in the backoff queue and every
-        // later candidate's represented-ground trim reshuffles. The
-        // trim corrects a candidate's extent, never its priority.
-        let score: f64 = portions.iter().map(|p| p.3).sum();
-
-        // Support binds along the length, not just in total (rule 5): a
-        // stretch of a candidate's ground traversed by fewer of its OWN
-        // contributors than the floor is not this section's ground,
-        // however hot stranger traffic made its cells. Without this, a
-        // near-private spur welds onto a busy corridor through the
-        // traffic gradient at their junction (adjacent thin cells always
-        // pass the one-missing-track rule), inherits the corridor's
-        // visit count, and can be rendered. The floor is the same bar
-        // the whole section must meet in [`has_support`], fixed from
-        // the pre-trim portions: recomputing it as portions shorten
-        // would ratchet the length tier stricter each round and spiral
-        // a legitimate short section to death. A qualifying pass must
-        // cover two cells of arc, scaled down for candidates shorter
-        // than that so a genuine pass over a short section still
-        // counts. Cells and portions only ever shrink, so the loop
-        // terminates.
-        let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
-        lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_len = lens[lens.len() / 2];
-        let required = required_visits_for_length(median_len, opportunity(node, coverage)) as usize;
-        let floor = required.max(config.min_activities as usize) as u32;
-        let pass_min_m = (2.0 * cell_size).min(0.5 * median_len);
-        let mut node = Supernode {
+        let owned = Supernode {
             cells: node.cells.clone(),
             tracks: node.tracks.clone(),
         };
-        loop {
-            let cell_set: HashSet<Cell> = node
-                .cells
-                .iter()
-                .flat_map(|c| {
-                    (-1..=1i32).flat_map(move |dy| (-1..=1i32).map(move |dx| (c.0 + dy, c.1 + dx)))
-                })
-                .collect();
-            let support = candidate_support(
-                &portions,
-                &cell_set,
-                coverage,
-                sport_tracks,
-                pass_min_m,
-                starts,
-            );
-            let kept: Vec<Cell> = node
-                .cells
-                .iter()
-                .copied()
-                .filter(|c| support.get(c).copied().unwrap_or(0) >= floor)
-                .collect();
-            if kept.len() == node.cells.len() {
-                break;
-            }
-            let kept_set: HashSet<Cell> = kept.iter().copied().collect();
-            let dropped: Vec<Cell> = node
-                .cells
-                .iter()
-                .copied()
-                .filter(|c| !kept_set.contains(c))
-                .collect();
-            let (lat, lng) = dropped.iter().fold((0.0, 0.0), |(la, ln), c| {
-                let (cla, cln) = coverage.grid.centre_of(*c);
-                (la + cla, ln + cln)
-            });
-            records.push(BoundaryRecord {
-                latitude: lat / dropped.len() as f64,
-                longitude: lng / dropped.len() as f64,
-                reason: BoundaryReason::LowSupport {
-                    floor,
-                    dropped_cells: dropped.len() as u32,
-                },
-            });
-            if kept.is_empty() {
-                portions.clear();
-                break;
-            }
-            node.cells = kept;
-            portions = portions_for(&node, coverage, sport_tracks, config, cell_size, tun);
-            if portions.is_empty() {
-                break;
-            }
+        if let Some(qualified) = qualify_candidate(
+            owned,
+            portions,
+            coverage,
+            sport_tracks,
+            config,
+            cell_size,
+            tun,
+            starts,
+            span_s,
+            records,
+        ) {
+            let (node, portions, score) = qualified;
+            candidates.push((n_idx, node, portions, score));
         }
-        let approx_len = node.cells.len() as f64 * cell_size;
-        if portions.is_empty()
-            || approx_len < config.min_section_length
-            || !has_support(
-                &portions,
-                approx_len,
-                config,
-                opportunity(&node, coverage),
-                sport_tracks,
-                starts,
-                span_s,
-            )
-        {
-            continue;
-        }
-        candidates.push((n_idx, node, portions, score));
     }
     candidates.sort_by(|a, b| {
         b.3.partial_cmp(&a.3)
@@ -2886,7 +2928,9 @@ fn detect_for_cluster_with_grid(
     let backoff_grid = CellGrid::new(cell_size, coverage.ref_lat);
     let mut accepted_pts: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
     let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
-    for (_, node, portions, score) in candidates {
+    let mut queue: std::collections::VecDeque<(usize, Supernode, Vec<Portion>, f64)> =
+        candidates.into_iter().collect();
+    while let Some((_, node, portions, score)) = queue.pop_front() {
         // Selection backoff (rule 6): ground already represented by an
         // accepted polyline is never re-emitted. The probe walks the
         // candidate's best portion; representation means accepted
@@ -3246,6 +3290,34 @@ fn detect_for_cluster_with_grid(
             } else {
                 (s, e)
             };
+            // Backoff binds on the RENDER, not only on the probe: the
+            // probe walked one portion, but the trim's reduced node and
+            // the faithfulness/fold displacement can hand the render to
+            // a DIFFERENT pass, one that sweeps the ring straight back
+            // over accepted ground. A line adding less than a section's
+            // worth of unrepresented travel is a duplicate of what is
+            // already drawn, whatever its probe said.
+            let render = &sport_tracks[t_idx].1[rs..re];
+            let render_mask = probe_mask(render, &accepted_pts, &backoff_grid, cell_size);
+            let fresh_m: f64 = render
+                .windows(2)
+                .enumerate()
+                .filter(|(k, _)| !render_mask[*k] && !render_mask[k + 1])
+                .map(|(_, w)| crate::geo_utils::haversine_distance(&w[0], &w[1]))
+                .sum();
+            if render_mask.iter().any(|&m| m) && fresh_m < config.min_section_length {
+                let mid = render[render.len() / 2];
+                records.push(BoundaryRecord {
+                    latitude: mid.latitude,
+                    longitude: mid.longitude,
+                    reason: BoundaryReason::Backoff {
+                        represented: render_mask.iter().filter(|&&m| m).count() as u32,
+                        probed: render_mask.len() as u32,
+                        score_metres: score,
+                    },
+                });
+                continue;
+            }
             section.polyline = sport_tracks[t_idx].1[rs..re].to_vec();
             section.distance_meters = if (rs, re) == (s, e) {
                 dist
@@ -3280,6 +3352,96 @@ fn detect_for_cluster_with_grid(
                     .entry(backoff_grid.cell_of(p.latitude, p.longitude))
                     .or_default()
                     .push(*p);
+            }
+            // Rule 6 draws ONE real pass, so a corridor no one crosses
+            // end to end can never be drawn by a single section — and
+            // this node may own far more ground than its line reaches
+            // (a displaced default, or a valley whose longest pass
+            // spans a third of it). That ground re-enters the queue on
+            // its own merits: same floors, backoff against everything
+            // accepted. Cells near any accepted geometry are dropped
+            // rather than re-queued (they would only back off), so
+            // every re-queue shrinks and the loop terminates.
+            let mut represented: HashSet<Cell> = HashSet::new();
+            for p in &section.polyline {
+                let c = coverage.grid.cell_of(p.latitude, p.longitude);
+                for dy in -1..=1i32 {
+                    for dx in -1..=1i32 {
+                        represented.insert((c.0 + dy, c.1 + dx));
+                    }
+                }
+            }
+            let mut free: Vec<Cell> = node
+                .cells
+                .iter()
+                .copied()
+                .filter(|c| !represented.contains(c))
+                .filter(|c| {
+                    let (la, ln) = coverage.grid.centre_of(*c);
+                    let bc = backoff_grid.cell_of(la, ln);
+                    !(-1..=1i32).any(|dy| {
+                        (-1..=1i32).any(|dx| accepted_pts.contains_key(&(bc.0 + dy, bc.1 + dx)))
+                    })
+                })
+                .collect();
+            free.sort_unstable();
+            if (free.len() as f64) * cell_size >= config.min_section_length {
+                // The freed ground is re-partitioned the same way all
+                // ground is — same-traffic supernodes — never by bare
+                // adjacency: a corner gluing a 3-track street to a
+                // 5-track street would otherwise pool their traffic
+                // into one node and borrow a longer piece's softer
+                // floor.
+                for remainder in partition_supernodes(&free, coverage, same_traffic) {
+                    if (remainder.cells.len() as f64) * cell_size < config.min_section_length {
+                        continue;
+                    }
+                    let rem_portions =
+                        portions_for(&remainder, coverage, sport_tracks, config, cell_size, tun);
+                    let Some((rem_node, rem_portions, rem_score)) = qualify_candidate(
+                        remainder,
+                        rem_portions,
+                        coverage,
+                        sport_tracks,
+                        config,
+                        cell_size,
+                        tun,
+                        starts,
+                        span_s,
+                        records,
+                    ) else {
+                        continue;
+                    };
+                    let (seam_lat, seam_lng) = rem_node
+                        .cells
+                        .iter()
+                        .map(|&c| coverage.grid.centre_of(c))
+                        .min_by(|a, b| {
+                            let d = |&(la, ln): &(f64, f64)| {
+                                let p = GpsPoint {
+                                    latitude: la,
+                                    longitude: ln,
+                                    elevation: None,
+                                };
+                                section
+                                    .polyline
+                                    .iter()
+                                    .step_by(5)
+                                    .map(|q| crate::geo_utils::haversine_distance(&p, q))
+                                    .fold(f64::INFINITY, f64::min)
+                            };
+                            d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .unwrap_or((section.polyline[0].latitude, section.polyline[0].longitude));
+                    records.push(BoundaryRecord {
+                        latitude: seam_lat,
+                        longitude: seam_lng,
+                        reason: BoundaryReason::PassEnd {
+                            requeued_cells: rem_node.cells.len() as u32,
+                        },
+                    });
+                    queue.push_back((usize::MAX, rem_node, rem_portions, rem_score));
+                }
             }
             sections.push(section);
             emitted_portions.push(portions);
