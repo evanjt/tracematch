@@ -2951,6 +2951,19 @@ fn unify_chain_references(
                 {
                     continue;
                 }
+                // A closed member must stay closed: within the length
+                // share a cover can still re-cut a revolution into an
+                // arc, and an unrolled ring is not a reference swap.
+                let member_gap = crate::geo_utils::haversine_distance(gf, gl);
+                if member_gap <= 0.2 * sections[m].distance_meters {
+                    let cut_gap = crate::geo_utils::haversine_distance(
+                        cut.first().unwrap(),
+                        cut.last().unwrap(),
+                    );
+                    if cut_gap > (0.2 * cut_m).max(2.0 * half) {
+                        continue;
+                    }
+                }
                 // A cover must not be dirtier than the line it
                 // replaces: the shared trace can spin inside the
                 // member's extent where the member's own render was
