@@ -831,3 +831,46 @@ pub fn small_oval_stem(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
         })
         .collect()
 }
+
+/// Five clean interval sessions on the small oval plus one deviant
+/// outing whose laps cut a chord across the east side and whose longer
+/// stem makes its pass the longest. The deviant's revolution strays up
+/// to ~45 m from the circuit the other five lap faithfully.
+pub fn small_oval_stem_deviant() -> Vec<(String, Vec<GpsPoint>)> {
+    use std::f64::consts::PI;
+    let mut out = small_oval_stem(5);
+    let mut path: Vec<(f64, f64)> = Vec::new();
+    path.extend(densify(&[(-120.0, 0.0), (150.0, 0.0)]));
+    // First lap weaves ±45 m around the circuit with short excursions,
+    // so every beyond-tolerance run stays under the sustained-minority
+    // bar while the lap as a whole strays far from everyone else's.
+    let steps = 120;
+    for k in 0..=steps {
+        let a = PI - 2.0 * PI * k as f64 / steps as f64;
+        let r = 70.0 + 45.0 * (6.0 * a).sin();
+        path.push((220.0 + r * a.cos(), r * a.sin()));
+    }
+    for _ in 0..9 {
+        path.extend(arc(220.0, 0.0, 70.0, PI, -PI));
+    }
+    path.extend(densify(&[(150.0, 0.0), (-120.0, 0.0)]));
+    out.push((
+        "oval_dev".to_string(),
+        track(&wobble(&path, HUMAN_WOBBLE_M, phase(9))),
+    ));
+    // A busy crossing street near the stem: accepted first, it masks
+    // the oval candidate's west end, so the node is TRIMMED and the
+    // default falls to the longest pass — the deviant — exactly the
+    // structure that let the outlier lap win on the real oval.
+    for i in 0..20 {
+        let road = densify(&[
+            (-60.0, -400.0 - 8.0 * i as f64),
+            (-60.0, 400.0 + 8.0 * i as f64),
+        ]);
+        out.push((
+            format!("road_{i}"),
+            track(&wobble(&road, HUMAN_WOBBLE_M, phase(20 + i))),
+        ));
+    }
+    out
+}

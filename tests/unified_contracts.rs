@@ -1292,3 +1292,49 @@ fn lapped_small_oval_renders_the_closed_lap() {
         "oval render still reaches down the stem"
     );
 }
+
+#[test]
+fn a_deviating_lap_does_not_render_the_circuit() {
+    // Scenario: five clean interval sessions lap the small oval; a
+    // sixth outing cuts a chord across it every lap, and its longer
+    // stem makes its pass the longest — the default. The deviant's
+    // revolution is one real single pass, but it is minority ground
+    // against five faithful circuits.
+    // Expected behaviour: the loop render is judged like any other
+    // render — faithfulness on the final line — so the circuit
+    // renders from a faithful lap, not the deviant default.
+    let tracks = shapes::small_oval_stem_deviant();
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    let centre = shapes::to_gps(220.0, 0.0);
+    let oval = sections
+        .iter()
+        .find(|s| {
+            let mean = s
+                .polyline
+                .iter()
+                .map(|p| haversine_distance(p, &centre))
+                .sum::<f64>()
+                / s.polyline.len() as f64;
+            mean < 120.0
+        })
+        .expect("oval section");
+    let endgap = haversine_distance(
+        oval.polyline.first().unwrap(),
+        oval.polyline.last().unwrap(),
+    );
+    assert!(
+        endgap <= 40.0,
+        "oval render is not a closed lap (endgap {endgap:.0} m)"
+    );
+    let worst_radial = oval
+        .polyline
+        .iter()
+        .map(|p| (haversine_distance(p, &centre) - 70.0).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst_radial <= 25.0,
+        "oval render strays {worst_radial:.0} m from the circuit: a deviating lap won the render"
+    );
+}
