@@ -143,8 +143,13 @@ fn lane(tag: &str, y: f64, outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
 fn elbow(tag: &str, outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
         .map(|i| {
-            let path =
-                shapes::densify(&[(-80.0, 50.0), (10.0, 140.0), (800.0, 140.0), (800.0, 800.0)]);
+            let path = shapes::densify(&[
+                (0.0, 50.0),
+                (1500.0, 50.0),
+                (1500.0, 140.0),
+                (800.0, 140.0),
+                (800.0, 800.0),
+            ]);
             (
                 format!("{tag}_{i}"),
                 shapes::track(&shapes::wobble(
@@ -181,16 +186,16 @@ fn mill(tag: &str, outings: usize, laps: usize) -> Vec<(String, Vec<GpsPoint>)> 
 
 #[test]
 fn near_duplicate_corridor_backs_off_with_a_record() {
-    // A busy lane and a quieter twin 90 m away, ridden by users who
-    // also ride the busy lane (each twin outing opens on it): the busy
-    // line carries the twin's own traffic, so the twin is represented
+    // A busy lane and a quieter twin 90 m away, used by riders who go
+    // out on the busy lane and come home on the twin: they CONTRIBUTE
+    // to the busy section, so its line carries them and the twin is represented
     // ground — one section on the busy lane, no section on the twin,
     // and a Backoff record on the twin whose numbers say the entire
     // probe was covered. A twin with its OWN population stands instead
     // (see the distinct-population contract below).
     let mut tracks = lane("busy", 50.0, 6);
     tracks.extend((0..4).map(|i| {
-        let path = shapes::densify(&[(-80.0, 50.0), (10.0, 140.0), (1500.0, 140.0)]);
+        let path = shapes::densify(&[(0.0, 50.0), (1500.0, 50.0), (1500.0, 140.0), (0.0, 140.0)]);
         (
             format!("twin_{i}"),
             shapes::track(&shapes::wobble(
@@ -264,7 +269,8 @@ fn near_duplicate_corridor_backs_off_with_a_record() {
 
 #[test]
 fn partly_represented_candidate_is_trimmed_to_its_own_run() {
-    // The elbow's users open on the busy lane, run its corridor 90 m
+    // The elbow's users ride the busy lane out (contributing to its
+    // section), come home along its corridor 90 m
     // off (represented ground — the busy line carries them), then head
     // north on ground of their own. The candidate is cut back to the
     // north remnant and stands there, and the Trim record carries the

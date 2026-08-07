@@ -3642,7 +3642,7 @@ fn detect_for_cluster_with_grid(
                 // but its footprint still occupies the ground so a
                 // neighbour cannot re-expand into a junction with no line.
                 let ai = acc_tracks.len() as u32;
-                acc_tracks.push(node.tracks.clone());
+                acc_tracks.push(portions.iter().map(|p| p.0 as u32).collect());
                 for p in footprint.iter().step_by(3) {
                     accepted_pts
                         .entry(backoff_grid.cell_of(p.latitude, p.longitude))
@@ -3986,8 +3986,11 @@ fn detect_for_cluster_with_grid(
             // bleeding its milling into a re-expanding neighbour; the
             // faithfulness and fold guards on every render now police
             // that directly.
+            // A section's population is its CONTRIBUTORS, not its node's
+            // cell union: a walking loop whose cells graze the oval must
+            // not claim to carry the runners lapping inside it.
             let ai = acc_tracks.len() as u32;
-            acc_tracks.push(node.tracks.clone());
+            acc_tracks.push(portions.iter().map(|p| p.0 as u32).collect());
             for p in section.polyline.iter().step_by(3) {
                 accepted_pts
                     .entry(backoff_grid.cell_of(p.latitude, p.longitude))
