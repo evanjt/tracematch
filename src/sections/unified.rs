@@ -2716,12 +2716,14 @@ fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
 /// Ground the candidate's own tracks LAP (a class-3 pass) is
 /// revolutions: an accepted through-line a braid width away may carry
 /// the same users' approaches, but it cannot represent their laps.
+/// Lapped ground is represented only by lapped ground — an accepted
+/// ring on the same revolutions still dedups a second ring.
 fn probe_mask(
     probe: &[GpsPoint],
     accepted: &HashMap<Cell, Vec<(GpsPoint, u32)>>,
     acc_tracks: &[HashSet<u32>],
     cand: &HashSet<u32>,
-    own_lapped: &dyn Fn(&GpsPoint) -> bool,
+    lapped_at: &dyn Fn(&GpsPoint) -> bool,
     same_traffic: f64,
     grid: &CellGrid,
     cell_size: f64,
@@ -2729,9 +2731,7 @@ fn probe_mask(
     probe
         .iter()
         .map(|p| {
-            if own_lapped(p) {
-                return false;
-            }
+            let p_lapped = lapped_at(p);
             let c = grid.cell_of(p.latitude, p.longitude);
             (-1..=1i32).any(|dy| {
                 (-1..=1i32).any(|dx| {
@@ -2739,6 +2739,7 @@ fn probe_mask(
                         v.iter().any(|(q, ai)| {
                             crate::geo_utils::haversine_distance(p, q) < cell_size
                                 && shares_traffic(cand, &acc_tracks[*ai as usize], same_traffic)
+                                && (!p_lapped || lapped_at(q))
                         })
                     })
                 })
@@ -3432,7 +3433,7 @@ fn detect_for_cluster_with_grid(
                     near_strict[i] = near_strict[i].min(nxt - cum2[i]);
                 }
                 for i in 0..mask.len() {
-                    if mask[i] && near_strict[i] <= cell_size {
+                    if mask[i] && !strict[i] && near_strict[i] <= cell_size {
                         mask[i] = false;
                     }
                 }
