@@ -4259,6 +4259,13 @@ fn reconcile_seam_overruns(sections: &mut [FrequentSection], ref_lat: f64, min_l
             cum[k] = cum[k - 1] + crate::geo_utils::haversine_distance(&line[k - 1], &line[k]);
         }
         let total = cum[n - 1];
+        // A closed line has no overrunning end to reconcile: a lapped
+        // ring hugging the busier path around its own ground is a
+        // revolution, not a double-draw.
+        let endgap = crate::geo_utils::haversine_distance(&line[0], &line[n - 1]);
+        if endgap <= (0.2 * total).max(2.0 * SEAM_TOL_M) {
+            continue;
+        }
         // Leading overrun: the prefix run of near points, sustained and
         // confined to the first half of the line.
         let mut lead = 0usize;
@@ -6169,6 +6176,39 @@ mod seam_tests {
         reconcile_seam_overruns(&mut sections, 46.0, 150.0);
         assert_eq!(sections[0].polyline.len(), a.len());
         assert_eq!(sections[1].polyline.len(), b.len());
+    }
+
+    #[test]
+    fn a_closed_ring_beside_a_busier_path_stays_whole() {
+        // A lapped ring hugs the busier walking path around its own
+        // ground: a revolution is self-justified, never an overrun.
+        let m_lng = 111_320.0 * 46.0f64.to_radians().cos();
+        let ring: Vec<GpsPoint> = (0..=60)
+            .map(|k| {
+                let a = std::f64::consts::PI * 2.0 * k as f64 / 60.0;
+                GpsPoint::new(
+                    46.0 + (70.0 * a.sin()) / 111_132.0,
+                    7.0 + (70.0 + 70.0 * a.cos()) / m_lng,
+                )
+            })
+            .collect();
+        let path: Vec<GpsPoint> = (0..=80)
+            .map(|k| {
+                let a = std::f64::consts::PI * 2.0 * k as f64 / 80.0;
+                GpsPoint::new(
+                    46.0 + (85.0 * a.sin()) / 111_132.0,
+                    7.0 + (70.0 + 85.0 * a.cos()) / m_lng,
+                )
+            })
+            .collect();
+        let ring_len = ring.len();
+        let mut sections = vec![sec("s_path", 68, path), sec("s_ring", 9, ring)];
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        assert_eq!(
+            sections[1].polyline.len(),
+            ring_len,
+            "the closed ring must keep its full revolution"
+        );
     }
 
     #[test]
