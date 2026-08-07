@@ -3869,7 +3869,13 @@ fn detect_for_cluster_with_grid(
             };
             let (t_idx, rs, re) = {
                 let track = sport_tracks[t_idx].1;
-                match closing_loop_range(track, rs, re, near, gap, 1.5 * cell_size) {
+                // The extension bound only matters once a genuine
+                // closure exists and the lapped gate holds, so it can
+                // afford a partial arc: a trim at the mouth can leave
+                // barely half a small ring, and completing the
+                // revolution retraces the candidate's own lapped
+                // ground.
+                match closing_loop_range(track, rs, re, near, gap, 4.0 * cell_size) {
                     Some((ls, le))
                         if crate::matching::calculate_route_distance(&track[ls..le])
                             >= config.min_section_length
@@ -3894,7 +3900,7 @@ fn detect_for_cluster_with_grid(
                                     ej,
                                     near,
                                     gap,
-                                    1.5 * cell_size,
+                                    4.0 * cell_size,
                                 ) else {
                                     continue;
                                 };
