@@ -2992,7 +2992,20 @@ fn unify_chain_references(
 
     // Joint snap: linked pairs now cut from the same trace meet at a
     // shared trace point. A gap wider than the link tolerance is real
-    // unrepresented ground and stays open.
+    // unrepresented ground and stays open. A CLOSED member meets
+    // nobody — its joint is its own closure, and snapping a ring to a
+    // neighbour's midpoint unrolls the revolution every adoption
+    // guard preserved.
+    let closed = |m: usize| {
+        let g = &sections[m].polyline;
+        match (g.first(), g.last()) {
+            (Some(a), Some(b)) => {
+                crate::geo_utils::haversine_distance(a, b)
+                    <= 0.2 * sections[m].distance_meters.max(1.0)
+            }
+            _ => false,
+        }
+    };
     for &(i, j) in &links {
         let (Some(&(ti, si, ei)), Some(&(tj, sj, ej))) = (chosen.get(&i), chosen.get(&j)) else {
             continue;
@@ -3016,6 +3029,21 @@ fn unify_chain_references(
         }
         let mid = (ea + sb) / 2;
         if mid <= sa || mid + 2 > eb {
+            continue;
+        }
+        // A closed member may snap only at its own closure: a
+        // lollipop head's mouth IS its joint, but re-cutting a ring at
+        // a neighbour's midpoint unrolls the revolution every
+        // adoption guard preserved.
+        let keeps_closure = |m: usize, s: usize, e: usize| {
+            if !closed(m) {
+                return true;
+            }
+            let seg = &pts[s..e];
+            let eg = crate::geo_utils::haversine_distance(&seg[0], &seg[seg.len() - 1]);
+            eg <= (0.2 * crate::matching::calculate_route_distance(seg)).max(cell_size)
+        };
+        if !keeps_closure(ma, sa, mid + 1) || !keeps_closure(mb, mid, eb) {
             continue;
         }
         chosen.insert(ma, (ti, sa, mid + 1));
