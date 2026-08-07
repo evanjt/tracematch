@@ -127,6 +127,18 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
             if a.id == b.id {
                 continue;
             }
+            // Corridor-disjointness binds per population: two lines on
+            // the same ground are a duplicate only when they carry the
+            // same users. A distinct population's parallel path — the
+            // other bank of a river — is its own corridor.
+            let shared_acts = a
+                .activity_ids
+                .iter()
+                .filter(|x| b.activity_ids.contains(x))
+                .count();
+            if 2 * shared_acts < a.activity_ids.len().min(b.activity_ids.len()) {
+                continue;
+            }
             let within = a
                 .polyline
                 .iter()
