@@ -1191,3 +1191,57 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
         out.boundaries
     );
 }
+
+#[test]
+fn folded_reps_render_their_longest_clean_stretch() {
+    // Scenario: every outing runs a corridor with interval reps mid
+    // way — forward, back over the same ground, forward again — at a
+    // window that shifts per outing, so no pass-class boundary forms
+    // and every pass carries a legal but visibly folded knot.
+    // Expected behaviour: the drawn line is the pass's longest
+    // fold-free stretch, and the undrawn remainder re-enters the
+    // queue, so the corridor is covered by clean lines instead of one
+    // folded face.
+    let tracks = shapes::interval_reps(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    for s in &sections {
+        assert!(
+            self_overlap_frac(&s.polyline) <= 0.05,
+            "{}: rendered line folds over itself ({:.0}%)",
+            s.id,
+            self_overlap_frac(&s.polyline) * 100.0
+        );
+    }
+    let body = metre_samples(&[(50.0, 0.0), (750.0, 0.0)], 20.0);
+    assert!(
+        coverage(&body, &sections, 90.0) >= 0.8,
+        "corridor body must stay covered by clean renders (coverage {:.0}%)",
+        coverage(&body, &sections, 90.0) * 100.0
+    );
+}
+
+#[test]
+fn junction_shredded_middle_pools_back_into_a_section() {
+    // Scenario: heavy bulks leave a through corridor at both ends
+    // (cliff + fork boundaries) and a crossing path inflates one
+    // middle cell's track set, so the strict same-traffic partition
+    // shreds the 12-track middle into sub-length pieces. Each piece
+    // alone dies — under the length floor or backed off against the
+    // flanks' render bleed — while the middle carries 12 through
+    // tracks end to end.
+    // Expected behaviour: ground orphaned by dead candidates pools at
+    // visible-boundary granularity and re-enters the queue, so the
+    // honest middle surfaces instead of leaving a hole.
+    let tracks = shapes::shredded_corridor();
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    let mid = metre_samples(&[(620.0, 0.0), (820.0, 0.0)], 10.0);
+    assert!(
+        coverage(&mid, &sections, 90.0) >= 0.8,
+        "shredded middle must be salvaged (coverage {:.0}%)",
+        coverage(&mid, &sections, 90.0) * 100.0
+    );
+}
