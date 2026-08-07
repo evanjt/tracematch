@@ -1874,7 +1874,12 @@ fn closing_loop_range(
         if let Some(j) = start_at {
             let meaningful = cum[j] >= min_stem || end_k > n - 1;
             let kept = cum[end_k] - cum[j];
-            if meaningful && kept >= gap {
+            // The revolution must live in the PASS: the extension may
+            // complete a trimmed ring but never supply most of the
+            // loop, or any route that later wanders back near a pass
+            // end would fabricate a lap from post-pass travel.
+            let ext_m = cum[end_k] - cum[n - 1].min(cum[end_k]);
+            if meaningful && kept >= gap && 2.0 * ext_m <= kept {
                 return Some((rs + j, rs + end_k + 1));
             }
             return None;
