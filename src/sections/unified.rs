@@ -3682,13 +3682,39 @@ fn detect_for_cluster_with_grid(
             // A pass that terminates by closing onto its own interior
             // renders the LOOP: lapped ground's honest face is the
             // revolution, and the stem it was reached by re-enters the
-            // queue with the rest of the undrawn ground below.
+            // queue with the rest of the undrawn ground below. Only
+            // LAPPED ground reads this way — the loop's cells must
+            // carry a multi-pass class from somebody's revolutions. A
+            // winding corridor that merely coils back within a lane's
+            // width of itself is single-passed everywhere and keeps
+            // its full render.
+            let lapped = |ls: usize, le: usize| {
+                let track = sport_tracks[t_idx].1;
+                let mut loop_cells: Vec<Cell> = track[ls..le]
+                    .iter()
+                    .map(|p| coverage.grid.cell_of(p.latitude, p.longitude))
+                    .collect();
+                loop_cells.dedup();
+                loop_cells.sort_unstable();
+                loop_cells.dedup();
+                let multi = loop_cells
+                    .iter()
+                    .filter(|c| {
+                        coverage
+                            .cell_passes
+                            .get(c)
+                            .is_some_and(|m| m.values().any(|&cl| cl >= 2))
+                    })
+                    .count();
+                2 * multi >= loop_cells.len()
+            };
             let (rs, re) = {
                 let track = sport_tracks[t_idx].1;
                 match closing_loop_range(track, rs, re, near, gap, 1.5 * cell_size) {
                     Some((ls, le))
                         if crate::matching::calculate_route_distance(&track[ls..le])
-                            >= config.min_section_length =>
+                            >= config.min_section_length
+                            && lapped(ls, le) =>
                     {
                         let kept_m = crate::matching::calculate_route_distance(&track[ls..le]);
                         let full_m = crate::matching::calculate_route_distance(&track[rs..re]);
