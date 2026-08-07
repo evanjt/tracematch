@@ -1045,6 +1045,46 @@ fn partition_supernodes(
     coverage: &CoverageGrid,
     same_traffic: f64,
 ) -> Vec<Supernode> {
+    partition_by(hot_cells, coverage, same_traffic, |a, b| {
+        same_traffic_sets(a, b, same_traffic)
+    })
+}
+
+/// Reassemble pooled orphan ground at through-traffic granularity:
+/// adjacent cells union when the thinner side's traffic is carried by
+/// the thicker side (containment ≥ the same-traffic anchor). The
+/// strict MUTUAL containment of [`partition_supernodes`] is right for
+/// first-pass supernodes — it keeps a 3-track street out of a 5-track
+/// street's node — but it re-shreds salvaged junction ground on the
+/// same junction cells that killed it: crossing paths inflate one
+/// cell's set and mutuality fails there forever, while the through
+/// traffic runs contained through the junction. One-sided containment
+/// follows the through traffic; a dishonest glue (a quiet stub riding
+/// a busy corridor's containment) cannot RENDER — rule B displaces any
+/// pass walking sustained minority ground and the remainder re-queue
+/// re-separates what the render disowns — so honesty is policed where
+/// it binds, at the line.
+fn partition_pooled(
+    hot_cells: &[Cell],
+    coverage: &CoverageGrid,
+    same_traffic: f64,
+) -> Vec<Supernode> {
+    partition_by(hot_cells, coverage, same_traffic, |a, b| {
+        if a.is_empty() || b.is_empty() {
+            return false;
+        }
+        let inter = a.intersection(b).count();
+        let thin = a.len().min(b.len());
+        inter as f64 / thin as f64 >= same_traffic
+    })
+}
+
+fn partition_by(
+    hot_cells: &[Cell],
+    coverage: &CoverageGrid,
+    same_traffic: f64,
+    join: impl Fn(&HashSet<u32>, &HashSet<u32>) -> bool,
+) -> Vec<Supernode> {
     let index_of: HashMap<Cell, usize> =
         hot_cells.iter().enumerate().map(|(i, c)| (*c, i)).collect();
     let mut uf: UnionFind<usize> = UnionFind::with_capacity(hot_cells.len());
@@ -1060,7 +1100,7 @@ fn partition_supernodes(
                 let n = (cell.0 + dy, cell.1 + dx);
                 if let Some(&j) = index_of.get(&n)
                     && j > i
-                    && same_traffic_sets(my_tracks, &coverage.cell_tracks[&n], same_traffic)
+                    && join(my_tracks, &coverage.cell_tracks[&n])
                     && pass_classes_agree(coverage, *cell, n, 1.0 - same_traffic)
                 {
                     uf.union(&i, &j);
@@ -1472,8 +1512,20 @@ fn merge_non_fork_boundaries(
 /// arc-lag, and the opening `gap` never enters, so a query only meets
 /// eligible earlier ground.
 pub fn self_pass_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
-    if pts.len() < 3 {
+    if pts.is_empty() {
         return 0.0;
+    }
+    let marks = self_pass_marks(pts, near, gap);
+    marks.iter().filter(|&&m| m).count() as f64 / pts.len() as f64
+}
+
+/// Per-point revisit marks behind [`self_pass_penalty`]: `true` on the
+/// LATER visitor, so a folded line's clean opening stays unmarked and
+/// the clean-stretch clip can keep it.
+fn self_pass_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
+    let mut marks = vec![false; pts.len()];
+    if pts.len() < 3 {
+        return marks;
     }
     let m_lat = 111_132.0;
     let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
@@ -1487,13 +1539,12 @@ pub fn self_pass_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
         cum[i] = cum[i - 1] + (dx * dx + dy * dy).sqrt();
     }
     if cum[pts.len() - 1] < gap {
-        return 0.0;
+        return marks;
     }
     let near2 = near * near;
     let key = |x: f64, y: f64| ((x / near).floor() as i32, (y / near).floor() as i32);
     let mut grid: HashMap<(i32, i32), Vec<(f64, f64)>> = HashMap::new();
     let mut lag = 0usize;
-    let mut hits = 0usize;
     for i in 0..pts.len() {
         while lag < i && cum[i] - cum[lag] >= gap {
             if cum[lag] >= gap {
@@ -1513,10 +1564,10 @@ pub fn self_pass_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
             })
         });
         if revisit {
-            hits += 1;
+            marks[i] = true;
         }
     }
-    hits as f64 / pts.len() as f64
+    marks
 }
 
 /// Share of a CLOSED line (endpoints within `CLOSE_FRAC` of its length)
@@ -1524,13 +1575,29 @@ pub fn self_pass_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
 /// forward-and-reverse. Only closed lines are scored, so a switchback
 /// climb (which climbs away, endpoints far apart) is never charged for
 /// its antiparallel hairpin legs, and a clean loop scores ~0 (its
-/// ground is travelled once, same sense). Complements
-/// [`self_pass_penalty`], which needs an arc gap and so misses the short
-/// spurs of an out-and-back that returns to its start.
-fn out_and_back_penalty(pts: &[GpsPoint], near: f64) -> f64 {
-    const CLOSE_FRAC: f64 = 0.2;
-    if pts.len() < 5 {
+/// ground is travelled once, same sense). Antiparallel pairs must also
+/// sit at least `gap` apart ALONG the line: a hairpin-tight corner's
+/// two legs are antiparallel within `near` but only a corner's arc
+/// apart — the corner's own shape, not a retrace — while an
+/// out-and-back's pairs sit a full out-leg apart. Complements
+/// [`self_pass_penalty`], which needs an arc gap and so misses the
+/// short spurs of an out-and-back that returns to its start.
+fn out_and_back_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
+    if pts.is_empty() {
         return 0.0;
+    }
+    let marks = out_and_back_marks(pts, near, gap);
+    marks.iter().filter(|&&m| m).count() as f64 / pts.len() as f64
+}
+
+/// Per-point retrace marks behind [`out_and_back_penalty`]. Both
+/// directions of a retraced stretch are marked — the ground genuinely
+/// has no single clean pass through it.
+fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
+    const CLOSE_FRAC: f64 = 0.2;
+    let mut marks = vec![false; pts.len()];
+    if pts.len() < 5 {
+        return marks;
     }
     let m_lat = 111_132.0;
     let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
@@ -1538,14 +1605,16 @@ fn out_and_back_penalty(pts: &[GpsPoint], near: f64) -> f64 {
         .iter()
         .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
         .collect();
-    let total: f64 = xy
-        .windows(2)
-        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
-        .sum();
+    let mut cum = vec![0.0f64; pts.len()];
+    for i in 1..pts.len() {
+        let (dx, dy) = (xy[i].0 - xy[i - 1].0, xy[i].1 - xy[i - 1].1);
+        cum[i] = cum[i - 1] + (dx * dx + dy * dy).sqrt();
+    }
+    let total = cum[pts.len() - 1];
     let last = xy[xy.len() - 1];
     let end = ((last.0 - xy[0].0).powi(2) + (last.1 - xy[0].1).powi(2)).sqrt();
     if total <= 0.0 || end > CLOSE_FRAC * total {
-        return 0.0;
+        return marks;
     }
     let hdg = |i: usize| {
         let a = xy[i.saturating_sub(1)];
@@ -1561,14 +1630,13 @@ fn out_and_back_penalty(pts: &[GpsPoint], near: f64) -> f64 {
     for (i, &(x, y)) in xy.iter().enumerate() {
         grid.entry(key(x, y)).or_default().push(i);
     }
-    let mut hits = 0usize;
     for (i, &(x, y)) in xy.iter().enumerate() {
         let (cx, cy) = key(x, y);
         let anti = (-1..=1).any(|dx| {
             (-1..=1).any(|dy| {
                 grid.get(&(cx + dx, cy + dy)).is_some_and(|b| {
                     b.iter().any(|&j| {
-                        (i as i32 - j as i32).abs() >= 4
+                        (cum[i] - cum[j]).abs() >= gap
                             && (x - xy[j].0).powi(2) + (y - xy[j].1).powi(2) < near2
                             && hd[i].0 * hd[j].0 + hd[i].1 * hd[j].1 < -0.5
                     })
@@ -1576,10 +1644,41 @@ fn out_and_back_penalty(pts: &[GpsPoint], near: f64) -> f64 {
             })
         });
         if anti {
-            hits += 1;
+            marks[i] = true;
         }
     }
-    hits as f64 / xy.len() as f64
+    marks
+}
+
+/// The longest fold-free stretch of a line: the maximal contiguous run
+/// of points carrying neither a self-pass revisit mark nor a retrace
+/// mark, as a half-open index range. A clean line returns the whole
+/// range.
+fn longest_clean_range(pts: &[GpsPoint], near: f64, gap: f64) -> (usize, usize) {
+    if pts.is_empty() {
+        return (0, 0);
+    }
+    let sp = self_pass_marks(pts, near, gap);
+    let oab = out_and_back_marks(pts, near, gap);
+    let mut best = (0usize, 0usize);
+    let mut best_m = -1.0f64;
+    let mut run = 0usize;
+    let mut run_m = 0.0f64;
+    for i in 0..pts.len() {
+        if sp[i] || oab[i] {
+            run = i + 1;
+            run_m = 0.0;
+            continue;
+        }
+        if i > run {
+            run_m += crate::geo_utils::haversine_distance(&pts[i - 1], &pts[i]);
+        }
+        if run_m > best_m {
+            best_m = run_m;
+            best = (run, i + 1);
+        }
+    }
+    best
 }
 
 /// Every contributing track's single-pass portion through a component.
@@ -2085,6 +2184,89 @@ fn minority_end_clip(
         && samples[n - 1 - trail].1 >= 2 * trail_run_max.max(1);
     let start = if lead_ok { samples[lead].0 } else { 0 };
     let end = if trail_ok {
+        samples[n - trail].0
+    } else {
+        line.len()
+    };
+    (start.min(end.saturating_sub(2)), end)
+}
+
+/// Clip a render's ends back to supported ground: an end run whose
+/// metre-resolution support among the section's own contributors is
+/// below `min_tracks` extends over ground that can never be hot — a
+/// one-walker overshoot past the usage change, kept only because the
+/// node's boundary cell is coarser than the change. End of support is
+/// a visible boundary (rule 9); unlike [`minority_end_clip`] this is
+/// not a judgement about branches, so it carries no run or median
+/// bars. Display-only, ends-only: mid-line support is rule B's
+/// business.
+fn support_end_clip(
+    line: &[GpsPoint],
+    index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
+    ref_lat: f64,
+    near_m: f64,
+    cell_m: f64,
+    min_tracks: u32,
+) -> (usize, usize) {
+    const STEP_M: f64 = 20.0;
+    if line.len() < 6 {
+        return (0, line.len());
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let reach = (near_m / cell_m).ceil() as i32;
+    let mut samples: Vec<(usize, u32)> = Vec::new();
+    let mut acc = 0.0;
+    let mut last = -STEP_M;
+    for (i, p) in line.iter().enumerate() {
+        if i > 0 {
+            acc += crate::geo_utils::haversine_distance(&line[i - 1], p);
+        }
+        if acc - last < STEP_M && i + 1 < line.len() {
+            continue;
+        }
+        last = acc;
+        let c = (
+            (p.latitude * m_lat / cell_m).floor() as i32,
+            (p.longitude * m_lng / cell_m).floor() as i32,
+        );
+        let mut near: HashSet<u32> = HashSet::new();
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                if let Some(v) = index.get(&(c.0 + dy, c.1 + dx)) {
+                    for &(t, la, ln) in v {
+                        if f64::hypot((p.latitude - la) * m_lat, (p.longitude - ln) * m_lng)
+                            < near_m
+                        {
+                            near.insert(t);
+                        }
+                    }
+                }
+            }
+        }
+        samples.push((i, near.len() as u32));
+    }
+    let n = samples.len();
+    if n < 3 {
+        return (0, line.len());
+    }
+    let mut lead = 0;
+    while lead < n && samples[lead].1 < min_tracks {
+        lead += 1;
+    }
+    if lead >= n {
+        return (0, line.len());
+    }
+    let mut trail = 0;
+    while trail < n - lead && samples[n - 1 - trail].1 < min_tracks {
+        trail += 1;
+    }
+    let start = if lead > 0 {
+        samples[lead.min(n - 1)].0
+    } else {
+        0
+    };
+    let end = if trail > 0 {
         samples[n - trail].0
     } else {
         line.len()
@@ -2889,11 +3071,25 @@ fn detect_for_cluster_with_grid(
 
     // Candidates that could stand as sections, scored by the real usage
     // they represent (total portion metres).
+    //
+    // Ground whose candidate dies — under the length floor, at
+    // qualification, or backed off during selection — is not discarded:
+    // its cells pool in `orphaned` and re-enter the queue once the
+    // first pass drains. The strict same-traffic partition shreds a
+    // corridor at every junction cell whose track set a crossing path
+    // inflates, and the shreds die one by one while the through
+    // traffic they carry is real. The pool re-partitions at
+    // through-traffic granularity so junction shreds reassemble, then
+    // every pooled candidate faces the same floors, probes, and
+    // backoff as any other — one retry per cell, so the salvage
+    // terminates.
+    let mut orphaned: std::collections::BTreeSet<Cell> = std::collections::BTreeSet::new();
     let mut candidates: Vec<(usize, Supernode, Vec<Portion>, f64)> = Vec::new();
     for (n_idx, node) in supernodes.iter().enumerate() {
         // Rough length from core cell count (cells are ~square).
         let approx_len = node.cells.len() as f64 * cell_size;
         if approx_len < config.min_section_length {
+            orphaned.extend(node.cells.iter().copied());
             continue;
         }
 
@@ -2917,6 +3113,8 @@ fn detect_for_cluster_with_grid(
         ) {
             let (node, portions, score) = qualified;
             candidates.push((n_idx, node, portions, score));
+        } else {
+            orphaned.extend(node.cells.iter().copied());
         }
     }
     candidates.sort_by(|a, b| {
@@ -2930,7 +3128,54 @@ fn detect_for_cluster_with_grid(
     let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
     let mut queue: std::collections::VecDeque<(usize, Supernode, Vec<Portion>, f64)> =
         candidates.into_iter().collect();
-    while let Some((_, node, portions, score)) = queue.pop_front() {
+    let mut pooled_ever: HashSet<Cell> = HashSet::new();
+    loop {
+        let Some((_, node, portions, score)) = queue.pop_front() else {
+            // The pass drained: pool the orphaned ground and retry it.
+            // Cells already retried once and cells the accepted lines
+            // now stand on are dropped, so the salvage strictly
+            // shrinks and terminates.
+            let pool: Vec<Cell> = orphaned
+                .iter()
+                .copied()
+                .filter(|c| !pooled_ever.contains(c))
+                .filter(|c| {
+                    let (la, ln) = coverage.grid.centre_of(*c);
+                    !accepted_pts.contains_key(&backoff_grid.cell_of(la, ln))
+                })
+                .collect();
+            orphaned.clear();
+            if pool.is_empty() {
+                break;
+            }
+            pooled_ever.extend(pool.iter().copied());
+            for remainder in partition_pooled(&pool, coverage, same_traffic) {
+                if (remainder.cells.len() as f64) * cell_size < config.min_section_length {
+                    continue;
+                }
+                let rem_portions =
+                    portions_for(&remainder, coverage, sport_tracks, config, cell_size, tun);
+                let Some((rem_node, rem_portions, rem_score)) = qualify_candidate(
+                    remainder,
+                    rem_portions,
+                    coverage,
+                    sport_tracks,
+                    config,
+                    cell_size,
+                    tun,
+                    starts,
+                    span_s,
+                    records,
+                ) else {
+                    continue;
+                };
+                queue.push_back((usize::MAX, rem_node, rem_portions, rem_score));
+            }
+            if queue.is_empty() {
+                break;
+            }
+            continue;
+        };
         // Selection backoff (rule 6): ground already represented by an
         // accepted polyline is never re-emitted. The probe walks the
         // candidate's best portion; representation means accepted
@@ -2983,6 +3228,7 @@ fn detect_for_cluster_with_grid(
                         score_metres: score,
                     },
                 });
+                orphaned.extend(node.cells.iter().copied());
                 continue;
             };
             if re - rs == probe.len() {
@@ -3035,6 +3281,7 @@ fn detect_for_cluster_with_grid(
                             score_metres: score,
                         },
                     });
+                    orphaned.extend(node.cells.iter().copied());
                     continue;
                 }
                 let kept_m = cum[re - 1] - cum[rs];
@@ -3166,7 +3413,7 @@ fn detect_for_cluster_with_grid(
                 .iter()
                 .map(|&(t, s, e, _)| {
                     let seg = &sport_tracks[t].1[s..e];
-                    self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near))
+                    self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap))
                 })
                 .collect();
             let default_i = if was_trimmed {
@@ -3290,6 +3537,77 @@ fn detect_for_cluster_with_grid(
             } else {
                 (s, e)
             };
+            // When even the chosen pass folds (no clean pass exists in
+            // the whole candidate), the DISPLAY keeps its longest
+            // fold-free stretch rather than drawing the knot: interval
+            // reps over a corridor render as the corridor, not the
+            // reps. Display-only, like the end clip above — the
+            // extent, counts, and occupied footprint keep the full
+            // portion, and the undrawn ground re-enters the queue on
+            // its own merits below.
+            let (rs, re) = if pens[i] > tun.self_pass_clean {
+                let seg = &sport_tracks[t_idx].1[rs..re];
+                let (fs, fe) = longest_clean_range(seg, near, gap);
+                let kept_m = crate::matching::calculate_route_distance(&seg[fs..fe]);
+                if (fs, fe) != (0, seg.len()) && kept_m >= config.min_section_length {
+                    let full_m = crate::matching::calculate_route_distance(seg);
+                    for cut in [(fs > 0).then_some(fs), (fe < seg.len()).then_some(fe - 1)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        records.push(BoundaryRecord {
+                            latitude: seg[cut].latitude,
+                            longitude: seg[cut].longitude,
+                            reason: BoundaryReason::Trim {
+                                kept_metres: kept_m,
+                                dropped_metres: full_m - kept_m,
+                            },
+                        });
+                    }
+                    (rs + fs, rs + fe)
+                } else {
+                    (rs, re)
+                }
+            } else {
+                (rs, re)
+            };
+            // Ends of the drawn line must sit on supported ground: a
+            // one-walker overshoot past the usage change survives the
+            // clips above only because the node's boundary cell is
+            // coarser than the change itself. A candidate whose
+            // supported stretch falls under the length floor has no
+            // honest line at all — it backs off rather than draw
+            // ground its own support disowns.
+            let (rs, re) = {
+                let seg = &sport_tracks[t_idx].1[rs..re];
+                let (us, ue) = support_end_clip(
+                    seg,
+                    &fine,
+                    coverage.ref_lat,
+                    25.0,
+                    25.0,
+                    config.min_activities,
+                );
+                if (us, ue) == (0, seg.len()) {
+                    (rs, re)
+                } else if crate::matching::calculate_route_distance(&seg[us..ue])
+                    >= config.min_section_length
+                {
+                    (rs + us, rs + ue)
+                } else {
+                    let mid = seg[seg.len() / 2];
+                    records.push(BoundaryRecord {
+                        latitude: mid.latitude,
+                        longitude: mid.longitude,
+                        reason: BoundaryReason::LowSupport {
+                            floor: config.min_activities,
+                            dropped_cells: node.cells.len() as u32,
+                        },
+                    });
+                    orphaned.extend(node.cells.iter().copied());
+                    continue;
+                }
+            };
             // Backoff binds on the RENDER, not only on the probe: the
             // probe walked one portion, but the trim's reduced node and
             // the faithfulness/fold displacement can hand the render to
@@ -3316,6 +3634,7 @@ fn detect_for_cluster_with_grid(
                         score_metres: score,
                     },
                 });
+                orphaned.extend(node.cells.iter().copied());
                 continue;
             }
             section.polyline = sport_tracks[t_idx].1[rs..re].to_vec();
@@ -3394,10 +3713,12 @@ fn detect_for_cluster_with_grid(
                 // floor.
                 for remainder in partition_supernodes(&free, coverage, same_traffic) {
                     if (remainder.cells.len() as f64) * cell_size < config.min_section_length {
+                        orphaned.extend(remainder.cells.iter().copied());
                         continue;
                     }
                     let rem_portions =
                         portions_for(&remainder, coverage, sport_tracks, config, cell_size, tun);
+                    let rem_cells = remainder.cells.clone();
                     let Some((rem_node, rem_portions, rem_score)) = qualify_candidate(
                         remainder,
                         rem_portions,
@@ -3410,6 +3731,7 @@ fn detect_for_cluster_with_grid(
                         span_s,
                         records,
                     ) else {
+                        orphaned.extend(rem_cells);
                         continue;
                     };
                     let (seam_lat, seam_lng) = rem_node
@@ -5113,11 +5435,60 @@ mod tests {
         let mut there_back = out.clone();
         there_back.extend(out.into_iter().rev().skip(1));
         assert!(
-            out_and_back_penalty(&there_back, 20.0) > 0.6,
+            out_and_back_penalty(&there_back, 20.0, 100.0) > 0.6,
             "a forward-and-reverse runs back over its own ground"
         );
         // A single straight pass ends far from its start: never scored.
-        assert_eq!(out_and_back_penalty(&row(0.0, 50), 20.0), 0.0);
+        assert_eq!(out_and_back_penalty(&row(0.0, 50), 20.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn tight_corner_on_a_closed_loop_is_not_an_out_and_back() {
+        // A closed lap whose entry corner is hairpin-tight: the legs
+        // into and out of the corner run antiparallel within `near`,
+        // but only a corner's arc apart along the line — the corner's
+        // own shape, not a retrace. An out-and-back's antiparallel
+        // pairs sit a full out-leg apart. Regression: the Sion
+        // athletics oval charged its own entry corner 0.064, failed
+        // the clean bar, and lost the closed-lap render to a
+        // lap-plus-stem pass.
+        let mut xy: Vec<(f64, f64)> = Vec::new();
+        for i in 0..=6 {
+            xy.push((5.0 * i as f64, 0.0));
+        }
+        for i in 1..6 {
+            let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * i as f64 / 6.0;
+            xy.push((30.0 + 7.5 * a.cos(), 7.5 + 7.5 * a.sin()));
+        }
+        for i in (0..=6).rev() {
+            xy.push((5.0 * i as f64, 15.0));
+        }
+        // Wide return arc closing the loop from (0, 15) back to (0, 0).
+        let r = (55.0f64 * 55.0 + 7.5 * 7.5).sqrt();
+        let a0 = (7.5f64).atan2(55.0);
+        for i in 1..=72 {
+            let a = a0 + (2.0 * std::f64::consts::PI - 2.0 * a0) * i as f64 / 72.0;
+            xy.push((-55.0 + r * a.cos(), 7.5 + r * a.sin()));
+        }
+        let pts: Vec<GpsPoint> = xy
+            .iter()
+            .map(|&(x, y)| {
+                GpsPoint::new(
+                    46.0 + y / 111_132.0,
+                    7.0 + x / (111_320.0 * 46.0f64.to_radians().cos()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            out_and_back_penalty(&pts, 20.0, 100.0),
+            0.0,
+            "a tight corner is the loop's own shape, not a retrace"
+        );
+        assert_eq!(
+            self_pass_penalty(&pts, 20.0, 100.0),
+            0.0,
+            "a single closed lap never revisits its own ground"
+        );
     }
 
     #[test]
@@ -5138,7 +5509,7 @@ mod tests {
             }
         }
         assert_eq!(
-            out_and_back_penalty(&pts, 20.0),
+            out_and_back_penalty(&pts, 20.0, 100.0),
             0.0,
             "a switchback climbs away; its hairpins are not a retrace"
         );

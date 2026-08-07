@@ -733,3 +733,74 @@ pub fn welded_tail() -> Vec<(String, Vec<GpsPoint>)> {
     }
     out
 }
+
+/// A corridor where every outing folds mid-line: forward, back over
+/// its own ground, forward again (interval reps). Rep windows shift
+/// 40 m per outing so no coherent pass-class boundary forms and the
+/// fold stays inside one candidate's portions — every pass is legal
+/// but none is clean.
+pub fn interval_reps(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let s = 250.0 + 40.0 * i as f64;
+            let e = s + 90.0;
+            let path = densify(&[
+                (-8.0 * i as f64, 0.0),
+                (e, 0.0),
+                (s, 0.0),
+                (800.0 + 8.0 * i as f64, 0.0),
+            ]);
+            (
+                format!("reps_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// A through corridor whose middle is shredded into sub-length nodes:
+/// heavy bulks turn off at both ends (cliff + fork) and a crossing
+/// path inflates one middle cell's track set, so the strict
+/// same-traffic partition cuts the through traffic's ground at the
+/// junction while the flanks' accepted lines mask the shreds' probes.
+pub fn shredded_corridor() -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out = Vec::new();
+    for i in 0..12 {
+        let path = densify(&[(-8.0 * i as f64, 0.0), (1480.0 + 8.0 * i as f64, 0.0)]);
+        out.push((
+            format!("through_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+        ));
+    }
+    for i in 0..30 {
+        let path = densify(&[
+            (-8.0 * i as f64, 0.0),
+            (480.0, 0.0),
+            (480.0, 600.0 + 8.0 * i as f64),
+        ]);
+        out.push((
+            format!("abulk_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(12 + i))),
+        ));
+    }
+    for i in 0..30 {
+        let path = densify(&[
+            (980.0, 600.0 + 8.0 * i as f64),
+            (980.0, 0.0),
+            (1480.0 + 8.0 * i as f64, 0.0),
+        ]);
+        out.push((
+            format!("bbulk_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(42 + i))),
+        ));
+    }
+    for i in 0..16 {
+        let x = 700.0 + 4.0 * i as f64;
+        let path = densify(&[(x, -60.0), (x, 60.0)]);
+        out.push((
+            format!("cross_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(72 + i))),
+        ));
+    }
+    out
+}
