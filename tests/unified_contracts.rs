@@ -1245,3 +1245,50 @@ fn junction_shredded_middle_pools_back_into_a_section() {
         coverage(&mid, &sections, 90.0) * 100.0
     );
 }
+
+#[test]
+fn lapped_small_oval_renders_the_closed_lap() {
+    // Scenario: interval sessions on a small athletics oval — stem in,
+    // many laps, stem home. The oval spans only a couple of evidence
+    // cells, so the mouth cell blends lap and stem ground, the usage
+    // boundary cannot separate them, and the default pass is the stem
+    // plus the first lap.
+    // Expected behaviour: a pass that ends by closing onto its own
+    // interior renders the LOOP. The stem is through-ground the
+    // closure disowns; it re-enters the queue on its own merits.
+    let tracks = shapes::small_oval_stem(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    let centre = shapes::to_gps(220.0, 0.0);
+    let oval = sections
+        .iter()
+        .find(|s| {
+            let mean = s
+                .polyline
+                .iter()
+                .map(|p| haversine_distance(p, &centre))
+                .sum::<f64>()
+                / s.polyline.len() as f64;
+            mean < 120.0
+        })
+        .expect("oval section");
+    let endgap = haversine_distance(
+        oval.polyline.first().unwrap(),
+        oval.polyline.last().unwrap(),
+    );
+    assert!(
+        endgap <= 40.0,
+        "oval render is not a closed lap (endgap {endgap:.0} m)"
+    );
+    assert!(
+        (350.0..520.0).contains(&oval.distance_meters),
+        "oval render {:.0} m is not one revolution (~440 m)",
+        oval.distance_meters
+    );
+    let stem_mid = shapes::to_gps(40.0, 0.0);
+    assert!(
+        min_dist(&stem_mid, &oval.polyline) > 60.0,
+        "oval render still reaches down the stem"
+    );
+}

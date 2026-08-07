@@ -804,3 +804,30 @@ pub fn shredded_corridor() -> Vec<(String, Vec<GpsPoint>)> {
     }
     out
 }
+
+/// Interval sessions on a small oval: stem in, ten laps, stem home.
+/// The oval spans only a couple of evidence cells, so the mouth cell
+/// blends lap and stem ground and the usage boundary cannot separate
+/// them; each outing's simple pass is stem plus first lap.
+pub fn small_oval_stem(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let mut path: Vec<(f64, f64)> = Vec::new();
+            path.extend(densify(&[(-8.0 * i as f64, 0.0), (150.0, 0.0)]));
+            for _ in 0..10 {
+                path.extend(arc(
+                    220.0,
+                    0.0,
+                    70.0,
+                    std::f64::consts::PI,
+                    -std::f64::consts::PI,
+                ));
+            }
+            path.extend(densify(&[(150.0, 0.0), (-8.0 * i as f64, 0.0)]));
+            (
+                format!("oval_{i}"),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
