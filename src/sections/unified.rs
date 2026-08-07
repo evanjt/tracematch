@@ -2669,6 +2669,7 @@ fn unify_chain_references(
     sport_tracks: &[(&str, &[GpsPoint])],
     cell_size: f64,
     divergence: f64,
+    tun: &Tunables,
 ) {
     let n = sections.len();
     if n < 2 {
@@ -2825,6 +2826,19 @@ fn unify_chain_references(
                 if (cut_m - sections[m].distance_meters).abs()
                     > divergence * sections[m].distance_meters
                 {
+                    continue;
+                }
+                // A cover must not be dirtier than the line it
+                // replaces: the shared trace can spin inside the
+                // member's extent where the member's own render was
+                // fold-free, and a tight fold hides inside both the
+                // lateral envelope and the length share.
+                let pen_near = cell_size * 0.2;
+                let cut_pen = self_pass_penalty(cut, pen_near, cell_size)
+                    .max(out_and_back_penalty(cut, pen_near, cell_size));
+                let own_pen = self_pass_penalty(g, pen_near, cell_size)
+                    .max(out_and_back_penalty(g, pen_near, cell_size));
+                if cut_pen > own_pen.max(tun.self_pass_clean) {
                     continue;
                 }
                 chosen.insert(m, (t, lo, hi + 1));
@@ -3537,40 +3551,6 @@ fn detect_for_cluster_with_grid(
             } else {
                 (s, e)
             };
-            // When even the chosen pass folds (no clean pass exists in
-            // the whole candidate), the DISPLAY keeps its longest
-            // fold-free stretch rather than drawing the knot: interval
-            // reps over a corridor render as the corridor, not the
-            // reps. Display-only, like the end clip above — the
-            // extent, counts, and occupied footprint keep the full
-            // portion, and the undrawn ground re-enters the queue on
-            // its own merits below.
-            let (rs, re) = if pens[i] > tun.self_pass_clean {
-                let seg = &sport_tracks[t_idx].1[rs..re];
-                let (fs, fe) = longest_clean_range(seg, near, gap);
-                let kept_m = crate::matching::calculate_route_distance(&seg[fs..fe]);
-                if (fs, fe) != (0, seg.len()) && kept_m >= config.min_section_length {
-                    let full_m = crate::matching::calculate_route_distance(seg);
-                    for cut in [(fs > 0).then_some(fs), (fe < seg.len()).then_some(fe - 1)]
-                        .into_iter()
-                        .flatten()
-                    {
-                        records.push(BoundaryRecord {
-                            latitude: seg[cut].latitude,
-                            longitude: seg[cut].longitude,
-                            reason: BoundaryReason::Trim {
-                                kept_metres: kept_m,
-                                dropped_metres: full_m - kept_m,
-                            },
-                        });
-                    }
-                    (rs + fs, rs + fe)
-                } else {
-                    (rs, re)
-                }
-            } else {
-                (rs, re)
-            };
             // Ends of the drawn line must sit on supported ground: a
             // one-walker overshoot past the usage change survives the
             // clips above only because the node's boundary cell is
@@ -3606,6 +3586,47 @@ fn detect_for_cluster_with_grid(
                     });
                     orphaned.extend(node.cells.iter().copied());
                     continue;
+                }
+            };
+            // When even the chosen pass folds (no clean pass exists in
+            // the whole candidate), the DISPLAY keeps its longest
+            // fold-free stretch rather than drawing the knot: interval
+            // reps over a corridor render as the corridor, not the
+            // reps. Judged on the final clipped line's OWN score — the
+            // clips above change the denominator, and a long portion
+            // under the clean bar can hide a knot that dominates its
+            // clipped sub-range. Display-only, like the clips above:
+            // the extent, counts, and occupied footprint keep the full
+            // portion, and the undrawn ground re-enters the queue on
+            // its own merits below.
+            let (rs, re) = {
+                let seg = &sport_tracks[t_idx].1[rs..re];
+                let seg_pen =
+                    self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap));
+                if seg_pen <= tun.self_pass_clean {
+                    (rs, re)
+                } else {
+                    let (fs, fe) = longest_clean_range(seg, near, gap);
+                    let kept_m = crate::matching::calculate_route_distance(&seg[fs..fe]);
+                    if (fs, fe) != (0, seg.len()) && kept_m >= config.min_section_length {
+                        let full_m = crate::matching::calculate_route_distance(seg);
+                        for cut in [(fs > 0).then_some(fs), (fe < seg.len()).then_some(fe - 1)]
+                            .into_iter()
+                            .flatten()
+                        {
+                            records.push(BoundaryRecord {
+                                latitude: seg[cut].latitude,
+                                longitude: seg[cut].longitude,
+                                reason: BoundaryReason::Trim {
+                                    kept_metres: kept_m,
+                                    dropped_metres: full_m - kept_m,
+                                },
+                            });
+                        }
+                        (rs + fs, rs + fe)
+                    } else {
+                        (rs, re)
+                    }
                 }
             };
             // Backoff binds on the RENDER, not only on the probe: the
@@ -3776,6 +3797,7 @@ fn detect_for_cluster_with_grid(
         sport_tracks,
         cell_size,
         divergence,
+        tun,
     );
 
     sections
