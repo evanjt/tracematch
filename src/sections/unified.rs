@@ -1746,13 +1746,7 @@ fn out_and_back_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
 /// directions of a retraced stretch are marked — the ground genuinely
 /// has no single clean pass through it.
 fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
-    // A hill-sprint hairpin drifts at the turn, so its endpoints sit a
-    // quarter of its length apart — over the old 0.2 gate — while the
-    // self-pass arc exemptions make any sub-2×gap line unchargeable
-    // there. 0.3 keeps every genuinely open line out (a through pass
-    // ends a full length away) and lets the antiparallel test judge
-    // the rest.
-    const CLOSE_FRAC: f64 = 0.3;
+    const CLOSE_FRAC: f64 = 0.2;
     let mut marks = vec![false; pts.len()];
     if pts.len() < 5 {
         return marks;
@@ -1771,7 +1765,18 @@ fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     let total = cum[pts.len() - 1];
     let last = xy[xy.len() - 1];
     let end = ((last.0 - xy[0].0).powi(2) + (last.1 - xy[0].1).powi(2)).sqrt();
-    if total <= 0.0 || end > CLOSE_FRAC * total {
+    // Lines under 2×gap sit in the self-pass arc exemptions' blind
+    // band, so this test is their only fold judge: a hill-sprint
+    // hairpin drifts at the turn and its endpoints sit a quarter of
+    // its length apart, over the base gate. Longer lines keep the
+    // strict gate — a winding through-corridor may coil past itself
+    // without being a retrace.
+    let close_frac = if total < 2.0 * gap {
+        1.5 * CLOSE_FRAC
+    } else {
+        CLOSE_FRAC
+    };
+    if total <= 0.0 || end > close_frac * total {
         return marks;
     }
     let hdg = |i: usize| {
