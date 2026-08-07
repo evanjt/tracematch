@@ -1650,6 +1650,87 @@ fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     marks
 }
 
+/// A pass that terminates by closing onto its own interior is a loop
+/// plus an arrival (or departure) stem: the LOOP is the honest face of
+/// lapped ground, and the stem is through-ground the closure disowns.
+///
+/// The end may be extended along the SAME trace by up to `max_ext_m`
+/// to complete the revolution: the pass cutter cuts where re-covering
+/// BEGINS, which at a small loop's mouth is a breath before the
+/// closure point, so the cut pass ends a few dozen metres short of
+/// closing. The extension keeps the render one contiguous real range.
+///
+/// Returns the loop as a half-open track range when a closure exists
+/// and something meaningful changes: a clean closed loop closes onto
+/// its own start (nothing to trim, no extension), and a
+/// forward-and-reverse ends beside its opening metres (stem under the
+/// floor of twice `near`); both return `None`.
+fn closing_loop_range(
+    track: &[GpsPoint],
+    rs: usize,
+    re: usize,
+    near: f64,
+    gap: f64,
+    max_ext_m: f64,
+) -> Option<(usize, usize)> {
+    let n = re - rs;
+    if n < 5 {
+        return None;
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * track[rs].latitude.to_radians().cos();
+    // Extend the frame past the cut while the extension stays short.
+    let mut ext_re = re;
+    let mut ext_m = 0.0;
+    while ext_re < track.len() && ext_m < max_ext_m {
+        ext_m += crate::geo_utils::haversine_distance(&track[ext_re - 1], &track[ext_re]);
+        ext_re += 1;
+    }
+    let pts = &track[rs..ext_re];
+    let xy: Vec<(f64, f64)> = pts
+        .iter()
+        .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
+        .collect();
+    let mut cum = vec![0.0f64; pts.len()];
+    for i in 1..pts.len() {
+        let (dx, dy) = (xy[i].0 - xy[i - 1].0, xy[i].1 - xy[i - 1].1);
+        cum[i] = cum[i - 1] + (dx * dx + dy * dy).sqrt();
+    }
+    let min_stem = 2.0 * near;
+    let near2 = near * near;
+    let d2 = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2);
+    // Earliest end (never before the original cut) that closes onto
+    // the latest possible interior point of the ORIGINAL pass.
+    for end_k in n - 1..pts.len() {
+        let mut start_at: Option<usize> = None;
+        for j in 0..n - 1 {
+            if cum[end_k] - cum[j] >= gap && d2(xy[end_k], xy[j]) < near2 {
+                start_at = Some(j);
+            }
+        }
+        if let Some(j) = start_at {
+            let meaningful = cum[j] >= min_stem || end_k > n - 1;
+            let kept = cum[end_k] - cum[j];
+            if meaningful && kept >= gap {
+                return Some((rs + j, rs + end_k + 1));
+            }
+            return None;
+        }
+    }
+    // No end closure: a loop first, then a departure stem — the start
+    // is revisited later, and the loop before the stem is the face.
+    let total = cum[n - 1];
+    for j in (1..n).rev() {
+        if cum[j] >= gap && d2(xy[0], xy[j]) < near2 {
+            if total - cum[j] >= min_stem {
+                return Some((rs, rs + j + 1));
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// The longest fold-free stretch of a line: the maximal contiguous run
 /// of points carrying neither a self-pass revisit mark nor a retrace
 /// mark, as a half-open index range. A clean line returns the whole
@@ -3596,6 +3677,37 @@ fn detect_for_cluster_with_grid(
                     });
                     orphaned.extend(node.cells.iter().copied());
                     continue;
+                }
+            };
+            // A pass that terminates by closing onto its own interior
+            // renders the LOOP: lapped ground's honest face is the
+            // revolution, and the stem it was reached by re-enters the
+            // queue with the rest of the undrawn ground below.
+            let (rs, re) = {
+                let track = sport_tracks[t_idx].1;
+                match closing_loop_range(track, rs, re, near, gap, 1.5 * cell_size) {
+                    Some((ls, le))
+                        if crate::matching::calculate_route_distance(&track[ls..le])
+                            >= config.min_section_length =>
+                    {
+                        let kept_m = crate::matching::calculate_route_distance(&track[ls..le]);
+                        let full_m = crate::matching::calculate_route_distance(&track[rs..re]);
+                        for cut in [(ls > rs).then_some(ls), (le < re).then_some(le - 1)]
+                            .into_iter()
+                            .flatten()
+                        {
+                            records.push(BoundaryRecord {
+                                latitude: track[cut].latitude,
+                                longitude: track[cut].longitude,
+                                reason: BoundaryReason::Trim {
+                                    kept_metres: kept_m,
+                                    dropped_metres: (full_m - kept_m).max(0.0),
+                                },
+                            });
+                        }
+                        (ls, le)
+                    }
+                    _ => (rs, re),
                 }
             };
             // When even the chosen pass folds (no clean pass exists in
