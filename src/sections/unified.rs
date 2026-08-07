@@ -1538,6 +1538,11 @@ fn self_pass_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
         let (dx, dy) = (xy[i].0 - xy[i - 1].0, xy[i].1 - xy[i - 1].1);
         cum[i] = cum[i - 1] + (dx * dx + dy * dy).sqrt();
     }
+    // The arc gap spares a closed loop's join, but at full width it
+    // also makes every line shorter than 2×gap unchargeable — a
+    // sub-200 m hairpin hugging itself lane-to-lane scored clean.
+    // Short lines shrink the gap to a third of their length.
+    let gap = gap.min(cum[pts.len() - 1] / 3.0);
     if cum[pts.len() - 1] < gap {
         return marks;
     }
@@ -2693,9 +2698,26 @@ fn qualify_candidate(
     Some((node, portions, score))
 }
 
+/// Whether an accepted section's traffic carries the candidate's:
+/// containment of the candidate's set at the same-traffic bar. A braid
+/// twin or chain neighbour shares the users whose ground it claims; a
+/// distinct population's parallel path — the other bank of a river a
+/// lane's width away in plan — does not, and a line its users never
+/// run cannot represent their corridor.
+fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
+    if cand.is_empty() {
+        return true;
+    }
+    let inter = cand.iter().filter(|t| acc.contains(t)).count();
+    inter as f64 >= bar * cand.len() as f64
+}
+
 fn probe_mask(
     probe: &[GpsPoint],
-    accepted: &HashMap<Cell, Vec<GpsPoint>>,
+    accepted: &HashMap<Cell, Vec<(GpsPoint, u32)>>,
+    acc_tracks: &[HashSet<u32>],
+    cand: &HashSet<u32>,
+    same_traffic: f64,
     grid: &CellGrid,
     cell_size: f64,
 ) -> Vec<bool> {
@@ -2706,8 +2728,10 @@ fn probe_mask(
             (-1..=1i32).any(|dy| {
                 (-1..=1i32).any(|dx| {
                     accepted.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
-                        v.iter()
-                            .any(|q| crate::geo_utils::haversine_distance(p, q) < cell_size)
+                        v.iter().any(|(q, ai)| {
+                            crate::geo_utils::haversine_distance(p, q) < cell_size
+                                && shares_traffic(cand, &acc_tracks[*ai as usize], same_traffic)
+                        })
                     })
                 })
             })
@@ -3229,7 +3253,8 @@ fn detect_for_cluster_with_grid(
     });
 
     let backoff_grid = CellGrid::new(cell_size, coverage.ref_lat);
-    let mut accepted_pts: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
+    let mut accepted_pts: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
+    let mut acc_tracks: Vec<HashSet<u32>> = Vec::new();
     let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
     let mut queue: std::collections::VecDeque<(usize, Supernode, Vec<Portion>, f64)> =
         candidates.into_iter().collect();
@@ -3246,7 +3271,15 @@ fn detect_for_cluster_with_grid(
                 .filter(|c| !pooled_ever.contains(c))
                 .filter(|c| {
                     let (la, ln) = coverage.grid.centre_of(*c);
-                    !accepted_pts.contains_key(&backoff_grid.cell_of(la, ln))
+                    let empty = HashSet::new();
+                    let cell_cand = coverage.cell_tracks.get(c).unwrap_or(&empty);
+                    !accepted_pts
+                        .get(&backoff_grid.cell_of(la, ln))
+                        .is_some_and(|v| {
+                            v.iter().any(|(_, ai)| {
+                                shares_traffic(cell_cand, &acc_tracks[*ai as usize], same_traffic)
+                            })
+                        })
                 })
                 .collect();
             orphaned.clear();
@@ -3300,7 +3333,15 @@ fn detect_for_cluster_with_grid(
             continue;
         };
         let probe = &sport_tracks[pt_idx].1[ps..pe];
-        let mask = probe_mask(probe, &accepted_pts, &backoff_grid, cell_size);
+        let mask = probe_mask(
+            probe,
+            &accepted_pts,
+            &acc_tracks,
+            &node.tracks,
+            same_traffic,
+            &backoff_grid,
+            cell_size,
+        );
         let near = mask.iter().filter(|&&m| m).count();
         let (portions, approx_len, was_trimmed) = if near == 0 {
             (portions, node.cells.len() as f64 * cell_size, false)
@@ -3599,11 +3640,13 @@ fn detect_for_cluster_with_grid(
                 // No pass is a single traversal: the candidate backs off,
                 // but its footprint still occupies the ground so a
                 // neighbour cannot re-expand into a junction with no line.
+                let ai = acc_tracks.len() as u32;
+                acc_tracks.push(node.tracks.clone());
                 for p in footprint.iter().step_by(3) {
                     accepted_pts
                         .entry(backoff_grid.cell_of(p.latitude, p.longitude))
                         .or_default()
-                        .push(*p);
+                        .push((*p, ai));
                 }
                 let best = pens.iter().copied().fold(1.0_f64, f64::min);
                 let mid = section.polyline[section.polyline.len() / 2];
@@ -3661,6 +3704,25 @@ fn detect_for_cluster_with_grid(
                     25.0,
                     config.min_activities,
                 );
+                if (us, ue) != (0, seg.len())
+                    && crate::matching::calculate_route_distance(&seg[us..ue])
+                        < config.min_section_length
+                {
+                    // A salvaged candidate whose supported core falls
+                    // under the length floor has no honest line: it
+                    // backs off instead of rendering a stub.
+                    let mid = seg[seg.len() / 2];
+                    records.push(BoundaryRecord {
+                        latitude: mid.latitude,
+                        longitude: mid.longitude,
+                        reason: BoundaryReason::LowSupport {
+                            floor: config.min_activities,
+                            dropped_cells: node.cells.len() as u32,
+                        },
+                    });
+                    orphaned.extend(node.cells.iter().copied());
+                    continue;
+                }
                 (rs + us, rs + ue.min(seg.len()))
             } else {
                 (rs, re)
@@ -3865,7 +3927,15 @@ fn detect_for_cluster_with_grid(
             // worth of unrepresented travel is a duplicate of what is
             // already drawn, whatever its probe said.
             let render = &sport_tracks[t_idx].1[rs..re];
-            let render_mask = probe_mask(render, &accepted_pts, &backoff_grid, cell_size);
+            let render_mask = probe_mask(
+                render,
+                &accepted_pts,
+                &acc_tracks,
+                &node.tracks,
+                same_traffic,
+                &backoff_grid,
+                cell_size,
+            );
             let fresh_m: f64 = render
                 .windows(2)
                 .enumerate()
@@ -3915,11 +3985,13 @@ fn detect_for_cluster_with_grid(
             // bleeding its milling into a re-expanding neighbour; the
             // faithfulness and fold guards on every render now police
             // that directly.
+            let ai = acc_tracks.len() as u32;
+            acc_tracks.push(node.tracks.clone());
             for p in section.polyline.iter().step_by(3) {
                 accepted_pts
                     .entry(backoff_grid.cell_of(p.latitude, p.longitude))
                     .or_default()
-                    .push(*p);
+                    .push((*p, ai));
             }
             // Rule 6 draws ONE real pass, so a corridor no one crosses
             // end to end can never be drawn by a single section — and
@@ -3947,8 +4019,20 @@ fn detect_for_cluster_with_grid(
                 .filter(|c| {
                     let (la, ln) = coverage.grid.centre_of(*c);
                     let bc = backoff_grid.cell_of(la, ln);
+                    let empty = HashSet::new();
+                    let cell_cand = coverage.cell_tracks.get(c).unwrap_or(&empty);
                     !(-1..=1i32).any(|dy| {
-                        (-1..=1i32).any(|dx| accepted_pts.contains_key(&(bc.0 + dy, bc.1 + dx)))
+                        (-1..=1i32).any(|dx| {
+                            accepted_pts.get(&(bc.0 + dy, bc.1 + dx)).is_some_and(|v| {
+                                v.iter().any(|(_, ai)| {
+                                    shares_traffic(
+                                        cell_cand,
+                                        &acc_tracks[*ai as usize],
+                                        same_traffic,
+                                    )
+                                })
+                            })
+                        })
                     })
                 })
                 .collect();
@@ -5596,12 +5680,12 @@ mod tests {
             .collect()
     }
 
-    fn accept(line: &[GpsPoint], grid: &CellGrid) -> HashMap<Cell, Vec<GpsPoint>> {
-        let mut map: HashMap<Cell, Vec<GpsPoint>> = HashMap::new();
+    fn accept(line: &[GpsPoint], grid: &CellGrid) -> HashMap<Cell, Vec<(GpsPoint, u32)>> {
+        let mut map: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
         for p in line {
             map.entry(grid.cell_of(p.latitude, p.longitude))
                 .or_default()
-                .push(*p);
+                .push((*p, 0));
         }
         map
     }
@@ -5610,10 +5694,67 @@ mod tests {
     fn probe_beside_accepted_line_is_represented() {
         let grid = CellGrid::new(100.0, 46.0);
         let accepted = accept(&row(0.0, 100), &grid);
-        let mask = probe_mask(&row(30.0, 100), &accepted, &grid, 100.0);
+        let shared: Vec<HashSet<u32>> = vec![[1u32, 2, 3].into_iter().collect()];
+        let cand: HashSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let mask = probe_mask(
+            &row(30.0, 100),
+            &accepted,
+            &shared,
+            &cand,
+            0.5,
+            &grid,
+            100.0,
+        );
         assert!(mask.iter().all(|&m| m), "30 m offset is braid width");
-        let mask = probe_mask(&row(300.0, 100), &accepted, &grid, 100.0);
+        let mask = probe_mask(
+            &row(300.0, 100),
+            &accepted,
+            &shared,
+            &cand,
+            0.5,
+            &grid,
+            100.0,
+        );
         assert!(mask.iter().all(|&m| !m), "300 m offset is distinct ground");
+    }
+
+    #[test]
+    fn a_foreign_populations_line_represents_nothing() {
+        // The other bank of a river sits a braid width away in plan,
+        // but its users never run this side: the candidate keeps its
+        // ground. Regression: the south Rhone bank (99 exclusive
+        // tracks) was suffocated by the north bank's accepted line.
+        let grid = CellGrid::new(100.0, 46.0);
+        let accepted = accept(&row(0.0, 100), &grid);
+        let foreign: Vec<HashSet<u32>> = vec![[7u32, 8, 9].into_iter().collect()];
+        let cand: HashSet<u32> = [1u32, 2, 3, 4].into_iter().collect();
+        let mask = probe_mask(
+            &row(60.0, 100),
+            &accepted,
+            &foreign,
+            &cand,
+            0.5,
+            &grid,
+            100.0,
+        );
+        assert!(
+            mask.iter().all(|&m| !m),
+            "a line whose users never run this corridor cannot represent it"
+        );
+        let sharing: Vec<HashSet<u32>> = vec![[1u32, 2, 7].into_iter().collect()];
+        let mask = probe_mask(
+            &row(60.0, 100),
+            &accepted,
+            &sharing,
+            &cand,
+            0.5,
+            &grid,
+            100.0,
+        );
+        assert!(
+            mask.iter().all(|&m| m),
+            "a line carrying half the candidate's users still represents it"
+        );
     }
 
     #[test]

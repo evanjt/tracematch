@@ -89,6 +89,14 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
             if a.id == b.id {
                 continue;
             }
+            let shared_acts = a
+                .activity_ids
+                .iter()
+                .filter(|x| b.activity_ids.contains(x))
+                .count();
+            if 2 * shared_acts < a.activity_ids.len().min(b.activity_ids.len()) {
+                continue;
+            }
             let within = a
                 .polyline
                 .iter()
@@ -135,7 +143,8 @@ fn lane(tag: &str, y: f64, outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
 fn elbow(tag: &str, outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
         .map(|i| {
-            let path = shapes::densify(&[(0.0, 140.0), (800.0, 140.0), (800.0, 800.0)]);
+            let path =
+                shapes::densify(&[(-80.0, 50.0), (10.0, 140.0), (800.0, 140.0), (800.0, 800.0)]);
             (
                 format!("{tag}_{i}"),
                 shapes::track(&shapes::wobble(
@@ -172,13 +181,25 @@ fn mill(tag: &str, outings: usize, laps: usize) -> Vec<(String, Vec<GpsPoint>)> 
 
 #[test]
 fn near_duplicate_corridor_backs_off_with_a_record() {
-    // A busy lane and a quieter twin 90 m away. The twin is its own
-    // candidate (own cells, own traffic) but its whole probe runs within
-    // a cell of the accepted busy line, so it is represented ground: one
-    // section on the busy lane, no section on the twin, and a Backoff
-    // record on the twin whose numbers say the entire probe was covered.
+    // A busy lane and a quieter twin 90 m away, ridden by users who
+    // also ride the busy lane (each twin outing opens on it): the busy
+    // line carries the twin's own traffic, so the twin is represented
+    // ground — one section on the busy lane, no section on the twin,
+    // and a Backoff record on the twin whose numbers say the entire
+    // probe was covered. A twin with its OWN population stands instead
+    // (see the distinct-population contract below).
     let mut tracks = lane("busy", 50.0, 6);
-    tracks.extend(lane("twin", 140.0, 4));
+    tracks.extend((0..4).map(|i| {
+        let path = shapes::densify(&[(-80.0, 50.0), (10.0, 140.0), (1500.0, 140.0)]);
+        (
+            format!("twin_{i}"),
+            shapes::track(&shapes::wobble(
+                &path,
+                shapes::HUMAN_WOBBLE_M,
+                10.0 + i as f64 * 1.7,
+            )),
+        )
+    }));
     let out = detect(&tracks);
     assert_catalogue_invariants(&tracks, &out.sections);
     assert_eq!(out.sections.len(), 1, "only the busy lane may stand");
@@ -243,10 +264,11 @@ fn near_duplicate_corridor_backs_off_with_a_record() {
 
 #[test]
 fn partly_represented_candidate_is_trimmed_to_its_own_run() {
-    // The elbow shares its west leg with the busy lane's corridor (90 m
-    // away, represented) then heads north on ground of its own. The
-    // candidate is cut back to the north remnant and stands there, and
-    // the Trim record carries the kept and dropped metres of that cut.
+    // The elbow's users open on the busy lane, run its corridor 90 m
+    // off (represented ground — the busy line carries them), then head
+    // north on ground of their own. The candidate is cut back to the
+    // north remnant and stands there, and the Trim record carries the
+    // kept and dropped metres of that cut.
     let mut tracks = lane("busy", 50.0, 6);
     tracks.extend(elbow("elbow", 4));
     let out = detect(&tracks);
@@ -340,5 +362,30 @@ fn milling_ground_with_no_single_pass_is_refused_with_a_record() {
     assert!(
         haversine_distance(&at, &centre) < 80.0,
         "the record must sit on the refused mill"
+    );
+}
+
+#[test]
+fn a_distinct_populations_parallel_path_stands() {
+    // A busy lane and a parallel path 90 m away used by its OWN
+    // population — the other bank of a river. The busy line carries
+    // none of the path's users, so it cannot represent their corridor:
+    // both stand. Regression: the south Rhone bank (99 tracks that
+    // never touch the north line) had no section.
+    let mut tracks = lane("busy", 50.0, 6);
+    tracks.extend(lane("bank", 140.0, 5));
+    let out = detect(&tracks);
+    assert_catalogue_invariants(&tracks, &out.sections);
+    assert_eq!(
+        out.sections.len(),
+        2,
+        "both populations' corridors must stand"
+    );
+    let bank_mid = shapes::to_gps(750.0, 140.0);
+    assert!(
+        out.sections
+            .iter()
+            .any(|s| min_dist(&bank_mid, &s.polyline) < 40.0),
+        "the distinct population's path must have its own line"
     );
 }

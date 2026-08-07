@@ -148,6 +148,14 @@ fn assert_catalogue_invariants(
             if a.id == b.id {
                 continue;
             }
+            let shared_acts = a
+                .activity_ids
+                .iter()
+                .filter(|x| b.activity_ids.contains(x))
+                .count();
+            if 2 * shared_acts < a.activity_ids.len().min(b.activity_ids.len()) {
+                continue;
+            }
             let within = a
                 .polyline
                 .iter()
