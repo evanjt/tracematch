@@ -2737,9 +2737,18 @@ fn probe_mask(
                 (-1..=1i32).any(|dx| {
                     accepted.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
                         v.iter().any(|(q, ai)| {
-                            crate::geo_utils::haversine_distance(p, q) < cell_size
-                                && shares_traffic(cand, &acc_tracks[*ai as usize], same_traffic)
-                                && (!p_lapped || lapped_at(q))
+                            if crate::geo_utils::haversine_distance(p, q) >= cell_size {
+                                return false;
+                            }
+                            if p_lapped {
+                                // Revolutions dedup geometrically: two
+                                // populations cannot lap two distinct
+                                // rings in one footprint, so an era
+                                // split must not draw the ring twice.
+                                lapped_at(q)
+                            } else {
+                                shares_traffic(cand, &acc_tracks[*ai as usize], same_traffic)
+                            }
                         })
                     })
                 })
