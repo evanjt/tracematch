@@ -3348,7 +3348,7 @@ fn detect_for_cluster_with_grid(
                 .get(&c)
                 .is_some_and(|m| m.iter().any(|(t, &cl)| cl >= 3 && node.tracks.contains(t)))
         };
-        let mask = probe_mask(
+        let mut mask = probe_mask(
             probe,
             &accepted_pts,
             &acc_tracks,
@@ -3358,6 +3358,45 @@ fn detect_for_cluster_with_grid(
             &backoff_grid,
             cell_size,
         );
+        // The mouth of a lapped feature blends stem and lap ground, so
+        // its cells read single-pass while the revolutions start a
+        // step away along the SAME pass: a masked point within one
+        // cell's arc of the candidate's own lapped ground is the way
+        // in and out of its revolutions, not represented corridor.
+        // Arc reach, never plan reach — a separate stem candidate a
+        // ring away gains nothing.
+        if mask.iter().any(|&m| m) {
+            let strict: Vec<bool> = probe.iter().map(|p| own_lapped(p)).collect();
+            if strict.iter().any(|&s| s) {
+                let mut cum2 = Vec::with_capacity(probe.len());
+                let mut acc2 = 0.0;
+                cum2.push(0.0);
+                for w in probe.windows(2) {
+                    acc2 += crate::geo_utils::haversine_distance(&w[0], &w[1]);
+                    cum2.push(acc2);
+                }
+                let mut near_strict = vec![f64::INFINITY; probe.len()];
+                let mut last = f64::NEG_INFINITY;
+                for i in 0..probe.len() {
+                    if strict[i] {
+                        last = cum2[i];
+                    }
+                    near_strict[i] = cum2[i] - last;
+                }
+                let mut nxt = f64::INFINITY;
+                for i in (0..probe.len()).rev() {
+                    if strict[i] {
+                        nxt = cum2[i];
+                    }
+                    near_strict[i] = near_strict[i].min(nxt - cum2[i]);
+                }
+                for i in 0..mask.len() {
+                    if mask[i] && near_strict[i] <= cell_size {
+                        mask[i] = false;
+                    }
+                }
+            }
+        }
         let near = mask.iter().filter(|&&m| m).count();
         let (portions, approx_len, was_trimmed) = if near == 0 {
             (portions, node.cells.len() as f64 * cell_size, false)
