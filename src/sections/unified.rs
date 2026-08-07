@@ -2191,15 +2191,18 @@ fn minority_end_clip(
     (start.min(end.saturating_sub(2)), end)
 }
 
-/// Clip a render's ends back to supported ground: an end run whose
-/// metre-resolution support among the section's own contributors is
-/// below `min_tracks` extends over ground that can never be hot — a
+/// Clip a render's ends back to supported ground: a SUSTAINED end run
+/// whose metre-resolution support among the section's own contributors
+/// is below `min_tracks` extends over ground that can never be hot — a
 /// one-walker overshoot past the usage change, kept only because the
 /// node's boundary cell is coarser than the change. End of support is
-/// a visible boundary (rule 9); unlike [`minority_end_clip`] this is
-/// not a judgement about branches, so it carries no run or median
-/// bars. Display-only, ends-only: mid-line support is rule B's
-/// business.
+/// a visible boundary (rule 9). The run must be sustained (`MIN_RUN`
+/// samples, as in [`minority_end_clip`]): a sample or two of thin end
+/// taper is receiver-noise staggering of where contributors start and
+/// stop, and clipping it would make each sport bucket's render end
+/// drift by its own stagger — enough to push the identity carry off a
+/// row another bucket minted on the same ground. Display-only,
+/// ends-only: mid-line support is rule B's business.
 fn support_end_clip(
     line: &[GpsPoint],
     index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
@@ -2260,6 +2263,13 @@ fn support_end_clip(
     let mut trail = 0;
     while trail < n - lead && samples[n - 1 - trail].1 < min_tracks {
         trail += 1;
+    }
+    const MIN_RUN: usize = 3;
+    if lead < MIN_RUN {
+        lead = 0;
+    }
+    if trail < MIN_RUN {
+        trail = 0;
     }
     let start = if lead > 0 {
         samples[lead.min(n - 1)].0
