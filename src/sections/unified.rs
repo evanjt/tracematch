@@ -3676,8 +3676,8 @@ fn detect_for_cluster_with_grid(
             // corridor that merely coils back within a lane's width of
             // itself is single-passed everywhere and keeps its full
             // render.
-            let lapped = |ls: usize, le: usize| {
-                let track = sport_tracks[t_idx].1;
+            let lapped = |t: usize, ls: usize, le: usize| {
+                let track = sport_tracks[t].1;
                 let mut loop_cells: Vec<Cell> = track[ls..le]
                     .iter()
                     .map(|p| coverage.grid.cell_of(p.latitude, p.longitude))
@@ -3696,32 +3696,124 @@ fn detect_for_cluster_with_grid(
                     .count();
                 2 * multi >= loop_cells.len()
             };
-            let (rs, re) = {
+            // Mean nearest-neighbour distance from a loop's sampled
+            // points to OTHER contributors' portion points: how well
+            // this revolution agrees with everyone else's laps.
+            // Distances beyond the fine index's reach read as far.
+            let loop_agreement = |t: usize, ls: usize, le: usize| -> f64 {
+                const STEP_M: f64 = 20.0;
+                const FAR_M: f64 = 75.0;
+                let m_lat = 111_132.0;
+                let m_lng = 111_320.0 * coverage.ref_lat.to_radians().cos();
+                let pts = &sport_tracks[t].1[ls..le];
+                let mut tot = 0.0;
+                let mut n = 0usize;
+                let mut acc = 0.0;
+                let mut last = -STEP_M;
+                for (k, p) in pts.iter().enumerate() {
+                    if k > 0 {
+                        acc += crate::geo_utils::haversine_distance(&pts[k - 1], p);
+                    }
+                    if acc - last < STEP_M && k + 1 < pts.len() {
+                        continue;
+                    }
+                    last = acc;
+                    let c = (
+                        (p.latitude * m_lat / 25.0).floor() as i32,
+                        (p.longitude * m_lng / 25.0).floor() as i32,
+                    );
+                    let mut best = FAR_M;
+                    for dy in -1..=1i32 {
+                        for dx in -1..=1i32 {
+                            if let Some(v) = fine.get(&(c.0 + dy, c.1 + dx)) {
+                                for &(tt, la, ln) in v {
+                                    if tt as usize == t {
+                                        continue;
+                                    }
+                                    let d = f64::hypot(
+                                        (p.latitude - la) * m_lat,
+                                        (p.longitude - ln) * m_lng,
+                                    );
+                                    if d < best {
+                                        best = d;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tot += best;
+                    n += 1;
+                }
+                if n == 0 {
+                    f64::INFINITY
+                } else {
+                    tot / n as f64
+                }
+            };
+            let (t_idx, rs, re) = {
                 let track = sport_tracks[t_idx].1;
                 match closing_loop_range(track, rs, re, near, gap, 1.5 * cell_size) {
                     Some((ls, le))
                         if crate::matching::calculate_route_distance(&track[ls..le])
                             >= config.min_section_length
-                            && lapped(ls, le) =>
+                            && lapped(t_idx, ls, le) =>
                     {
-                        let kept_m = crate::matching::calculate_route_distance(&track[ls..le]);
-                        let full_m = crate::matching::calculate_route_distance(&track[rs..re]);
-                        for cut in [(ls > rs).then_some(ls), (le < re).then_some(le - 1)]
+                        // The chosen pass's revolution keeps its
+                        // privilege while it agrees with the other
+                        // laps at metre resolution. An outlier lap —
+                        // one that weaves off the circuit in bursts
+                        // too short for the sustained-minority bar —
+                        // is displaced by the legal pass whose
+                        // revolution agrees best.
+                        let mut pick = (t_idx, rs, re, ls, le, loop_agreement(t_idx, ls, le));
+                        if pick.5 > 25.0 {
+                            for (j, &(tj, sj, ej, _)) in portions.iter().enumerate() {
+                                if j == i || !legal(j) {
+                                    continue;
+                                }
+                                let Some((ls2, le2)) = closing_loop_range(
+                                    sport_tracks[tj].1,
+                                    sj,
+                                    ej,
+                                    near,
+                                    gap,
+                                    1.5 * cell_size,
+                                ) else {
+                                    continue;
+                                };
+                                if crate::matching::calculate_route_distance(
+                                    &sport_tracks[tj].1[ls2..le2],
+                                ) < config.min_section_length
+                                    || !lapped(tj, ls2, le2)
+                                {
+                                    continue;
+                                }
+                                let sc = loop_agreement(tj, ls2, le2);
+                                if sc + 1e-9 < pick.5 {
+                                    pick = (tj, sj, ej, ls2, le2, sc);
+                                }
+                            }
+                        }
+                        let (tw, fs, fe, ls, le, _) = pick;
+                        let wtrack = sport_tracks[tw].1;
+                        let kept_m = crate::matching::calculate_route_distance(&wtrack[ls..le]);
+                        let full_m = crate::matching::calculate_route_distance(&wtrack[fs..fe]);
+                        for cut in [(ls > fs).then_some(ls), (le < fe).then_some(le - 1)]
                             .into_iter()
                             .flatten()
                         {
                             records.push(BoundaryRecord {
-                                latitude: track[cut].latitude,
-                                longitude: track[cut].longitude,
+                                latitude: wtrack[cut].latitude,
+                                longitude: wtrack[cut].longitude,
                                 reason: BoundaryReason::Trim {
                                     kept_metres: kept_m,
                                     dropped_metres: (full_m - kept_m).max(0.0),
                                 },
                             });
                         }
-                        (ls, le)
+                        (tw, ls, le)
                     }
-                    _ => (rs, re),
+                    _ => (t_idx, rs, re),
                 }
             };
             // When even the chosen pass folds (no clean pass exists in
@@ -3935,8 +4027,114 @@ fn detect_for_cluster_with_grid(
         divergence,
         tun,
     );
+    reconcile_seam_overruns(&mut sections, coverage.ref_lat, config.min_section_length);
 
     sections
+}
+
+/// Chain neighbours must MEET, not double-draw: when one line's end
+/// runs sustained alongside another accepted line — two renderings of
+/// the same trail from different real activities, a GPS-drift lane
+/// apart — the quieter line's overrunning end clips back to the meet
+/// point and the busier line keeps the shared stretch. Ends only,
+/// display only, and only within the drift scale: genuinely parallel
+/// streets sit wider than [`SEAM_TOL_M`] and are never touched.
+const SEAM_TOL_M: f64 = 25.0;
+const SEAM_RUN_M: f64 = 60.0;
+
+fn reconcile_seam_overruns(sections: &mut [FrequentSection], ref_lat: f64, min_len: f64) {
+    if sections.len() < 2 {
+        return;
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let key = |p: &GpsPoint| {
+        (
+            (p.latitude * m_lat / SEAM_TOL_M).floor() as i32,
+            (p.longitude * m_lng / SEAM_TOL_M).floor() as i32,
+        )
+    };
+    // Rank: the busier line owns shared ground; ties to the longer,
+    // then the earlier id, so the outcome is deterministic.
+    let rank = |s: &FrequentSection| (s.visit_count, s.distance_meters.round() as i64);
+    for i in 0..sections.len() {
+        // Foreign geometry that outranks section i, hashed at seam scale.
+        let mut grid: HashMap<(i32, i32), Vec<(f64, f64)>> = HashMap::new();
+        let my_rank = rank(&sections[i]);
+        let my_id = sections[i].id.clone();
+        for (j, other) in sections.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let beats = match rank(other).cmp(&my_rank) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => other.id < my_id,
+            };
+            if !beats {
+                continue;
+            }
+            for p in &other.polyline {
+                grid.entry(key(p))
+                    .or_default()
+                    .push((p.latitude * m_lat, p.longitude * m_lng));
+            }
+        }
+        if grid.is_empty() {
+            continue;
+        }
+        let tol2 = SEAM_TOL_M * SEAM_TOL_M;
+        let near = |p: &GpsPoint| {
+            let (x, y) = (p.latitude * m_lat, p.longitude * m_lng);
+            let c = key(p);
+            (-1..=1i32).any(|dy| {
+                (-1..=1i32).any(|dx| {
+                    grid.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
+                        v.iter()
+                            .any(|&(ex, ey)| (x - ex).powi(2) + (y - ey).powi(2) < tol2)
+                    })
+                })
+            })
+        };
+        let line = &sections[i].polyline;
+        let n = line.len();
+        let mut cum = vec![0.0f64; n];
+        for k in 1..n {
+            cum[k] = cum[k - 1] + crate::geo_utils::haversine_distance(&line[k - 1], &line[k]);
+        }
+        let total = cum[n - 1];
+        // Leading overrun: the prefix run of near points, sustained and
+        // confined to the first half of the line.
+        let mut lead = 0usize;
+        while lead < n && near(&line[lead]) {
+            lead += 1;
+        }
+        let lead_ok =
+            lead > 0 && lead < n && cum[lead - 1] >= SEAM_RUN_M && cum[lead] < 0.5 * total;
+        let mut trail = 0usize;
+        while trail < n && near(&line[n - 1 - trail]) {
+            trail += 1;
+        }
+        let trail_ok = trail > 0
+            && trail < n
+            && total - cum[n - trail] >= SEAM_RUN_M
+            && total - cum[n - 1 - trail] < 0.5 * total;
+        let s = if lead_ok { lead } else { 0 };
+        let e = if trail_ok { n - trail } else { n };
+        if s == 0 && e == n {
+            continue;
+        }
+        if e <= s + 1 {
+            continue;
+        }
+        let kept = &sections[i].polyline[s..e];
+        let kept_m = crate::matching::calculate_route_distance(kept);
+        if kept_m < min_len {
+            continue;
+        }
+        sections[i].polyline = kept.to_vec();
+        sections[i].distance_meters = kept_m;
+    }
 }
 
 /// Detect sections using the unified pipeline: coverage grid →
@@ -5671,5 +5869,100 @@ mod tests {
             0.0,
             "a switchback climbs away; its hairpins are not a retrace"
         );
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+
+    fn sec(id: &str, visits: u32, pts: Vec<GpsPoint>) -> FrequentSection {
+        let dist = crate::matching::calculate_route_distance(&pts);
+        FrequentSection {
+            id: id.to_string(),
+            name: None,
+            sport_type: "All".to_string(),
+            polyline: pts,
+            representative_activity_id: "a".to_string(),
+            activity_ids: vec!["a".to_string()],
+            activity_portions: Vec::new(),
+            route_ids: Vec::new(),
+            visit_count: visits,
+            distance_meters: dist,
+            activity_traces: HashMap::new(),
+            confidence: 1.0,
+            observation_count: visits,
+            average_spread: 0.0,
+            point_density: Vec::new(),
+            scale: None,
+            is_user_defined: false,
+            stability: 1.0,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            consensus_state: None,
+        }
+    }
+
+    fn east_line(x0: f64, x1: f64, y: f64) -> Vec<GpsPoint> {
+        let m_lng = 111_320.0 * 46.0f64.to_radians().cos();
+        let n = ((x1 - x0).abs() / 10.0) as usize;
+        (0..=n)
+            .map(|k| {
+                let x = x0 + (x1 - x0) * k as f64 / n as f64;
+                GpsPoint::new(46.0 + y / 111_132.0, 7.0 + x / m_lng)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overrunning_tail_clips_back_to_the_meet() {
+        // The busier line covers x 0..1000; the quieter neighbour's
+        // opening 200 m runs a GPS-drift lane (10 m) alongside it
+        // before diverging east. The quieter line clips to the meet;
+        // the busier keeps its full render. Regression: full
+        // sec_all_146/149 double-drew ~200 m of the same trail from
+        // two activities' traces.
+        let busy = east_line(0.0, 1000.0, 0.0);
+        let mut quiet = east_line(800.0, 1000.0, 10.0);
+        quiet.extend(east_line(1010.0, 1780.0, 40.0));
+        let mut sections = vec![sec("s_busy", 73, busy.clone()), sec("s_quiet", 65, quiet)];
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        assert_eq!(
+            sections[0].polyline.len(),
+            busy.len(),
+            "the busier line must keep its full render"
+        );
+        let q0 = &sections[1].polyline[0];
+        let m_lng = 111_320.0 * 46.0f64.to_radians().cos();
+        let qx = (q0.longitude - 7.0) * m_lng;
+        assert!(
+            qx > 990.0,
+            "quieter line still starts at x {qx:.0}: the overrun did not clip to the meet"
+        );
+    }
+
+    #[test]
+    fn a_meeting_end_is_not_an_overrun() {
+        // Chain members whose ends merely touch within tolerance for a
+        // few metres must keep their renders.
+        let a = east_line(0.0, 1000.0, 0.0);
+        let b = east_line(990.0, 1990.0, 8.0);
+        let mut sections = vec![sec("s_a", 40, a.clone()), sec("s_b", 30, b.clone())];
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        assert_eq!(sections[0].polyline.len(), a.len());
+        assert_eq!(sections[1].polyline.len(), b.len());
+    }
+
+    #[test]
+    fn parallel_streets_are_never_touched() {
+        // Two genuinely parallel lines 40 m apart sit wider than the
+        // drift scale and keep their full renders.
+        let a = east_line(0.0, 1000.0, 0.0);
+        let b = east_line(0.0, 1000.0, 40.0);
+        let mut sections = vec![sec("s_a", 40, a.clone()), sec("s_b", 30, b.clone())];
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        assert_eq!(sections[0].polyline.len(), a.len());
+        assert_eq!(sections[1].polyline.len(), b.len());
     }
 }
