@@ -3235,7 +3235,7 @@ fn detect_for_cluster_with_grid(
         candidates.into_iter().collect();
     let mut pooled_ever: HashSet<Cell> = HashSet::new();
     loop {
-        let Some((_, node, portions, score)) = queue.pop_front() else {
+        let Some((mark, node, portions, score)) = queue.pop_front() else {
             // The pass drained: pool the orphaned ground and retry it.
             // Cells already retried once and cells the accepted lines
             // now stand on are dropped, so the salvage strictly
@@ -3642,14 +3642,16 @@ fn detect_for_cluster_with_grid(
             } else {
                 (s, e)
             };
-            // Ends of the drawn line must sit on supported ground: a
-            // one-walker overshoot past the usage change survives the
-            // clips above only because the node's boundary cell is
-            // coarser than the change itself. A candidate whose
-            // supported stretch falls under the length floor has no
-            // honest line at all — it backs off rather than draw
-            // ground its own support disowns.
-            let (rs, re) = {
+            // A RE-QUEUED candidate's drawn ends must sit on supported
+            // ground: its node was assembled from freed cells and
+            // salvage pools, so its portions carry ring bleed past the
+            // real usage change — a one-walker overshoot that survives
+            // the clips above only because the node's boundary cell is
+            // coarser than the change. First-pass candidates keep
+            // their renders untouched: their extents came through the
+            // boundary machinery, and their long-reviewed lines must
+            // not drift with a display rule aimed at salvage bleed.
+            let (rs, re) = if mark == usize::MAX {
                 let seg = &sport_tracks[t_idx].1[rs..re];
                 let (us, ue) = support_end_clip(
                     seg,
@@ -3659,35 +3661,21 @@ fn detect_for_cluster_with_grid(
                     25.0,
                     config.min_activities,
                 );
-                if (us, ue) == (0, seg.len()) {
-                    (rs, re)
-                } else if crate::matching::calculate_route_distance(&seg[us..ue])
-                    >= config.min_section_length
-                {
-                    (rs + us, rs + ue)
-                } else {
-                    let mid = seg[seg.len() / 2];
-                    records.push(BoundaryRecord {
-                        latitude: mid.latitude,
-                        longitude: mid.longitude,
-                        reason: BoundaryReason::LowSupport {
-                            floor: config.min_activities,
-                            dropped_cells: node.cells.len() as u32,
-                        },
-                    });
-                    orphaned.extend(node.cells.iter().copied());
-                    continue;
-                }
+                (rs + us, rs + ue.min(seg.len()))
+            } else {
+                (rs, re)
             };
             // A pass that terminates by closing onto its own interior
             // renders the LOOP: lapped ground's honest face is the
             // revolution, and the stem it was reached by re-enters the
             // queue with the rest of the undrawn ground below. Only
             // LAPPED ground reads this way — the loop's cells must
-            // carry a multi-pass class from somebody's revolutions. A
-            // winding corridor that merely coils back within a lane's
-            // width of itself is single-passed everywhere and keeps
-            // its full render.
+            // carry a class-3 pass from somebody's revolutions
+            // (class 2 is any out-and-back; a corridor travelled
+            // there-and-home must not read as a circuit). A winding
+            // corridor that merely coils back within a lane's width of
+            // itself is single-passed everywhere and keeps its full
+            // render.
             let lapped = |ls: usize, le: usize| {
                 let track = sport_tracks[t_idx].1;
                 let mut loop_cells: Vec<Cell> = track[ls..le]
@@ -3703,7 +3691,7 @@ fn detect_for_cluster_with_grid(
                         coverage
                             .cell_passes
                             .get(c)
-                            .is_some_and(|m| m.values().any(|&cl| cl >= 2))
+                            .is_some_and(|m| m.values().any(|&cl| cl >= 3))
                     })
                     .count();
                 2 * multi >= loop_cells.len()
