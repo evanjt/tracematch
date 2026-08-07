@@ -418,7 +418,13 @@ struct PassScratch {
 /// the steep-hiking range. A window qualifies when it sustains at
 /// least `LIFT_MIN_GRADE` ascent over `LIFT_SPAN_M` while staying
 /// straighter than `LIFT_MIN_STRAIGHT`; overlapping qualifying windows
-/// merge into spans. A span must then survive three vetoes: real net
+/// merge into spans. A span then grows out along its own line for as
+/// long as the cable signature holds without it, because a lift is one
+/// structure between two stations and the grade floor's job is to find
+/// the line, not to bound it: a cableway crossing a shoulder traverses
+/// at near-constant height, so grade sees the steep run either side and
+/// never the level stretch between them (see the extension below).
+/// A span must then survive three vetoes: real net
 /// rise (guards barometric drift), low micro-jitter, and human-paced
 /// movement wherever per-point time exists. Jitter is the raw arc over
 /// the smoothed arc: a cabin glides (measured lift median 1.02, p95
@@ -514,6 +520,152 @@ pub fn lift_spans_tuned(
             continue;
         }
         for m in &mut marked[i..=j] {
+            *m = true;
+        }
+    }
+
+    // Cable continuity. Grade finds a lift line; it cannot bound one. A
+    // cableway is a single straight structure between two stations, and
+    // where it crosses a shoulder it traverses at near-constant height
+    // for a long stretch. The steep runs either side qualify, the level
+    // traverse between them never can, and the gap left behind stays
+    // eligible ground and becomes a section. So a seeded span grows
+    // along its own line while the cable signature holds, minus grade:
+    // near-straight at the seed's own window scale, colinear with the
+    // seed's bearing, and, where the track is timed, still riding in the
+    // speed band the seed itself measured, because line speed does not
+    // change between the steep and level stretches. Someone leaving the
+    // top station under their own power breaks the speed band at once
+    // and drifts out of the corridor. The seed stays strict, so ground
+    // that never qualified is still never marked on its own.
+    let runs: Vec<(usize, usize)> = {
+        let mut r = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, &m) in marked.iter().enumerate() {
+            match (m, start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    r.push((s, i - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            r.push((s, n - 1));
+        }
+        r
+    };
+    // Corridor half-width for the colinearity test, read off the
+    // straightness bar instead of fitted: a window that detours `h` off
+    // its line and back over `lift_span_m` measures chord/arc =
+    // 1/sqrt(1 + 4h²/L²), so the widest excursion a qualifying window can
+    // already hide is exactly the corridor an extension may wander in.
+    let corridor = 0.5 * tun.lift_span_m * (tun.lift_min_straight.powi(-2) - 1.0).sqrt();
+    // Speed is sampled over the same fixed-distance windows the velocity
+    // veto uses, so the band and the veto see the same cadence.
+    let speed_win = tun.lift_span_m / 10.0;
+    let window_speed = |k: usize, secs: &[f64]| {
+        let mut w = k;
+        while w > 0 && cum_raw[k] - cum_raw[w] < speed_win {
+            w -= 1;
+        }
+        let dt = secs[k] - secs[w];
+        (cum_raw[k] - cum_raw[w] >= speed_win && dt > 0.0).then(|| (cum_raw[k] - cum_raw[w]) / dt)
+    };
+    // Straightness is judged at the seed's own window scale: the line
+    // still has to look like the thing that qualified.
+    let window_straight = |lo: usize, hi: usize| {
+        let arc = cum[hi] - cum[lo];
+        arc >= tun.lift_span_m
+            && crate::geo_utils::haversine_distance(&sp[lo], &sp[hi]) / arc >= tun.lift_min_straight
+    };
+    for (s, e) in runs {
+        // Local metre frame on the seed's own bearing, for the distance
+        // of a candidate point off the cable's line.
+        let m_lat = 111_132.0;
+        let m_lng = 111_320.0 * sp[s].latitude.to_radians().cos();
+        let xy = |k: usize| {
+            (
+                (sp[k].longitude - sp[s].longitude) * m_lng,
+                (sp[k].latitude - sp[s].latitude) * m_lat,
+            )
+        };
+        let (bx, by) = xy(e);
+        let bearing_len = bx.hypot(by);
+        let off_line = |k: usize| {
+            let (px, py) = xy(k);
+            if bearing_len > 0.0 {
+                ((bx * py - by * px) / bearing_len).abs()
+            } else {
+                0.0
+            }
+        };
+        // The seed's own speed band, when the track is timed. Read off
+        // the deciles rather than the extremes: a qualifying window can
+        // overrun a station by up to its own length, so a seed's last
+        // samples may already be someone skiing away, and one such
+        // sample would otherwise widen the band enough to admit the
+        // whole run-out. Fewer than three samples is no band at all
+        // (the velocity veto's own convention) and geometry decides.
+        let band = seconds.and_then(|secs| {
+            let mut v: Vec<f64> = (s..=e).filter_map(|k| window_speed(k, secs)).collect();
+            if v.len() < 3 {
+                return None;
+            }
+            v.sort_unstable_by(f64::total_cmp);
+            Some((v[v.len() / 10], v[v.len() - 1 - v.len() / 10]))
+        });
+        // Speed band when the track is timed, jitter otherwise: the same
+        // split the velocity veto already makes, for the same reason.
+        // Either way it is the carried/self-powered character that
+        // decides, since the grade that seeded the span is gone.
+        let holds = |k: usize, lo: usize, hi: usize| {
+            if !window_straight(lo, hi) || off_line(k) > corridor {
+                return false;
+            }
+            match (band, seconds) {
+                (Some((lo_s, hi_s)), Some(secs)) => {
+                    window_speed(k, secs).is_none_or(|v| v >= lo_s && v <= hi_s)
+                }
+                _ => {
+                    (cum_raw[hi] - cum_raw[lo]) / (cum[hi] - cum[lo]).max(1.0)
+                        < tun.jitter_human_min
+                }
+            }
+        };
+        // One window out of signature is a tower, a gust, or a loading
+        // halt; `lift_span_m` of it is the end of the ride. The span
+        // falls back to the last point that still held.
+        let mut far = e;
+        let mut lo = s;
+        let mut k = e;
+        while k + 1 < n {
+            k += 1;
+            while lo + 1 < k && cum[k] - cum[lo + 1] >= tun.lift_span_m {
+                lo += 1;
+            }
+            if holds(k, lo, k) {
+                far = k;
+            } else if cum[k] - cum[far] >= tun.lift_span_m {
+                break;
+            }
+        }
+        let mut near = s;
+        let mut hi = e;
+        let mut k = s;
+        while k > 0 {
+            k -= 1;
+            while hi > k + 1 && cum[hi - 1] - cum[k] >= tun.lift_span_m {
+                hi -= 1;
+            }
+            if holds(k, k, hi) {
+                near = k;
+            } else if cum[near] - cum[k] >= tun.lift_span_m {
+                break;
+            }
+        }
+        for m in &mut marked[near..=far] {
             *m = true;
         }
     }
@@ -5683,6 +5835,62 @@ mod tests {
         // 26% sustained and dead straight: a typical chairlift line.
         let pts = climb(9.0e-5, 2.6, false, 80);
         assert_eq!(lift_spans(&pts, None).len(), 1);
+    }
+
+    /// A straight cableway that climbs, traverses a shoulder at
+    /// near-constant height, then climbs again to its top station.
+    /// Grade can only ever see the two steep stretches.
+    fn cableway_over_a_shoulder() -> Vec<GpsPoint> {
+        let mut ele = 0.0;
+        (0..180)
+            .map(|i| {
+                let here = ele;
+                ele += if (40..110).contains(&i) { 0.1 } else { 2.6 };
+                GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, 7.0, here)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn level_traverse_does_not_split_a_cableway() {
+        // The gap between the two steep stretches is the whole defect:
+        // left eligible, it becomes a straight section under the cable.
+        let pts = cableway_over_a_shoulder();
+        let spans = lift_spans(&pts, None);
+        assert_eq!(spans.len(), 1, "the traverse must not split the line");
+        let (s, e) = spans[0];
+        assert!(
+            s <= 2 && e >= 175,
+            "span {s}..{e} should run station to station"
+        );
+    }
+
+    #[test]
+    fn run_out_below_the_top_station_is_not_eaten() {
+        // A flat piste run-out carrying straight on down the cable's own
+        // bearing. Geometry alone cannot refuse it; the rider's speed
+        // leaving the station can, and does.
+        let mut pts = cableway_over_a_shoulder();
+        let top = pts.len();
+        let ele = pts.last().unwrap().elevation.unwrap();
+        pts.extend((0..80).map(|i| {
+            GpsPoint::with_elevation(46.0 + 9.0e-5 * (top + i) as f64, 7.0, ele - 0.2 * i as f64)
+        }));
+        // Cable speed to the top station, then a skier's own pace.
+        let mut secs = vec![0.0f64];
+        for (i, w) in pts.windows(2).enumerate() {
+            let speed = if i < top { 4.0 } else { 11.0 + (i % 5) as f64 };
+            let d = crate::geo_utils::haversine_distance(&w[0], &w[1]);
+            secs.push(secs.last().unwrap() + d / speed);
+        }
+        let spans = lift_spans(&pts, Some(&secs));
+        assert_eq!(spans.len(), 1);
+        let (_, e) = spans[0];
+        assert!(
+            e < top + 20,
+            "span ran {} points past the top station into the run-out",
+            e - top
+        );
     }
 
     #[test]
