@@ -2713,11 +2713,15 @@ fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
     inter as f64 >= bar * cand.len() as f64
 }
 
+/// Ground the candidate's own tracks LAP (a class-3 pass) is
+/// revolutions: an accepted through-line a braid width away may carry
+/// the same users' approaches, but it cannot represent their laps.
 fn probe_mask(
     probe: &[GpsPoint],
     accepted: &HashMap<Cell, Vec<(GpsPoint, u32)>>,
     acc_tracks: &[HashSet<u32>],
     cand: &HashSet<u32>,
+    own_lapped: &dyn Fn(&GpsPoint) -> bool,
     same_traffic: f64,
     grid: &CellGrid,
     cell_size: f64,
@@ -2725,6 +2729,9 @@ fn probe_mask(
     probe
         .iter()
         .map(|p| {
+            if own_lapped(p) {
+                return false;
+            }
             let c = grid.cell_of(p.latitude, p.longitude);
             (-1..=1i32).any(|dy| {
                 (-1..=1i32).any(|dx| {
@@ -3334,11 +3341,19 @@ fn detect_for_cluster_with_grid(
             continue;
         };
         let probe = &sport_tracks[pt_idx].1[ps..pe];
+        let own_lapped = |p: &GpsPoint| {
+            let c = coverage.grid.cell_of(p.latitude, p.longitude);
+            coverage
+                .cell_passes
+                .get(&c)
+                .is_some_and(|m| m.iter().any(|(t, &cl)| cl >= 3 && node.tracks.contains(t)))
+        };
         let mask = probe_mask(
             probe,
             &accepted_pts,
             &acc_tracks,
             &node.tracks,
+            &own_lapped,
             same_traffic,
             &backoff_grid,
             cell_size,
@@ -3928,11 +3943,19 @@ fn detect_for_cluster_with_grid(
             // worth of unrepresented travel is a duplicate of what is
             // already drawn, whatever its probe said.
             let render = &sport_tracks[t_idx].1[rs..re];
+            let own_lapped = |p: &GpsPoint| {
+                let c = coverage.grid.cell_of(p.latitude, p.longitude);
+                coverage
+                    .cell_passes
+                    .get(&c)
+                    .is_some_and(|m| m.iter().any(|(t, &cl)| cl >= 3 && node.tracks.contains(t)))
+            };
             let render_mask = probe_mask(
                 render,
                 &accepted_pts,
                 &acc_tracks,
                 &node.tracks,
+                &own_lapped,
                 same_traffic,
                 &backoff_grid,
                 cell_size,
@@ -5705,6 +5728,7 @@ mod tests {
             &accepted,
             &shared,
             &cand,
+            &|_| false,
             0.5,
             &grid,
             100.0,
@@ -5715,6 +5739,7 @@ mod tests {
             &accepted,
             &shared,
             &cand,
+            &|_| false,
             0.5,
             &grid,
             100.0,
@@ -5737,6 +5762,7 @@ mod tests {
             &accepted,
             &foreign,
             &cand,
+            &|_| false,
             0.5,
             &grid,
             100.0,
@@ -5751,6 +5777,7 @@ mod tests {
             &accepted,
             &sharing,
             &cand,
+            &|_| false,
             0.5,
             &grid,
             100.0,
