@@ -21,7 +21,6 @@ use rstar::{PointDistance, RTree};
 /// [`LineMatcher`]: a pass must cover the majority of the line in one
 /// contiguous run, so a brush or a parallel variant never counts.
 pub fn compute_activity_portions(
-    _cluster: &OverlapCluster,
     representative_polyline: &[GpsPoint],
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
