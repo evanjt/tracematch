@@ -145,16 +145,15 @@ fn intersection_size(a: &[u32], b: &[u32]) -> usize {
     count
 }
 
-/// Walk a track's points, find the longest contiguous run whose cells
-/// fall in `cell_set`. Returns `(start_idx, end_idx_exclusive, distance_m)`.
-pub(super) fn longest_run_in_cells(
+/// Every contiguous run of `pts` whose cells fall in `cell_set`, as
+/// `(start_idx, end_idx_exclusive, distance_m)`. Each return to the cell
+/// set is its own run.
+pub(super) fn runs_in_cells(
     pts: &[GpsPoint],
     cell_set: &HashSet<(i32, i32)>,
     grid: &CellGrid,
-) -> Option<(usize, usize, f64)> {
-    let mut best_start = 0usize;
-    let mut best_end = 0usize;
-    let mut best_dist = 0.0f64;
+) -> Vec<(usize, usize, f64)> {
+    let mut runs = Vec::new();
     let mut current_start: Option<usize> = None;
     let mut current_dist = 0.0f64;
 
@@ -168,26 +167,30 @@ pub(super) fn longest_run_in_cells(
                 current_dist += haversine_distance(&pts[i - 1], p);
             }
         } else if let Some(s) = current_start {
-            if current_dist > best_dist {
-                best_start = s;
-                best_end = i;
-                best_dist = current_dist;
+            if current_dist > 0.0 {
+                runs.push((s, i, current_dist));
             }
             current_start = None;
             current_dist = 0.0;
         }
     }
     if let Some(s) = current_start
-        && current_dist > best_dist
+        && current_dist > 0.0
     {
-        best_start = s;
-        best_end = pts.len();
-        best_dist = current_dist;
+        runs.push((s, pts.len(), current_dist));
     }
-    if best_dist == 0.0 {
-        return None;
-    }
-    Some((best_start, best_end, best_dist))
+    runs
+}
+
+/// The longest run of [`runs_in_cells`].
+pub(super) fn longest_run_in_cells(
+    pts: &[GpsPoint],
+    cell_set: &HashSet<(i32, i32)>,
+    grid: &CellGrid,
+) -> Option<(usize, usize, f64)> {
+    runs_in_cells(pts, cell_set, grid)
+        .into_iter()
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 /// Extract a single candidate from a connected component of hot cells.

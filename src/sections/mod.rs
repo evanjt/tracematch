@@ -793,6 +793,15 @@ pub fn process_cluster(
     // Count activity_ids before moving
     let activity_count = cluster.activity_ids.len();
 
+    // A visit is a pass over the ground, not an outing. `activity_portions`
+    // holds every traversal and is what the junction table stores. Support
+    // is judged separately, on outings and calendar days.
+    let visit_count = if activity_portions.is_empty() {
+        activity_count as u32
+    } else {
+        activity_portions.len() as u32
+    };
+
     // Compute initial stability of the selected medoid against the consensus
     let medoid_trace = track_map.get(representative_id.as_str()).map(|track| {
         // Find the overlap range from cluster overlaps for this activity
@@ -823,6 +832,11 @@ pub fn process_cluster(
         sport_type: sport_type.to_string(),
         polyline: consensus.polyline,
         representative_activity_id: representative_id,
+        // The section's POPULATION, from discovery. Rule 8 leans on it:
+        // two lines on the same ground are duplicates only when the same
+        // users travel both, so the other bank of a river stays its own
+        // corridor. Traversals of the line live in `activity_portions` and
+        // are a wider set.
         activity_ids: {
             let mut ids: Vec<String> = cluster.activity_ids.into_iter().collect();
             ids.sort();
@@ -830,8 +844,7 @@ pub fn process_cluster(
         },
         activity_portions,
         route_ids,
-        // visit_count should equal unique activities
-        visit_count: activity_count as u32,
+        visit_count,
         distance_meters: consensus_distance,
         // Lazy activity_traces: empty during detection, populated on-demand
         activity_traces: HashMap::new(),

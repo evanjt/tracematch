@@ -2,6 +2,7 @@
 
 use super::overlap::OverlapCluster;
 use super::rtree::{IndexedPoint, build_rtree};
+use super::unified::LineMatcher;
 use super::{SectionConfig, SectionPortion};
 use crate::geo_utils::haversine_distance;
 use crate::matching::calculate_route_distance;
@@ -10,26 +11,91 @@ use crate::{Direction, GpsPoint};
 use rayon::prelude::*;
 use rstar::{PointDistance, RTree};
 
-/// Compute each activity's portion of a section.
-/// Returns ALL traversals of the section by each activity (supports out-and-back, track laps).
+/// Every traversal of a section, by every activity that runs its line.
+///
+/// Membership follows the drawn line, not the cluster that discovered it.
+/// Discovery groups ground by shared traffic, so where routes fan out the
+/// same stretch is split across nodes and a track can run the line without
+/// belonging to the node it came from. Counting from the cluster loses
+/// those traversals; counting from the line asks everyone. The matcher is
+/// [`LineMatcher`]: a pass must cover the majority of the line in one
+/// contiguous run, so a brush or a parallel variant never counts.
 pub fn compute_activity_portions(
-    cluster: &OverlapCluster,
+    _cluster: &OverlapCluster,
     representative_polyline: &[GpsPoint],
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
-    // Sort so iteration order is stable across runs (HashSet iteration
+    let bounds = polyline_bounds(representative_polyline, config.proximity_threshold);
+    // Sorted so iteration order is stable across runs (HashMap iteration
     // is randomized, which propagated into section detection output
     // non-determinism).
-    let mut activity_ids: Vec<&String> = cluster.activity_ids.iter().collect();
-    activity_ids.sort();
+    let mut candidates: Vec<&str> = all_tracks
+        .iter()
+        .filter(|(_, t)| intersects_bounds(t, &bounds))
+        .map(|(id, _)| *id)
+        .collect();
+    candidates.sort_unstable();
 
-    portions_for_sorted_ids(
-        &activity_ids,
-        representative_polyline,
-        all_tracks,
-        config.proximity_threshold,
-    )
+    let matcher = LineMatcher::new(representative_polyline, config);
+    let ref_tree = build_rtree(representative_polyline);
+    let compute_for_activity = |activity_id: &&str| -> Vec<SectionPortion> {
+        let mut portions = Vec::new();
+        if let Some(track) = all_tracks.get(*activity_id) {
+            for (s, e) in matcher.passes(track) {
+                portions.push(SectionPortion {
+                    activity_id: (*activity_id).to_string(),
+                    start_index: s as u32,
+                    end_index: e as u32,
+                    distance_meters: calculate_route_distance(&track[s..e]),
+                    direction: detect_direction_robust(
+                        &track[s..e],
+                        representative_polyline,
+                        &ref_tree,
+                    ),
+                });
+            }
+        }
+        portions
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        candidates
+            .par_iter()
+            .flat_map(compute_for_activity)
+            .collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        candidates.iter().flat_map(compute_for_activity).collect()
+    }
+}
+
+/// Polyline extent grown by `pad` metres, as (min_lat, max_lat, min_lng, max_lng).
+fn polyline_bounds(line: &[GpsPoint], pad: f64) -> (f64, f64, f64, f64) {
+    let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in line {
+        b.0 = b.0.min(p.latitude);
+        b.1 = b.1.max(p.latitude);
+        b.2 = b.2.min(p.longitude);
+        b.3 = b.3.max(p.longitude);
+    }
+    let d_lat = pad / 111_132.0;
+    let d_lng = pad / (111_320.0 * b.0.to_radians().cos()).max(1.0);
+    (b.0 - d_lat, b.1 + d_lat, b.2 - d_lng, b.3 + d_lng)
+}
+
+/// Whether any point of `track` falls inside `bounds`. Cheap pre-filter so
+/// a section is only matched against tracks that could reach it.
+fn intersects_bounds(track: &[GpsPoint], bounds: &(f64, f64, f64, f64)) -> bool {
+    track.iter().any(|p| {
+        p.latitude >= bounds.0
+            && p.latitude <= bounds.1
+            && p.longitude >= bounds.2
+            && p.longitude <= bounds.3
+    })
 }
 
 /// Compute portions for a flat list of activity_ids against a reference polyline.
