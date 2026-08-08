@@ -509,29 +509,34 @@ fn minority_braid_strand_stays_off_the_body() {
 }
 
 /// Every rendered point must lie on ground that at least half the
-/// section's own visits traverse: the drawn line is where the majority
-/// went, never a minority variant or a private tail.
+/// section's own contributors traverse: the drawn line is where the
+/// majority went, never a minority variant or a private tail.
+///
+/// Both sides count distinct tracks. `visit_count` counts passes, so an
+/// out-and-back circuit would put twice the traversals against the same
+/// population and read every faithful line as minority ground.
 fn assert_majority_rendered(tracks: &[(String, Vec<GpsPoint>)], sections: &[FrequentSection]) {
     for s in sections {
         let mut low = 0usize;
         let mut total = 0usize;
+        let contributors = s.activity_ids.len();
         for p in s.polyline.iter().step_by(5) {
             total += 1;
             let sup = tracks
                 .iter()
                 .filter(|(_, pts)| pts.iter().any(|q| haversine_distance(p, q) < 50.0))
                 .count();
-            if (sup as f64) < 0.5 * s.visit_count as f64 {
+            if (sup as f64) < 0.5 * contributors as f64 {
                 low += 1;
             }
         }
         assert!(
             low * 10 <= total,
-            "{}: {}/{} rendered points sit on minority ground ({} visits)",
+            "{}: {}/{} rendered points sit on minority ground ({} contributors)",
             s.id,
             low,
             total,
-            s.visit_count
+            contributors
         );
     }
 }
@@ -1302,6 +1307,40 @@ fn lapped_small_oval_renders_the_closed_lap() {
     assert!(
         min_dist(&stem_mid, &oval.polyline) > 60.0,
         "oval render still reaches down the stem"
+    );
+}
+
+#[test]
+fn lapped_oval_counts_every_revolution() {
+    // Scenario: six interval sessions on the small oval, ten laps each.
+    // Sixty real revolutions of one 440 m circuit.
+    // Expected behaviour: a visit is a pass over the ground, not an
+    // outing. Counting outings tells an athlete they ran the oval six
+    // times when they ran it sixty, and it starves the render of
+    // candidates — only the first lap of each session can ever be
+    // drawn, and a first lap carries the entry from the stem.
+    let tracks = shapes::small_oval_stem(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    let centre = shapes::to_gps(220.0, 0.0);
+    let oval = sections
+        .iter()
+        .find(|s| {
+            let mean = s
+                .polyline
+                .iter()
+                .map(|p| haversine_distance(p, &centre))
+                .sum::<f64>()
+                / s.polyline.len() as f64;
+            mean < 120.0
+        })
+        .expect("oval section");
+    assert!(
+        oval.visit_count >= 50,
+        "oval counts {} visits for sixty real revolutions — laps inside an \
+         activity are being discarded",
+        oval.visit_count
     );
 }
 

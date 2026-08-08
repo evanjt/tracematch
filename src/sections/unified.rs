@@ -61,7 +61,7 @@
 //!    only the reference pick is coordinated, and never across ground
 //!    no single pass actually connected.
 
-use super::density_grid::{CellGrid, bresenham_cells, longest_run_in_cells};
+use super::density_grid::{CellGrid, bresenham_cells, runs_in_cells};
 use super::identity::shares_ground;
 use super::overlap::{FullTrackOverlap, OverlapCluster};
 use super::postprocess::required_visits_for_length;
@@ -1124,6 +1124,8 @@ fn pass_classes_agree(coverage: &CoverageGrid, a: Cell, b: Cell, divergence: f64
 /// component starts on the loop itself: a lapped oval cuts at the start
 /// of lap two (one closed revolution) and a loop route only re-enters
 /// covered ground back at its closing point.
+///
+/// The first pass only. [`simple_pass_ranges`] yields every one.
 fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> (usize, usize) {
     if pts.len() < 4 {
         return (0, pts.len());
@@ -1183,6 +1185,47 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> (usiz
     }
 
     (0, pts.len())
+}
+
+/// Every simple pass in a stretch, resuming after each cut.
+///
+/// A resumed stretch is its own traversal only when it re-covers the
+/// majority of the previous pass: laps, out-and-back returns and the leg
+/// after an interval rep do, a false cut at a sharp corner does not and
+/// is rejoined. Majority is rule 9's bar, so this needs no constant.
+fn simple_pass_ranges(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> Vec<(usize, usize)> {
+    let cells_of = |r: (usize, usize)| -> HashSet<Cell> {
+        pts[r.0..r.1]
+            .iter()
+            .map(|p| fine.cell_of(p.latitude, p.longitude))
+            .collect()
+    };
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut base = 0usize;
+    while base + 1 < pts.len() {
+        let (s, e) = simple_pass_range(&pts[base..], fine, tun);
+        // A cut at the very start would not advance; treat it as the end
+        // of usable ground rather than looping on it.
+        if e <= s + 1 {
+            break;
+        }
+        let next = (base + s, base + e);
+        match out.last_mut() {
+            Some(prev) => {
+                let prev_cells = cells_of(*prev);
+                let next_cells = cells_of(next);
+                let shared = prev_cells.iter().filter(|c| next_cells.contains(c)).count();
+                if 2 * shared >= prev_cells.len() {
+                    out.push(next);
+                } else {
+                    prev.1 = next.1;
+                }
+            }
+            None => out.push(next),
+        }
+        base += e;
+    }
+    out
 }
 
 /// A maximal same-traffic stretch of corridor.
@@ -1963,7 +2006,7 @@ fn portions_for(
     let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
         let pts = sport_tracks[t_idx as usize].1;
-        if let Some((s, e, dist)) = track_portion(
+        for (s, e, dist) in track_portions(
             pts,
             &coverage.keep[t_idx as usize],
             &core,
@@ -1980,10 +2023,14 @@ fn portions_for(
     portions
 }
 
-/// One track's single-pass portion over one supernode's ground: the
-/// per-track half of [`portions_for`], independent of every other track.
+/// One track's passes over one supernode's ground: the per-track half of
+/// [`portions_for`], independent of every other track.
+///
+/// A crossing is a traversal, so both separators are walked: each return
+/// to the cell set is its own run, each re-covering within a run its own
+/// pass.
 #[allow(clippy::too_many_arguments)]
-fn track_portion(
+fn track_portions(
     pts: &[GpsPoint],
     keep: &[(usize, usize)],
     core: &HashSet<Cell>,
@@ -1993,38 +2040,53 @@ fn track_portion(
     cell_size: f64,
     config: &SectionConfig,
     tun: &Tunables,
-) -> Option<(usize, usize, f64)> {
-    {
-        // Walk each lift-free range on its own: excluded ground is not
-        // usable geometry even when the component touches both of its
-        // ends (a base station and a summit do exactly that).
-        let mut best: Option<(usize, usize, f64)> = None;
-        for &(rs, re) in keep {
-            if let Some((s, e, d)) = longest_run_in_cells(&pts[rs..=re], cell_set, grid)
-                && best.as_ref().is_none_or(|b| d > b.2)
+) -> Vec<(usize, usize, f64)> {
+    let mut out: Vec<(usize, usize, f64)> = Vec::new();
+    // Walk each lift-free range on its own: excluded ground is not
+    // usable geometry even when the component touches both of its
+    // ends (a base station and a summit do exactly that).
+    for &(rs, re) in keep {
+        for (run_s, run_e, _) in runs_in_cells(&pts[rs..=re], cell_set, grid) {
+            let mut s = rs + run_s;
+            let mut e = rs + run_e;
+            while s < e && !core.contains(&grid.cell_of(pts[s].latitude, pts[s].longitude)) {
+                s += 1;
+            }
+            while e > s && !core.contains(&grid.cell_of(pts[e - 1].latitude, pts[e - 1].longitude))
             {
-                best = Some((rs + s, rs + e, d));
+                e -= 1;
+            }
+            if e <= s + 1 {
+                continue;
+            }
+            let limit = e;
+            for (ps, pe) in simple_pass_ranges(&pts[s..e], pass_grid, tun) {
+                let start = s + ps;
+                let end = s + pe;
+                if end <= start + 1 {
+                    continue;
+                }
+                if let Some(p) = finish_pass(pts, start, end, limit, cell_size, config) {
+                    out.push(p);
+                }
             }
         }
-        let (mut s, mut e, _) = best?;
-        while s < e && !core.contains(&grid.cell_of(pts[s].latitude, pts[s].longitude)) {
-            s += 1;
-        }
-        while e > s && !core.contains(&grid.cell_of(pts[e - 1].latitude, pts[e - 1].longitude)) {
-            e -= 1;
-        }
-        if e <= s + 1 {
-            return None;
-        }
-        // Single pass only: laps, return legs, and loop stems are
-        // traversals, not section geometry.
-        let (ps, pe) = simple_pass_range(&pts[s..e], pass_grid, tun);
-        let limit = e;
-        e = s + pe;
-        s += ps;
-        if e <= s + 1 {
-            return None;
-        }
+    }
+    out
+}
+
+/// Close and measure one pass. `None` unless it stands alone as
+/// section-length ground.
+fn finish_pass(
+    pts: &[GpsPoint],
+    s: usize,
+    end: usize,
+    limit: usize,
+    cell_size: f64,
+    config: &SectionConfig,
+) -> Option<(usize, usize, f64)> {
+    {
+        let mut e = end;
         let mut dist = crate::matching::calculate_route_distance(&pts[s..e]);
         // Closure snap: the cut lands on a coarse cell boundary, which
         // can stop a loop up to a cell short of actually closing. If
@@ -2057,6 +2119,91 @@ fn track_portion(
         } else {
             None
         }
+    }
+}
+
+/// Pass matcher for a section's drawn line: the same cell-run and
+/// single-pass machinery detection uses, held to the line.
+///
+/// A pass counts only when one contiguous run covers the majority of the
+/// line's cells (rule 9's bar, no constant of its own). Brushing an end,
+/// weaving nearby, or running a parallel variant never counts; a lap, a
+/// return leg, and an interval rep each count once.
+pub(super) struct LineMatcher {
+    grid: CellGrid,
+    pass_grid: CellGrid,
+    core: HashSet<Cell>,
+    dilated: HashSet<Cell>,
+}
+
+impl LineMatcher {
+    pub(super) fn new(line: &[GpsPoint], config: &SectionConfig) -> Self {
+        let cell_size = cluster_cell_size(config);
+        let ref_lat = line.first().map(|p| p.latitude).unwrap_or(0.0);
+        let grid = CellGrid::new(cell_size, ref_lat);
+        let mut core: HashSet<Cell> = HashSet::new();
+        for w in line.windows(2) {
+            let a = grid.cell_of(w[0].latitude, w[0].longitude);
+            let b = grid.cell_of(w[1].latitude, w[1].longitude);
+            core.extend(bresenham_cells(a, b));
+        }
+        // One ring of jitter tolerance mid-run, as portions_for grants.
+        let mut dilated: HashSet<Cell> = HashSet::with_capacity(core.len() * 9);
+        for c in &core {
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    dilated.insert((c.0 + dy, c.1 + dx));
+                }
+            }
+        }
+        let pass_grid = CellGrid::new(cell_size / Tunables::DEFAULT.pass_subgrid, ref_lat);
+        Self {
+            grid,
+            pass_grid,
+            core,
+            dilated,
+        }
+    }
+
+    /// Every qualifying pass of `track` over the line, as exclusive
+    /// index ranges in track order.
+    pub(super) fn passes(&self, track: &[GpsPoint]) -> Vec<(usize, usize)> {
+        let tun = &Tunables::DEFAULT;
+        let mut out = Vec::new();
+        if self.core.is_empty() {
+            return out;
+        }
+        for (run_s, run_e, _) in runs_in_cells(track, &self.dilated, &self.grid) {
+            let mut s = run_s;
+            let mut e = run_e;
+            let in_core =
+                |p: &GpsPoint| self.core.contains(&self.grid.cell_of(p.latitude, p.longitude));
+            while s < e && !in_core(&track[s]) {
+                s += 1;
+            }
+            while e > s && !in_core(&track[e - 1]) {
+                e -= 1;
+            }
+            if e <= s + 1 {
+                continue;
+            }
+            for (ps, pe) in simple_pass_ranges(&track[s..e], &self.pass_grid, tun) {
+                let (start, end) = (s + ps, s + pe);
+                if end <= start + 1 {
+                    continue;
+                }
+                let covered = track[start..end]
+                    .iter()
+                    .map(|p| self.grid.cell_of(p.latitude, p.longitude))
+                    .filter(|c| self.core.contains(c))
+                    .collect::<HashSet<_>>()
+                    .len();
+                if 2 * covered >= self.core.len() {
+                    out.push((start, end));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2107,10 +2254,10 @@ fn portions_for_memo(
             min_len_bits: config.min_section_length.to_bits(),
             max_len_bits: config.max_section_length.to_bits(),
         };
-        let cut = match leaves.track_portions.get(&key) {
-            Some(hit) => *hit,
+        let cuts = match leaves.track_portions.get(&key) {
+            Some(hit) => hit.clone(),
             None => {
-                let fresh = track_portion(
+                let fresh = track_portions(
                     pts,
                     &coverage.keep[t_idx as usize],
                     &core,
@@ -2121,11 +2268,11 @@ fn portions_for_memo(
                     config,
                     tun,
                 );
-                leaves.track_portions.insert(key, fresh);
+                leaves.track_portions.insert(key, fresh.clone());
                 fresh
             }
         };
-        if let Some((ps, pe, dist)) = cut {
+        for (ps, pe, dist) in cuts {
             portions.push((t_idx as usize, ps, pe, dist));
         }
     }
@@ -3830,6 +3977,23 @@ fn detect_for_cluster_with_grid(
                     self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap))
                 })
                 .collect();
+            let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
+            let runs: Vec<f64> = portions
+                .iter()
+                .map(|&(t, s, e, _)| {
+                    minority_run_m(
+                        &sport_tracks[t].1[s..e],
+                        &fine,
+                        coverage.ref_lat,
+                        25.0,
+                        25.0,
+                        // Distinct tracks, matching the index. Route choice
+                        // is per outing: an athlete lapping ground ten times
+                        // is still one contributor to where the line goes.
+                        portions.iter().map(|p| p.0).collect::<HashSet<_>>().len(),
+                    )
+                })
+                .collect();
             let default_i = if was_trimmed {
                 (0..portions.len()).max_by(|&a, &b| {
                     portions[a]
@@ -3838,9 +4002,31 @@ fn detect_for_cluster_with_grid(
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
             } else {
-                portions
-                    .iter()
-                    .position(|&(t, ..)| sport_tracks[t].0 == section.representative_activity_id)
+                // The medoid activity's BEST pass, never its first: a
+                // lapped session opens with the warm-up entry, and the
+                // stability privilege must sit on the pass that
+                // represents the ground. Same vocabulary as the
+                // displacement chain below.
+                (0..portions.len())
+                    .filter(|&i| {
+                        sport_tracks[portions[i].0].0 == section.representative_activity_id
+                    })
+                    .min_by(|&a, &b| {
+                        runs[a]
+                            .partial_cmp(&runs[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(
+                                pens[a]
+                                    .partial_cmp(&pens[b])
+                                    .unwrap_or(std::cmp::Ordering::Equal),
+                            )
+                            .then(
+                                portions[b]
+                                    .3
+                                    .partial_cmp(&portions[a].3)
+                                    .unwrap_or(std::cmp::Ordering::Equal),
+                            )
+                    })
             };
             // A section OCCUPIES its represented ground (the default,
             // longest-or-medoid portion) for the trim of later candidates,
@@ -3862,20 +4048,6 @@ fn detect_for_cluster_with_grid(
             // longest — a visibly folded or minority-walking default
             // must not be the section's public face. A candidate whose
             // every pass is over the fold floor backs off as a blob.
-            let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
-            let runs: Vec<f64> = portions
-                .iter()
-                .map(|&(t, s, e, _)| {
-                    minority_run_m(
-                        &sport_tracks[t].1[s..e],
-                        &fine,
-                        coverage.ref_lat,
-                        25.0,
-                        25.0,
-                        portions.len(),
-                    )
-                })
-                .collect();
             let faithful = |i: usize| runs[i] < tun.minority_run_m;
             let legal = |i: usize| pens[i] <= tun.self_pass_max;
             // A faithful default under the clean bar keeps its
@@ -5162,7 +5334,7 @@ struct LeafMemos {
     /// are computed per track independently, so on saturated ground a new
     /// activity leaves every existing track's entry valid and pays only for
     /// its own cut.
-    track_portions: HashMap<TrackPortionKey, Option<(usize, usize, f64)>>,
+    track_portions: HashMap<TrackPortionKey, Vec<(usize, usize, f64)>>,
     /// [`process_cluster`] results keyed by the candidate's portion set,
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.

@@ -1331,6 +1331,38 @@ fn main() {
                 } else {
                     None
                 };
+                if std::env::var("LAB_PORTION_DUMP").is_ok() && method == "unified" {
+                    for s in &sections {
+                        let acts = s.activity_ids.len().max(1);
+                        if s.visit_count as usize <= 2 * acts {
+                            continue;
+                        }
+                        println!(
+                            "[portions] {} len={:.0}m visits={} activities={}",
+                            s.id, s.distance_meters, s.visit_count, acts
+                        );
+                        let mut by_act: HashMap<&str, Vec<&tracematch::SectionPortion>> =
+                            HashMap::new();
+                        for p in &s.activity_portions {
+                            by_act.entry(p.activity_id.as_str()).or_default().push(p);
+                        }
+                        let mut rows: Vec<_> = by_act.into_iter().collect();
+                        rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+                        for (aid, ps) in rows.iter().take(4) {
+                            let dists: Vec<String> = ps
+                                .iter()
+                                .take(12)
+                                .map(|p| {
+                                    format!(
+                                        "{}..{} {:.0}m",
+                                        p.start_index, p.end_index, p.distance_meters
+                                    )
+                                })
+                                .collect();
+                            println!("    {} x{}: {}", aid, ps.len(), dists.join(" | "));
+                        }
+                    }
+                }
                 if let Some(ref out) = out_dir {
                     std::fs::create_dir_all(out).ok();
                     let path = out.join(format!("{}_{}.geojson", sport.to_lowercase(), method));
