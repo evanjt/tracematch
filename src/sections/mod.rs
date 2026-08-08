@@ -740,8 +740,7 @@ pub fn process_cluster(
     }
 
     // Compute activity portions for pace comparison
-    let activity_portions =
-        compute_activity_portions(&cluster, &representative_polyline, track_map, config);
+    let activity_portions = compute_activity_portions(&representative_polyline, track_map, config);
 
     // Collect route IDs
     let route_ids: Vec<String> = cluster

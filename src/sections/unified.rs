@@ -2134,6 +2134,7 @@ pub(super) struct LineMatcher {
     pass_grid: CellGrid,
     core: HashSet<Cell>,
     dilated: HashSet<Cell>,
+    min_pass_m: f64,
 }
 
 impl LineMatcher {
@@ -2162,6 +2163,10 @@ impl LineMatcher {
             pass_grid,
             core,
             dilated,
+            // The majority bar again, in metres: a line a couple of
+            // cells long degenerates to "touched one cell" on the cell
+            // count alone, and a doorstep GPS blip must not be a pass.
+            min_pass_m: 0.5 * crate::matching::calculate_route_distance(line),
         }
     }
 
@@ -2198,7 +2203,10 @@ impl LineMatcher {
                     .filter(|c| self.core.contains(c))
                     .collect::<HashSet<_>>()
                     .len();
-                if 2 * covered >= self.core.len() {
+                if 2 * covered >= self.core.len()
+                    && crate::matching::calculate_route_distance(&track[start..end])
+                        >= self.min_pass_m
+                {
                     out.push((start, end));
                 }
             }
@@ -4005,12 +4013,29 @@ fn detect_for_cluster_with_grid(
                 // The medoid activity's BEST pass, never its first: a
                 // lapped session opens with the warm-up entry, and the
                 // stability privilege must sit on the pass that
-                // represents the ground. Same vocabulary as the
-                // displacement chain below.
-                (0..portions.len())
+                // represents the ground. Faithful then cleanest as in
+                // the displacement chain; the tie-break is nearness to
+                // the consensus, not length — a lap session's entry and
+                // exit passes carry approach ground and are always its
+                // longest.
+                let rep_amd: HashMap<usize, f64> = (0..portions.len())
                     .filter(|&i| {
                         sport_tracks[portions[i].0].0 == section.representative_activity_id
                     })
+                    .map(|i| {
+                        let (t, s, e, _) = portions[i];
+                        (
+                            i,
+                            super::medoid::average_min_distance(
+                                &sport_tracks[t].1[s..e],
+                                &section.polyline,
+                            ),
+                        )
+                    })
+                    .collect();
+                rep_amd
+                    .keys()
+                    .copied()
                     .min_by(|&a, &b| {
                         runs[a]
                             .partial_cmp(&runs[b])
@@ -4021,9 +4046,8 @@ fn detect_for_cluster_with_grid(
                                     .unwrap_or(std::cmp::Ordering::Equal),
                             )
                             .then(
-                                portions[b]
-                                    .3
-                                    .partial_cmp(&portions[a].3)
+                                rep_amd[&a]
+                                    .partial_cmp(&rep_amd[&b])
                                     .unwrap_or(std::cmp::Ordering::Equal),
                             )
                     })
@@ -4417,6 +4441,17 @@ fn detect_for_cluster_with_grid(
                 crate::matching::calculate_route_distance(&section.polyline)
             };
             section.representative_activity_id = sport_tracks[t_idx].0.to_string();
+            // Counts and junctions follow the DRAWN line. The medoid
+            // line they were first computed against is a selection
+            // artefact: a pass-weighted medoid shifts with new laps,
+            // and the count must not move when the visible line does
+            // not.
+            let drawn_portions =
+                super::portions::compute_activity_portions(&section.polyline, &track_map, config);
+            if !drawn_portions.is_empty() {
+                section.visit_count = drawn_portions.len() as u32;
+                section.activity_portions = drawn_portions;
+            }
             info!(
                 "[Unified]   node cell0={:?} cells={} approx_len={:.0} portions={} → {} len={:.0} visits={}",
                 node.cells[0],

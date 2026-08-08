@@ -16,13 +16,16 @@ pub fn select_medoid(
     cluster: &OverlapCluster,
     track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
 ) -> (String, Vec<GpsPoint>) {
-    // Collect all unique activity portions in this cluster
+    // Every pass is its own candidate, keyed by (activity, range): the
+    // medoid is weighted by traversal, so lapped ground is represented
+    // by its typical revolution, not by whichever pass came first.
     let mut traces: Vec<(&str, Vec<GpsPoint>)> = Vec::new();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(&str, usize, usize)> =
+        std::collections::HashSet::new();
 
     for overlap in &cluster.overlaps {
         // Add track A's overlapping portion
-        if seen.insert(overlap.activity_a.as_str())
+        if seen.insert((overlap.activity_a.as_str(), overlap.range_a.0, overlap.range_a.1))
             && let Some(track) = track_map.get(overlap.activity_a.as_str())
         {
             let end = overlap.range_a.1.min(track.len());
@@ -32,7 +35,7 @@ pub fn select_medoid(
             }
         }
         // Add track B's overlapping portion
-        if seen.insert(overlap.activity_b.as_str())
+        if seen.insert((overlap.activity_b.as_str(), overlap.range_b.0, overlap.range_b.1))
             && let Some(track) = track_map.get(overlap.activity_b.as_str())
         {
             let end = overlap.range_b.1.min(track.len());
