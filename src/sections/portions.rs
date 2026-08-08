@@ -1,6 +1,5 @@
 //! Activity portion computation for pace comparison.
 
-use super::overlap::OverlapCluster;
 use super::rtree::{IndexedPoint, build_rtree};
 use super::unified::LineMatcher;
 use super::{SectionConfig, SectionPortion};
