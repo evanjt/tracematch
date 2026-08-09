@@ -25,8 +25,11 @@ pub fn select_medoid(
 
     for overlap in &cluster.overlaps {
         // Add track A's overlapping portion
-        if seen.insert((overlap.activity_a.as_str(), overlap.range_a.0, overlap.range_a.1))
-            && let Some(track) = track_map.get(overlap.activity_a.as_str())
+        if seen.insert((
+            overlap.activity_a.as_str(),
+            overlap.range_a.0,
+            overlap.range_a.1,
+        )) && let Some(track) = track_map.get(overlap.activity_a.as_str())
         {
             let end = overlap.range_a.1.min(track.len());
             let points = track[overlap.range_a.0..end].to_vec();
@@ -35,8 +38,11 @@ pub fn select_medoid(
             }
         }
         // Add track B's overlapping portion
-        if seen.insert((overlap.activity_b.as_str(), overlap.range_b.0, overlap.range_b.1))
-            && let Some(track) = track_map.get(overlap.activity_b.as_str())
+        if seen.insert((
+            overlap.activity_b.as_str(),
+            overlap.range_b.0,
+            overlap.range_b.1,
+        )) && let Some(track) = track_map.get(overlap.activity_b.as_str())
         {
             let end = overlap.range_b.1.min(track.len());
             let points = track[overlap.range_b.0..end].to_vec();

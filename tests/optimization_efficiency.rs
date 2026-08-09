@@ -1,8 +1,9 @@
-//! Efficiency tests for section detection optimizations.
+//! Efficiency and correctness tests for incremental section detection.
 //!
-//! These tests demonstrate the performance gains from:
-//! 1. Grid-based spatial filtering (reduces O(N²) pair count)
-//! 2. Incremental detection (avoids full re-detection when adding activities)
+//! `detect_sections_multiscale` is the live density-grid path (see
+//! `veloqrs/src/persistence/sections/detection.rs` and
+//! `veloqrs/src/objects/detection.rs`), so these tests must exercise it for
+//! real rather than measure a detector that returned nothing.
 //!
 //! Run with: `cargo test --test optimization_efficiency --features synthetic -- --nocapture`
 
@@ -10,81 +11,27 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracematch::sections::NoopProgress;
-use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticScenario};
+use tracematch::synthetic::{CorridorConfig, CorridorPattern, SyntheticDataset, SyntheticScenario};
 use tracematch::{
-    GpsPoint, SectionConfig, detect_sections_incremental, detect_sections_multiscale,
+    GpsPoint, RouteGroup, SectionConfig, detect_sections_incremental, detect_sections_multiscale,
 };
 
-#[test]
-#[ignore = "legacy multiscale path finds no sections on synthetic corridors; superseded by Unified, path deleted in C4"]
-fn test_incremental_faster_than_full_redetection() {
-    // Phase 1: Full detection on 30 activities to establish baseline sections
-    let scenario = SyntheticScenario::with_activity_count(30, 10_000.0, 0.8);
-    let dataset = scenario.generate();
-
-    let config = SectionConfig::default();
-    let groups = dataset.route_groups();
-    let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
-
-    let start_full = Instant::now();
-    let full_result =
-        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
-    let full_time = start_full.elapsed();
-
-    let existing_sections = &full_result.sections;
-    assert!(
-        !existing_sections.is_empty(),
-        "Full detection should find sections"
-    );
-
-    // Phase 2: Generate 5 new activities in the same corridor
-    let new_scenario = SyntheticScenario {
-        origin: GpsPoint::new(47.37, 8.55),
-        activity_count: 5,
-        corridors: vec![CorridorConfig {
-            length_meters: 10_000.0,
-            overlap_fraction: 1.0,
-            pattern: CorridorPattern::Winding,
-            approach_length: 500.0,
-        }],
-        gps_noise_sigma_meters: 3.0,
-        seed: 99999,
-    };
-    let new_dataset = new_scenario.generate();
-    let new_tracks: Vec<(String, Vec<GpsPoint>)> = new_dataset
-        .tracks
-        .iter()
-        .map(|(id, pts)| (format!("new_{}", id), pts.clone()))
-        .collect();
-
-    let mut all_tracks = dataset.tracks.clone();
-    all_tracks.extend(new_tracks.clone());
-    let mut all_sport_types = dataset.sport_types.clone();
-    for (id, _) in &new_tracks {
-        all_sport_types.insert(id.clone(), "Ride".to_string());
-    }
-
-    // Phase 3: Incremental detection (5 new vs existing sections)
-    let start_incr = Instant::now();
-    let incr_result = detect_sections_incremental(
-        &new_tracks,
-        existing_sections,
-        &all_tracks,
-        &all_sport_types,
-        &groups,
-        &config,
-        progress.clone(),
-    );
-    let incr_time = start_incr.elapsed();
-
-    // Phase 4: Full re-detection on all 35 activities (for comparison)
-    let all_groups: Vec<_> = all_tracks
-        .iter()
+/// Route groups the density grid can actually seed from.
+///
+/// `SyntheticDataset::route_groups` emits one singleton group per activity, and
+/// the density grid only takes a representative from groups with >= 2 members,
+/// so a singleton list leaves it with zero representatives and it returns no
+/// sections at all. Pair up the activities the generator placed on the shared
+/// corridor instead, which is what upstream grouping produces in production.
+fn corridor_route_groups(dataset: &SyntheticDataset) -> Vec<RouteGroup> {
+    dataset.expected_sections[0]
+        .activity_ids
+        .chunks(2)
         .enumerate()
-        .map(|(i, (id, _))| tracematch::RouteGroup {
-            group_id: format!("group_{}", i),
-            representative_id: id.clone(),
-            activity_ids: vec![id.clone()],
+        .map(|(i, ids)| RouteGroup {
+            group_id: format!("corridor_{}", i),
+            representative_id: ids[0].clone(),
+            activity_ids: ids.to_vec(),
             sport_type: "Ride".to_string(),
             bounds: None,
             custom_name: None,
@@ -93,71 +40,14 @@ fn test_incremental_faster_than_full_redetection() {
             best_pace: None,
             best_activity_id: None,
         })
-        .collect();
-
-    let start_redo = Instant::now();
-    let _redo_result =
-        detect_sections_multiscale(&all_tracks, &all_sport_types, &all_groups, &config);
-    let redo_time = start_redo.elapsed();
-
-    let speedup = redo_time.as_micros() as f64 / incr_time.as_micros().max(1) as f64;
-
-    println!("=== Incremental vs Full Re-detection ===");
-    println!("  Existing activities:  30");
-    println!("  New activities:       5");
-    println!("  Existing sections:    {}", existing_sections.len());
-    println!("  ---");
-    println!("  Initial full detect:  {:?}", full_time);
-    println!("  Incremental (5 new):  {:?}", incr_time);
-    println!("  Full re-detect (35):  {:?}", redo_time);
-    println!("  Speedup:              {:.1}x faster", speedup);
-    println!("  ---");
-    println!(
-        "  Matched activities:   {}",
-        incr_result.matched_activity_ids.len()
-    );
-    println!(
-        "  Unmatched activities: {}",
-        incr_result.unmatched_activity_ids.len()
-    );
-    println!(
-        "  Updated sections:     {}",
-        incr_result.updated_sections.len()
-    );
-    println!("  New sections:         {}", incr_result.new_sections.len());
-
-    // Incremental should be faster than full re-detection
-    assert!(
-        incr_time < redo_time,
-        "Incremental ({:?}) should be faster than full re-detection ({:?})",
-        incr_time,
-        redo_time
-    );
+        .collect()
 }
 
-#[test]
-fn test_incremental_matches_activities_to_existing_sections() {
-    // Detect sections from 20 activities
-    let scenario = SyntheticScenario::with_activity_count(20, 10_000.0, 0.8);
-    let dataset = scenario.generate();
-
-    let config = SectionConfig::default();
-    let groups = dataset.route_groups();
-    let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
-
-    let full_result =
-        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
-
-    let existing_sections = &full_result.sections;
-    if existing_sections.is_empty() {
-        println!("Skipping: no sections detected (dataset may lack sufficient overlap)");
-        return;
-    }
-
-    // Add 3 activities that traverse the corridor (high overlap)
-    let new_scenario = SyntheticScenario {
+/// Extra activities laid over the same corridor as `with_activity_count`.
+fn later_corridor_tracks(count: usize, seed: u64) -> Vec<(String, Vec<GpsPoint>)> {
+    let scenario = SyntheticScenario {
         origin: GpsPoint::new(47.37, 8.55),
-        activity_count: 3,
+        activity_count: count,
         corridors: vec![CorridorConfig {
             length_meters: 10_000.0,
             overlap_fraction: 1.0,
@@ -165,15 +55,69 @@ fn test_incremental_matches_activities_to_existing_sections() {
             approach_length: 500.0,
         }],
         gps_noise_sigma_meters: 3.0,
-        seed: 77777,
+        seed,
     };
-    let new_dataset = new_scenario.generate();
-    let new_tracks: Vec<(String, Vec<GpsPoint>)> = new_dataset
+    scenario
+        .generate()
         .tracks
         .iter()
         .map(|(id, pts)| (format!("new_{}", id), pts.clone()))
-        .collect();
+        .collect()
+}
 
+#[test]
+fn full_detection_finds_the_generated_corridor() {
+    // Anchor for every other test in this file: if this fails, the ones below
+    // are comparing empty result sets and prove nothing.
+    let dataset = SyntheticScenario::with_activity_count(30, 10_000.0, 0.8).generate();
+    let config = SectionConfig::default();
+    let groups = corridor_route_groups(&dataset);
+
+    let result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
+
+    assert!(
+        !result.sections.is_empty(),
+        "multiscale detection found no sections in a 30-activity corridor dataset"
+    );
+    assert!(
+        result.stats.overlaps_found > 0,
+        "detection reported {} sections but 0 overlaps",
+        result.sections.len()
+    );
+
+    let corridor_users: std::collections::HashSet<&String> =
+        dataset.expected_sections[0].activity_ids.iter().collect();
+    let best = result
+        .sections
+        .iter()
+        .max_by_key(|s| s.activity_ids.len())
+        .unwrap();
+    assert!(
+        best.activity_ids
+            .iter()
+            .all(|id| corridor_users.contains(id)),
+        "section {} pulled in activities that never used the corridor",
+        best.id
+    );
+}
+
+#[test]
+fn incremental_matches_activities_to_existing_sections() {
+    let dataset = SyntheticScenario::with_activity_count(30, 10_000.0, 0.8).generate();
+    let config = SectionConfig::default();
+    let groups = corridor_route_groups(&dataset);
+    let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
+
+    let full_result =
+        detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
+    let existing_sections = &full_result.sections;
+    assert!(
+        !existing_sections.is_empty(),
+        "fixture must produce sections for the incremental pass to mean anything"
+    );
+
+    let new_tracks = later_corridor_tracks(3, 77777);
     let mut all_tracks = dataset.tracks.clone();
     all_tracks.extend(new_tracks.clone());
     let mut all_sport_types = dataset.sport_types.clone();
@@ -191,19 +135,6 @@ fn test_incremental_matches_activities_to_existing_sections() {
         progress,
     );
 
-    println!("=== Incremental Correctness ===");
-    println!("  Existing sections: {}", existing_sections.len());
-    println!("  New activities:    {}", new_tracks.len());
-    println!(
-        "  Matched:           {}",
-        incr_result.matched_activity_ids.len()
-    );
-    println!(
-        "  Unmatched:         {}",
-        incr_result.unmatched_activity_ids.len()
-    );
-
-    // Verify matched activities appear in updated sections
     for matched_id in &incr_result.matched_activity_ids {
         let found_in_section = incr_result
             .updated_sections
@@ -211,45 +142,69 @@ fn test_incremental_matches_activities_to_existing_sections() {
             .any(|s| s.activity_ids.contains(matched_id));
         assert!(
             found_in_section,
-            "Matched activity {} should appear in an updated section",
+            "matched activity {} should appear in an updated section",
             matched_id
         );
     }
 
-    // Updated sections should have version incremented for modified sections
-    let modified_sections: Vec<_> = incr_result
-        .updated_sections
-        .iter()
-        .filter(|s| {
-            let original = existing_sections.iter().find(|es| es.id == s.id);
-            match original {
-                Some(orig) => s.version > orig.version,
-                None => false,
-            }
-        })
-        .collect();
+    // Matching is not just bookkeeping: the section detail screen reads
+    // portions, so a matched activity must gain one and lift the visit count.
+    for matched_id in &incr_result.matched_activity_ids {
+        let section = incr_result
+            .updated_sections
+            .iter()
+            .find(|s| s.activity_ids.contains(matched_id))
+            .unwrap();
+        assert!(
+            section
+                .activity_portions
+                .iter()
+                .any(|p| &p.activity_id == matched_id && p.distance_meters > 0.0),
+            "activity {} joined section {} with no portion covering any distance",
+            matched_id,
+            section.id
+        );
 
-    println!("  Modified sections: {}", modified_sections.len());
+        let before = existing_sections
+            .iter()
+            .find(|es| es.id == section.id)
+            .expect("updated section must come from an existing one");
+        assert!(
+            section.visit_count > before.visit_count,
+            "section {} gained activity {} without raising its visit count ({})",
+            section.id,
+            matched_id,
+            before.visit_count
+        );
+    }
 
-    // All new activities should be classified
     let total_processed =
         incr_result.matched_activity_ids.len() + incr_result.unmatched_activity_ids.len();
     assert_eq!(
         total_processed,
         new_tracks.len(),
-        "All new activities should be classified as matched or unmatched"
+        "all new activities should be classified as matched or unmatched"
     );
+
+    // Existing sections are never dropped by an incremental pass.
+    for existing in existing_sections {
+        assert!(
+            incr_result
+                .updated_sections
+                .iter()
+                .any(|s| s.id == existing.id),
+            "incremental detection dropped existing section {}",
+            existing.id
+        );
+    }
 }
 
 #[test]
-fn test_incremental_empty_existing_sections() {
-    // Edge case: no existing sections → all activities unmatched
-    let scenario = SyntheticScenario::with_activity_count(5, 5_000.0, 0.8);
-    let dataset = scenario.generate();
+fn incremental_with_no_existing_sections_leaves_everything_unmatched() {
+    let dataset = SyntheticScenario::with_activity_count(5, 5_000.0, 0.8).generate();
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
-
     let config = SectionConfig::default();
-    let groups = dataset.route_groups();
+    let groups = corridor_route_groups(&dataset);
 
     let result = detect_sections_incremental(
         &dataset.tracks,
@@ -261,30 +216,26 @@ fn test_incremental_empty_existing_sections() {
         progress,
     );
 
-    println!("=== Incremental: Empty Existing ===");
-    println!("  Unmatched: {}", result.unmatched_activity_ids.len());
-    println!("  Matched:   {}", result.matched_activity_ids.len());
-
     assert_eq!(result.matched_activity_ids.len(), 0);
     assert_eq!(result.unmatched_activity_ids.len(), dataset.tracks.len());
     assert!(result.updated_sections.is_empty());
 }
 
 #[test]
-fn test_incremental_zero_new_activities() {
-    // Edge case: no new activities → no-op, existing sections preserved
-    let scenario = SyntheticScenario::with_activity_count(10, 5_000.0, 0.8);
-    let dataset = scenario.generate();
+fn incremental_with_no_new_activities_preserves_existing_sections() {
+    let dataset = SyntheticScenario::with_activity_count(30, 10_000.0, 0.8).generate();
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
-
     let config = SectionConfig::default();
-    let groups = dataset.route_groups();
+    let groups = corridor_route_groups(&dataset);
 
     let full_result =
         detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
+    assert!(
+        !full_result.sections.is_empty(),
+        "a no-op pass over zero sections proves nothing"
+    );
 
     let empty_tracks: Vec<(String, Vec<GpsPoint>)> = vec![];
-
     let result = detect_sections_incremental(
         &empty_tracks,
         &full_result.sections,
@@ -295,29 +246,37 @@ fn test_incremental_zero_new_activities() {
         progress,
     );
 
-    println!("=== Incremental: Zero New Activities ===");
-    println!(
-        "  Existing sections preserved: {}",
-        result.updated_sections.len()
-    );
-
     assert_eq!(result.updated_sections.len(), full_result.sections.len());
     assert_eq!(result.matched_activity_ids.len(), 0);
     assert_eq!(result.unmatched_activity_ids.len(), 0);
     assert!(result.new_sections.is_empty());
+
+    // A no-op must not rewrite geometry either.
+    for (before, after) in full_result
+        .sections
+        .iter()
+        .zip(result.updated_sections.iter())
+    {
+        assert_eq!(before.id, after.id, "section order changed");
+        assert_eq!(
+            before.polyline.len(),
+            after.polyline.len(),
+            "section {} polyline changed on a no-op pass",
+            before.id
+        );
+        assert_eq!(
+            before.visit_count, after.visit_count,
+            "section {} visit count changed on a no-op pass",
+            before.id
+        );
+    }
 }
 
-// ============================================================================
-// Scaling Comparison
-// ============================================================================
-
 #[test]
-fn test_incremental_operation_count_advantage() {
-    // Show the operation count advantage of incremental detection.
-    // This is what matters on mobile: fewer operations = less battery + faster.
-    //
-    // Uses actual section detection for small counts, analytical for large counts
-    // to keep test runtime reasonable in debug mode.
+fn incremental_compares_against_far_fewer_candidates_than_full_detection() {
+    // What matters on mobile is the candidate count, not wall clock: full
+    // detection is all-pairs over activities, incremental is new activities
+    // against known sections.
     println!("=== Incremental Operation Count ===");
     println!(
         "{:>10} {:>8} {:>10} {:>12} {:>12} {:>10}",
@@ -326,16 +285,21 @@ fn test_incremental_operation_count_advantage() {
 
     let config = SectionConfig::default();
 
-    // Run actual detection for small counts to get real section counts
-    for (existing_count, new_count) in [(50, 5), (100, 10)] {
-        let scenario = SyntheticScenario::with_activity_count(existing_count, 10_000.0, 0.7);
-        let dataset = scenario.generate();
-        let groups = dataset.route_groups();
+    for (existing_count, new_count) in [(30, 5), (50, 5)] {
+        let dataset =
+            SyntheticScenario::with_activity_count(existing_count, 10_000.0, 0.7).generate();
+        let groups = corridor_route_groups(&dataset);
 
         let full_result =
             detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
 
         let sections_count = full_result.sections.len();
+        assert!(
+            sections_count > 0,
+            "no sections at {} activities, so the operation count below is meaningless",
+            existing_count
+        );
+
         let total = existing_count + new_count;
         let full_pairs = total * (total - 1) / 2;
         let incr_ops = new_count * sections_count + new_count * (new_count - 1) / 2;
@@ -345,138 +309,91 @@ fn test_incremental_operation_count_advantage() {
             "{:>10} {:>8} {:>10} {:>12} {:>12} {:>9.1}%",
             existing_count, new_count, sections_count, full_pairs, incr_ops, reduction
         );
-    }
 
-    // Analytical projections for larger counts (section count scales ~linearly with activities)
-    // Based on observed: 50 activities → ~40 sections, 100 → ~80 sections
-    for (existing_count, new_count, est_sections) in
-        [(500, 50, 100), (1000, 100, 150), (5000, 500, 300)]
-    {
-        let total = existing_count + new_count;
-        let full_pairs = total * (total - 1) / 2;
-        let incr_ops = new_count * est_sections + new_count * (new_count - 1) / 2;
-        let reduction = (1.0 - incr_ops as f64 / full_pairs as f64) * 100.0;
-
-        println!(
-            "{:>10} {:>8} {:>9}* {:>12} {:>12} {:>9.1}%",
-            existing_count, new_count, est_sections, full_pairs, incr_ops, reduction
+        assert!(
+            incr_ops * 2 < full_pairs,
+            "incremental should compare against less than half the pair count at {} activities ({} vs {})",
+            existing_count,
+            incr_ops,
+            full_pairs
         );
     }
-
-    println!("  (* = estimated section count)");
-
-    // At scale, incremental should reduce operations by >90%
-    let full_pairs_5500 = 5500 * 5499 / 2; // 5000+500
-    let incr_ops_5500 = 500 * 300 + 500 * 499 / 2; // 300 sections
-    assert!(
-        incr_ops_5500 < full_pairs_5500 / 10,
-        "Incremental should be >10x fewer operations at 5000+500"
-    );
 }
 
 #[test]
-fn test_realistic_chaos_scenario() {
-    // Simulates a real user: 200 activities where only ~12% share a corridor.
-    // The rest are random rides in different areas.
-    //
-    // This tests: can the algorithm find patterns in chaos?
-    // And: does grid filtering help when most activities are geographically spread?
+fn corridor_is_found_among_mostly_unrelated_activities() {
+    // 200 activities where only ~12% share a corridor: can the density grid
+    // still pull the commute out of the noise?
     let scenario = SyntheticScenario {
         origin: GpsPoint::new(47.37, 8.55),
         activity_count: 200,
-        corridors: vec![
-            // Daily commute: ~12% of activities use this
-            CorridorConfig {
-                length_meters: 5_000.0,
-                overlap_fraction: 0.12,
-                pattern: CorridorPattern::Winding,
-                approach_length: 500.0,
-            },
-        ],
-        gps_noise_sigma_meters: 5.0, // Realistic GPS noise
+        corridors: vec![CorridorConfig {
+            length_meters: 5_000.0,
+            overlap_fraction: 0.12,
+            pattern: CorridorPattern::Winding,
+            approach_length: 500.0,
+        }],
+        gps_noise_sigma_meters: 5.0,
         seed: 12345,
     };
 
     let dataset = scenario.generate();
     let config = SectionConfig::default();
-    let groups = dataset.route_groups();
+    let groups = corridor_route_groups(&dataset);
 
-    // How many activities use the corridor? (ground truth)
     let corridor_users = dataset.expected_sections[0].activity_ids.len();
-    let n = dataset.tracks.len();
+    assert!(
+        corridor_users >= 3,
+        "fixture should place at least 3 activities on the corridor, got {}",
+        corridor_users
+    );
 
-    // Run detection
     let start = Instant::now();
     let result =
         detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
     let detect_time = start.elapsed();
 
-    println!("=== Realistic Chaos: 200 Activities, ~12% Corridor ===");
-    println!("  Total activities:     {}", n);
-    println!(
-        "  Corridor users:       {} ({:.0}%)",
-        corridor_users,
-        corridor_users as f64 / n as f64 * 100.0
+    println!("=== 200 Activities, ~12% Corridor ===");
+    println!("  Corridor users:  {} of 200", corridor_users);
+    println!("  Sections found:  {}", result.sections.len());
+    println!("  Overlaps found:  {}", result.stats.overlaps_found);
+    println!("  Detection time:  {:?}", detect_time);
+
+    assert!(
+        !result.sections.is_empty(),
+        "{} activities share a 5 km corridor but detection found nothing",
+        corridor_users
     );
-    println!("  Random activities:    {}", n - corridor_users);
-    println!("  ---");
-    println!("  Sections found:       {}", result.sections.len());
-    println!("  Overlaps found:       {}", result.stats.overlaps_found);
-    println!("  Detection time:       {:?}", detect_time);
 
-    // The algorithm should still find patterns despite the chaos.
-    // With ~24 activities sharing a 5km corridor, sections should be detected.
-    if corridor_users >= 3 {
-        // With enough corridor users, at least one section should be found
-        println!(
-            "  Pattern detection:    {} sections from {} corridor users",
-            result.sections.len(),
-            corridor_users
-        );
-    }
-
-    // Grid filtering should help since 88% of activities are random/spread
-    // (though the synthetic generator starts all from the same origin, so
-    // initial portions will be nearby — real-world spread would be even better)
+    // The corridor is 5 km, so the section that represents it must be a
+    // substantial stretch of it rather than a stray fragment.
+    let longest = result
+        .sections
+        .iter()
+        .map(|s| s.distance_meters)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        longest > 500.0,
+        "longest section is only {:.0} m of a 5 km corridor",
+        longest
+    );
 }
 
 #[test]
-fn test_incremental_timing_comparison() {
-    // Time incremental vs full re-detection at 50 existing + 5 new.
-    let scenario = SyntheticScenario::with_activity_count(50, 10_000.0, 0.7);
-    let dataset = scenario.generate();
+fn incremental_and_full_redetection_agree_on_the_new_activities() {
+    let dataset = SyntheticScenario::with_activity_count(50, 10_000.0, 0.7).generate();
     let config = SectionConfig::default();
-    let groups = dataset.route_groups();
+    let groups = corridor_route_groups(&dataset);
     let progress = Arc::new(NoopProgress) as Arc<dyn tracematch::DetectionProgressCallback>;
 
     let full_result =
         detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config);
+    assert!(
+        !full_result.sections.is_empty(),
+        "timing an empty detection tells us nothing"
+    );
 
-    if full_result.sections.is_empty() {
-        println!("Skipping: no sections detected");
-        return;
-    }
-
-    // Generate 5 new activities
-    let new_scenario = SyntheticScenario {
-        origin: GpsPoint::new(47.37, 8.55),
-        activity_count: 5,
-        corridors: vec![CorridorConfig {
-            length_meters: 10_000.0,
-            overlap_fraction: 1.0,
-            pattern: CorridorPattern::Winding,
-            approach_length: 500.0,
-        }],
-        gps_noise_sigma_meters: 3.0,
-        seed: 88888,
-    };
-    let new_dataset = new_scenario.generate();
-    let new_tracks: Vec<(String, Vec<GpsPoint>)> = new_dataset
-        .tracks
-        .iter()
-        .map(|(id, pts)| (format!("new_{}", id), pts.clone()))
-        .collect();
-
+    let new_tracks = later_corridor_tracks(5, 88888);
     let mut all_tracks = dataset.tracks.clone();
     all_tracks.extend(new_tracks.clone());
     let mut all_sport_types = dataset.sport_types.clone();
@@ -484,26 +401,22 @@ fn test_incremental_timing_comparison() {
         all_sport_types.insert(id.clone(), "Ride".to_string());
     }
 
-    let all_groups: Vec<_> = all_tracks
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _))| tracematch::RouteGroup {
-            group_id: format!("group_{}", i),
-            representative_id: id.clone(),
-            activity_ids: vec![id.clone()],
-            sport_type: "Ride".to_string(),
-            bounds: None,
-            custom_name: None,
-            best_time: None,
-            avg_time: None,
-            best_pace: None,
-            best_activity_id: None,
-        })
-        .collect();
+    let mut all_groups = groups.clone();
+    all_groups.push(RouteGroup {
+        group_id: "corridor_new".to_string(),
+        representative_id: new_tracks[0].0.clone(),
+        activity_ids: new_tracks.iter().map(|(id, _)| id.clone()).collect(),
+        sport_type: "Ride".to_string(),
+        bounds: None,
+        custom_name: None,
+        best_time: None,
+        avg_time: None,
+        best_pace: None,
+        best_activity_id: None,
+    });
 
-    // Time incremental
     let start_incr = Instant::now();
-    let _incr = detect_sections_incremental(
+    let incr = detect_sections_incremental(
         &new_tracks,
         &full_result.sections,
         &all_tracks,
@@ -514,37 +427,43 @@ fn test_incremental_timing_comparison() {
     );
     let incr_time = start_incr.elapsed();
 
-    // Time full re-detection
     let start_full = Instant::now();
-    let _full = detect_sections_multiscale(&all_tracks, &all_sport_types, &all_groups, &config);
-    let full_time = start_full.elapsed();
-
-    let speedup = full_time.as_micros() as f64 / incr_time.as_micros().max(1) as f64;
-
-    // Estimate mobile times (ARM ~3-5x slower than x86)
-    let mobile_factor = 4.0;
+    let redo = detect_sections_multiscale(&all_tracks, &all_sport_types, &all_groups, &config);
+    let redo_time = start_full.elapsed();
 
     println!("=== Timing: Incremental vs Full (50+5 activities) ===");
     println!("  Incremental:         {:?}", incr_time);
-    println!("  Full re-detect (55): {:?}", full_time);
-    println!("  Speedup:             {:.1}x", speedup);
-    println!("  ---");
-    println!(
-        "  Est. mobile incremental: {:?}",
-        incr_time.mul_f64(mobile_factor)
-    );
-    println!(
-        "  Est. mobile full:        {:?}",
-        full_time.mul_f64(mobile_factor)
+    println!("  Full re-detect (55): {:?}", redo_time);
+    println!("  Incremental matched: {}", incr.matched_activity_ids.len());
+    println!("  Full re-detect saw:  {} sections", redo.sections.len());
+
+    assert!(
+        !redo.sections.is_empty(),
+        "full re-detection over 55 activities found nothing to compare against"
     );
 
-    // Wall-clock comparison only meaningful on a quiet host. Gate behind an
-    // env var so CI / parallel runs don't false-fail. Correctness of the
-    // incremental code path is exercised by the other tests in this file.
+    // The two paths must not disagree about where the new activities went:
+    // anything incremental matched has to sit in a section of the full run too,
+    // or the cheap path is inventing membership the expensive one denies.
+    for matched_id in &incr.matched_activity_ids {
+        assert!(
+            redo.sections
+                .iter()
+                .any(|s| s.activity_ids.contains(matched_id)),
+            "incremental matched {} but full re-detection put it in no section",
+            matched_id
+        );
+    }
+
+    // Wall-clock comparison only means anything on a quiet host, so gate it.
+    // At 50+5 the two paths are roughly level here, so this is a report, not a
+    // guarantee: the win only shows up once the existing corpus dwarfs the batch.
     if std::env::var("VELOQRS_TIMING_TESTS").is_ok() {
         assert!(
-            incr_time < full_time,
-            "Incremental should be faster than full re-detection"
+            incr_time < redo_time,
+            "incremental ({:?}) should beat full re-detection ({:?})",
+            incr_time,
+            redo_time
         );
     }
 }
