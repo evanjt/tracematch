@@ -23,3 +23,8 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Test
         run: cargo test
+      # The synthetic-gated targets (b1_*, b2_*, pool_incremental_parity and the
+      # scenario corpora) are invisible to the default lane, which enables only
+      # `parallel`.
+      - name: Test (synthetic)
+        run: cargo test --features synthetic
