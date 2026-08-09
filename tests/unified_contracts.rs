@@ -1389,3 +1389,92 @@ fn a_deviating_lap_does_not_render_the_circuit() {
         "oval render strays {worst_radial:.0} m from the circuit: a deviating lap won the render"
     );
 }
+
+/// One population: `activity_ids` names exactly the activities whose passes
+/// survive against the DRAWN line (`activity_portions`). A cluster
+/// contributor whose ground was trimmed or displaced off the render is not a
+/// member of what the section shows.
+#[test]
+fn activity_ids_are_the_drawn_line_population() {
+    let corpora: Vec<(&str, Vec<(String, Vec<GpsPoint>)>)> = vec![
+        ("oval_stem", shapes::oval_stem(6)),
+        ("lollipop", shapes::lollipop(6)),
+        ("cliff_tail", shapes::cliff_tail(10, 4)),
+        ("parallel_street", shapes::parallel_street(16, 5, 3)),
+        ("minority_braid", shapes::minority_braid(14, 5)),
+        ("grid_city", shapes::grid_city()),
+    ];
+    for (name, tracks) in corpora {
+        for s in detect(&tracks) {
+            let mut ids: Vec<&str> = s.activity_ids.iter().map(String::as_str).collect();
+            ids.sort();
+            ids.dedup();
+            let mut drawn: Vec<&str> = s
+                .activity_portions
+                .iter()
+                .map(|p| p.activity_id.as_str())
+                .collect();
+            drawn.sort();
+            drawn.dedup();
+            assert_eq!(
+                ids, drawn,
+                "{name}/{}: activity_ids diverge from the drawn-line population",
+                s.id
+            );
+        }
+    }
+}
+
+/// The over-claim direction of the population seam, concrete: stub walkers
+/// covering ~20% of the corridor join the cluster (their portion clears the
+/// candidate's length floor) but have no qualifying pass over the drawn
+/// line, so they must not appear in `activity_ids`.
+#[test]
+fn stub_contributors_are_not_claimed_by_the_drawn_line() {
+    let mut tracks: Vec<(String, Vec<GpsPoint>)> = (0..8)
+        .map(|i| {
+            let path = shapes::densify(&[(-300.0, 0.0), (900.0, 0.0)]);
+            (
+                format!("full_{i}"),
+                shapes::track(&shapes::wobble(
+                    &path,
+                    shapes::HUMAN_WOBBLE_M,
+                    i as f64 * 0.7,
+                )),
+            )
+        })
+        .collect();
+    for i in 0..3 {
+        let path = shapes::densify(&[(-300.0, 0.0), (-50.0, 0.0)]);
+        tracks.push((
+            format!("stub_{i}"),
+            shapes::track(&shapes::wobble(
+                &path,
+                shapes::HUMAN_WOBBLE_M,
+                10.0 + i as f64 * 0.7,
+            )),
+        ));
+    }
+
+    let sections = detect(&tracks);
+    assert!(!sections.is_empty(), "corridor failed to form a section");
+    let main = sections
+        .iter()
+        .max_by(|a, b| {
+            a.distance_meters
+                .partial_cmp(&b.distance_meters)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap();
+    let drawn: std::collections::HashSet<&str> = main
+        .activity_portions
+        .iter()
+        .map(|p| p.activity_id.as_str())
+        .collect();
+    let claimed: std::collections::HashSet<&str> =
+        main.activity_ids.iter().map(String::as_str).collect();
+    assert_eq!(
+        claimed, drawn,
+        "activity_ids claims activities with no pass over the drawn line"
+    );
+}

@@ -4450,6 +4450,18 @@ fn detect_for_cluster_with_grid(
                 super::portions::compute_activity_portions(&section.polyline, &track_map, config);
             if !drawn_portions.is_empty() {
                 section.visit_count = drawn_portions.len() as u32;
+                // One population: a cluster contributor with no qualifying
+                // pass over the drawn line is not a member of what the
+                // section shows, and a non-contributor whose pass does
+                // qualify is.
+                let mut ids: Vec<String> = drawn_portions
+                    .iter()
+                    .map(|p| p.activity_id.clone())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                ids.sort();
+                section.activity_ids = ids;
                 section.activity_portions = drawn_portions;
             }
             info!(
