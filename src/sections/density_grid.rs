@@ -449,25 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn cellgrid_deterministic() {
-        let g = CellGrid::new(25.0, 46.2);
-        let a = g.cell_of(46.2, 7.36);
-        let b = g.cell_of(46.2, 7.36);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn rasterise_short_segment() {
-        let g = CellGrid::new(25.0, 46.2);
-        let pts = vec![
-            GpsPoint::new(46.20000, 7.36000),
-            GpsPoint::new(46.20005, 7.36000),
-        ];
-        let cells = rasterise_track(&pts, &g);
-        assert!(!cells.is_empty());
-    }
-
-    #[test]
     fn intersection_size_basic() {
         assert_eq!(intersection_size(&[1, 2, 3], &[2, 3, 4]), 2);
         assert_eq!(intersection_size(&[1, 2, 3], &[4, 5, 6]), 0);

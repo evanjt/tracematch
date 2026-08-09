@@ -2181,8 +2181,10 @@ impl LineMatcher {
         for (run_s, run_e, _) in runs_in_cells(track, &self.dilated, &self.grid) {
             let mut s = run_s;
             let mut e = run_e;
-            let in_core =
-                |p: &GpsPoint| self.core.contains(&self.grid.cell_of(p.latitude, p.longitude));
+            let in_core = |p: &GpsPoint| {
+                self.core
+                    .contains(&self.grid.cell_of(p.latitude, p.longitude))
+            };
             while s < e && !in_core(&track[s]) {
                 s += 1;
             }
@@ -4033,24 +4035,21 @@ fn detect_for_cluster_with_grid(
                         )
                     })
                     .collect();
-                rep_amd
-                    .keys()
-                    .copied()
-                    .min_by(|&a, &b| {
-                        runs[a]
-                            .partial_cmp(&runs[b])
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then(
-                                pens[a]
-                                    .partial_cmp(&pens[b])
-                                    .unwrap_or(std::cmp::Ordering::Equal),
-                            )
-                            .then(
-                                rep_amd[&a]
-                                    .partial_cmp(&rep_amd[&b])
-                                    .unwrap_or(std::cmp::Ordering::Equal),
-                            )
-                    })
+                rep_amd.keys().copied().min_by(|&a, &b| {
+                    runs[a]
+                        .partial_cmp(&runs[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(
+                            pens[a]
+                                .partial_cmp(&pens[b])
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                        .then(
+                            rep_amd[&a]
+                                .partial_cmp(&rep_amd[&b])
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                })
             };
             // A section OCCUPIES its represented ground (the default,
             // longest-or-medoid portion) for the trim of later candidates,

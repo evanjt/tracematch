@@ -237,17 +237,22 @@ mod tests {
         assert!(pairs.is_empty());
     }
 
+    /// Every co-located route must pair with every other exactly once, in
+    /// ascending order. The 3x3 neighbour sweep visits each pair from both
+    /// sides, so a missing dedupe would show up as duplicates here.
     #[test]
-    fn pairs_are_ordered_i_less_than_j() {
+    fn co_located_routes_yield_each_pair_exactly_once() {
         let cell_size = cell_size_for_endpoint_threshold(250.0);
         let p = pt(46.0, 7.0);
         let routes: Vec<_> = (0..4)
             .map(|_| RouteEndpointCells::new(&p, &p, cell_size))
             .collect();
         let pairs = endpoint_grid_filtered_pairs(&routes);
-        for (i, j) in &pairs {
-            assert!(i < j, "pair ({i}, {j}) is not ordered");
-        }
+        assert_eq!(
+            pairs,
+            vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+            "4 co-located routes must give the complete ascending pair set"
+        );
     }
 
     /// Safety invariant: any pair whose endpoints are within

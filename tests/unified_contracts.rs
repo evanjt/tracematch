@@ -517,14 +517,32 @@ fn minority_braid_strand_stays_off_the_body() {
 /// population and read every faithful line as minority ground.
 fn assert_majority_rendered(tracks: &[(String, Vec<GpsPoint>)], sections: &[FrequentSection]) {
     for s in sections {
+        // Support comes from the section's OWN contributors. Counting the whole
+        // corpus lets a displaced line borrow passers-by on a parallel street and
+        // clear a bar set by its own, much smaller, population.
+        let own: Vec<&Vec<GpsPoint>> = tracks
+            .iter()
+            .filter(|(id, _)| s.activity_ids.contains(id))
+            .map(|(_, pts)| pts)
+            .collect();
+        assert_eq!(
+            own.len(),
+            s.activity_ids.len(),
+            "{}: {} of {} contributors are not in the corpus, so support cannot be counted",
+            s.id,
+            own.len(),
+            s.activity_ids.len()
+        );
+        let contributors = own.len();
+        assert!(contributors > 0, "{}: no contributors", s.id);
+
         let mut low = 0usize;
         let mut total = 0usize;
-        let contributors = s.activity_ids.len();
         for p in s.polyline.iter().step_by(5) {
             total += 1;
-            let sup = tracks
+            let sup = own
                 .iter()
-                .filter(|(_, pts)| pts.iter().any(|q| haversine_distance(p, q) < 50.0))
+                .filter(|pts| pts.iter().any(|q| haversine_distance(p, q) < 50.0))
                 .count();
             if (sup as f64) < 0.5 * contributors as f64 {
                 low += 1;
@@ -539,6 +557,37 @@ fn assert_majority_rendered(tracks: &[(String, Vec<GpsPoint>)], sections: &[Freq
             contributors
         );
     }
+}
+
+/// Guards the helper above: the bar is set by the section's own contributors,
+/// so a line on ground none of them travelled must fail even where the wider
+/// corpus is dense. A corpus-wide support count would pass this.
+#[test]
+#[should_panic(expected = "rendered points sit on minority ground")]
+fn majority_bar_ignores_non_contributor_traffic() {
+    let tracks = shapes::parallel_street(16, 5, 3);
+    let sections = detect(&tracks);
+    let busiest = sections
+        .iter()
+        .max_by_key(|s| s.activity_ids.len())
+        .expect("a section on the busy street");
+    let closest_approach = |t: &(String, Vec<GpsPoint>)| {
+        t.1.iter()
+            .map(|q| min_dist(q, &busiest.polyline))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let stranger = tracks
+        .iter()
+        .max_by(|a, b| closest_approach(a).total_cmp(&closest_approach(b)))
+        .expect("a track");
+    assert!(
+        closest_approach(stranger) > 50.0,
+        "fixture no longer has a track off the busy street"
+    );
+
+    let mut borrowed = busiest.clone();
+    borrowed.activity_ids = vec![stranger.0.clone()];
+    assert_majority_rendered(&tracks, &[borrowed]);
 }
 
 #[test]
