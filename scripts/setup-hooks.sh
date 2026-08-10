@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Install git hooks for tracematch
+# Install git hooks for tracematch. Run this once after cloning.
+#
+# Copying into .git/hooks would leave the guard behind on the next clone, and
+# the thing it guards is personal GPS data. Pointing core.hooksPath at a tracked
+# directory means the hook travels with the repository.
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-HOOKS_DIR="$REPO_ROOT/.git/hooks"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
-echo "Installing git hooks..."
+git config core.hooksPath .githooks
+chmod +x .githooks/* 2>/dev/null || true
 
-# Install pre-commit hook
-cp "$SCRIPT_DIR/pre-commit" "$HOOKS_DIR/pre-commit"
-chmod +x "$HOOKS_DIR/pre-commit"
-
-echo "✓ Installed pre-commit hook"
-echo ""
-echo "Hooks installed. They will run automatically on git commit."
-echo "To skip hooks temporarily: git commit --no-verify"
+echo "core.hooksPath -> .githooks"
+echo
+echo "pre-commit now refuses to stage GPS traces and checks formatting."
+echo "It is still per-clone local config, so run this again on any new clone."

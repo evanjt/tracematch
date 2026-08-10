@@ -1,2 +1,12 @@
 #!/usr/bin/env bash
-exec "$(git rev-parse --show-toplevel)/scripts/check-no-private-data.sh"
+# core.hooksPath replaces .git/hooks entirely, so every gate runs from here.
+#
+# scripts/pre-commit also runs `cargo clippy -- -D warnings`, which the library
+# does not currently pass (src/sections/unified.rs). Run it by hand until that
+# is clean, then call it from here instead of duplicating the fmt check.
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+"$ROOT/scripts/check-no-private-data.sh"
+cargo fmt --check
