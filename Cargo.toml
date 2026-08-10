@@ -20,6 +20,8 @@ crate-type = ["rlib"]
 default = ["parallel"]
 parallel = ["rayon"]
 synthetic = ["rand"]
+# Tests that read the local personal GPX corpora. Never enabled in CI.
+real-corpus = []
 
 [dependencies]
 geo = "0.29"
@@ -113,3 +115,11 @@ path = "examples/corpus_report.rs"
 [[example]]
 name = "density_grid_report"
 path = "examples/density_grid_report.rs"
+
+[[test]]
+name = "grouping_sion_corpus"
+required-features = ["real-corpus"]
+
+[[test]]
+name = "section_manipulation"
+required-features = ["real-corpus"]
