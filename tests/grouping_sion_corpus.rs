@@ -1,14 +1,13 @@
 //! Real-corpus smoke test for the endpoint-grid grouping path.
 //!
-//! Loads the full 428-GPX corpus from `sionrunning/` (gated on
-//! directory existence so this test silently skips when the fixture is
-//! absent — e.g. in the veloq submodule), runs route grouping via the
-//! production `group_signatures_parallel`, and asserts the output is
-//! non-trivial (groups found, no panic).
+//! Runs `group_signatures_parallel` over the `sionrunning` corpus and asserts
+//! the grouping is non-trivial: groups form, and they do not collapse into one.
+//! Synthetic corpora replay a canonical polyline, so this is the only place the
+//! grouping pipeline meets braided GPS.
 //!
-//! This is the regression backstop for any future refactor of the
-//! grouping pipeline. The legacy R-tree path was deleted in Phase 3
-//! after the refinement-equivalent A/B test passed on this corpus.
+//! Run: `cargo test --features real-corpus --test grouping_sion_corpus`
+
+mod corpus;
 
 use std::path::Path;
 use std::time::Instant;
@@ -44,38 +43,23 @@ fn load_gpx(path: &Path) -> Vec<GpsPoint> {
 
 #[test]
 fn route_grouping_sion_corpus_smoke() {
-    let dir = Path::new("sionrunning");
-    if !dir.exists() {
-        println!("[sion corpus] sionrunning/ not found — skipping (expected in submodule)");
-        return;
-    }
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("[sion corpus] read_dir failed: {e}; skipping");
-            return;
-        }
-    };
-
+    let paths = corpus::require_at_least("sionrunning", 50);
     let config = MatchConfig::default();
 
+    // Sorted paths, so the signature order is the same on every machine.
     let mut signatures: Vec<RouteSignature> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "gpx") {
-            let points = load_gpx(&path);
-            if points.len() < 50 {
-                continue;
-            }
-            let name = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if let Some(sig) = RouteSignature::from_points(&name, &points, &config) {
-                signatures.push(sig);
-            }
+    for path in paths {
+        let points = load_gpx(&path);
+        if points.len() < 50 {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if let Some(sig) = RouteSignature::from_points(&name, &points, &config) {
+            signatures.push(sig);
         }
     }
 

@@ -6,6 +6,8 @@
 //! - split_section_at_index
 //! - recalculate_section_polyline
 
+mod corpus;
+
 use std::path::Path;
 use tracematch::{
     FrequentSection, GpsPoint, ScaleName, SectionConfig, find_sections_in_route,
@@ -42,22 +44,20 @@ fn load_gpx(path: &Path) -> Vec<GpsPoint> {
 }
 
 /// Load multiple GPX files from a directory
-fn load_gpx_files(dir: &Path, limit: usize) -> Vec<(String, Vec<GpsPoint>)> {
+/// The first `limit` usable tracks of a corpus, in sorted filename order so
+/// every machine loads the same ones.
+fn load_gpx_files(name: &str, limit: usize) -> Vec<(String, Vec<GpsPoint>)> {
     let mut tracks = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "gpx") {
-                let points = load_gpx(&path);
-                if points.len() >= 50 {
-                    let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                    tracks.push((name, points));
-                    if tracks.len() >= limit {
-                        break;
-                    }
-                }
-            }
+    for path in corpus::gpx_files(name, usize::MAX) {
+        let points = load_gpx(&path);
+        if points.len() < 50 {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        tracks.push((stem, points));
+        if tracks.len() >= limit {
+            break;
         }
     }
 
@@ -66,20 +66,12 @@ fn load_gpx_files(dir: &Path, limit: usize) -> Vec<(String, Vec<GpsPoint>)> {
 
 #[test]
 fn test_find_sections_in_route() {
-    let gpx_dir = Path::new("sionrunning");
-    if !gpx_dir.exists() {
-        println!("Skipping test - sionrunning directory not found");
-        return;
-    }
-
-    // Load some GPX files
-    let tracks = load_gpx_files(gpx_dir, 20);
-    if tracks.len() < 5 {
-        println!("Skipping test - not enough GPX files");
-        return;
-    }
-
-    println!("Loaded {} tracks", tracks.len());
+    let tracks = load_gpx_files("sionrunning", 20);
+    assert!(
+        tracks.len() >= 5,
+        "loaded {} usable tracks, this test needs 5",
+        tracks.len()
+    );
 
     // Create a simple section from the first track's middle portion
     let (ref_name, ref_track) = &tracks[0];
@@ -376,21 +368,12 @@ fn test_recalculate_section_polyline() {
 
 #[test]
 fn test_find_sections_real_data() {
-    let gpx_dir = Path::new("sionrunning");
-    if !gpx_dir.exists() {
-        println!("Skipping test - sionrunning directory not found");
-        return;
-    }
-
-    // Load GPX files
-    let tracks = load_gpx_files(gpx_dir, 50);
-    if tracks.len() < 10 {
-        println!(
-            "Skipping test - not enough GPX files (need 10, have {})",
-            tracks.len()
-        );
-        return;
-    }
+    let tracks = load_gpx_files("sionrunning", 50);
+    assert!(
+        tracks.len() >= 10,
+        "loaded {} usable tracks, this test needs 10",
+        tracks.len()
+    );
 
     println!("Testing with {} tracks", tracks.len());
 
