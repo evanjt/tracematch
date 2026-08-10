@@ -10,11 +10,13 @@ set -euo pipefail
 staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 [ -n "$staged" ] || exit 0
 
-blocked="$(echo "$staged" | grep -iE '\.(gpx|fit|tcx|db|sqlite3?)$' || true)"
+# Track formats, including the compressed and archived forms, and .plt, which
+# is what GeoLife ships.
+blocked="$(echo "$staged" | grep -iE '\.(gpx|fit|tcx|kml|plt|db|sqlite3?)(\.(gz|bz2|xz|zip))?$' || true)"
 
-# Corpus directories, whatever they hold.
+# Corpus directories, whatever they hold and whatever it is named.
 blocked="$blocked
-$(echo "$staged" | grep -E '^(fullcorpus|sionrunning|aussietest|unified-lab)/' || true)"
+$(echo "$staged" | grep -E '^(fullcorpus|sionrunning|sionrunning_sections|aussietest|unified-lab|geolife|corpus)/' || true)"
 
 blocked="$(echo "$blocked" | grep -v '^$' || true)"
 
