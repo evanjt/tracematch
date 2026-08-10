@@ -397,18 +397,23 @@ pub fn recalculate_section_polyline(
         return section.clone();
     }
 
-    // Recompute consensus from stored traces
-    let traces: Vec<_> = section.activity_traces.values().cloned().collect();
+    // Ordered by activity id: `HashMap` iteration order varies per process, and
+    // both the reference and the accumulation order steer the consensus.
+    let mut ordered: Vec<(&String, &Vec<GpsPoint>)> = section.activity_traces.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
 
-    if traces.is_empty() {
-        return section.clone();
-    }
+    // The representative is the medoid, so it anchors the consensus closest to
+    // the ground the section actually covers.
+    let reference = section
+        .activity_traces
+        .get(&section.representative_activity_id)
+        .unwrap_or_else(|| ordered[0].1)
+        .clone();
 
-    // Use the first trace as reference for consensus
-    let reference = &traces[0];
+    let traces: Vec<Vec<GpsPoint>> = ordered.into_iter().map(|(_, t)| t.clone()).collect();
 
     let consensus =
-        super::compute_consensus_polyline(reference, &traces, config.proximity_threshold);
+        super::compute_consensus_polyline(&reference, &traces, config.proximity_threshold);
 
     let new_distance = crate::matching::calculate_route_distance(&consensus.polyline);
 
