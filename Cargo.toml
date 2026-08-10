@@ -123,3 +123,7 @@ required-features = ["real-corpus"]
 [[test]]
 name = "section_manipulation"
 required-features = ["real-corpus"]
+
+[[test]]
+name = "geolife_public_corpus"
+required-features = ["real-corpus"]
