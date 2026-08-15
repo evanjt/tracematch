@@ -113,7 +113,10 @@ pub fn select_medoid(
             let (idx, _) = (0..traces.len())
                 .into_par_iter()
                 .map(|i| {
-                    let total: f64 = (0..traces.len()).filter(|&j| j != i).map(|j| amd(i, j)).sum();
+                    let total: f64 = (0..traces.len())
+                        .filter(|&j| j != i)
+                        .map(|j| amd(i, j))
+                        .sum();
                     (i, total)
                 })
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))

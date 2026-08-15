@@ -308,15 +308,11 @@ fn full_corpus_output_is_bitwise_stable() {
     // WARM_ADDS activities one at a time, digest after every add.
     let split = n - WARM_ADDS;
     let mut cache = SectionEvidenceCache::new();
-    let head_ids: Vec<&str> = c.tracks[..split].iter().map(|(id, _)| id.as_str()).collect();
-    let mut catalogue = fold(
-        &mut cache,
-        &[],
-        &c.tracks[..split],
-        &head_ids,
-        &c,
-        &config,
-    );
+    let head_ids: Vec<&str> = c.tracks[..split]
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let mut catalogue = fold(&mut cache, &[], &c.tracks[..split], &head_ids, &c, &config);
     lines.push(format!("B_cold {:016x}", catalogue_digest(&catalogue)));
     let mut add_ms: Vec<u128> = Vec::new();
     for i in 0..WARM_ADDS {

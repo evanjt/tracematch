@@ -3037,6 +3037,7 @@ fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
 /// the same users' approaches, but it cannot represent their laps.
 /// Lapped ground is represented only by lapped ground — an accepted
 /// ring on the same revolutions still dedups a second ring.
+#[allow(clippy::too_many_arguments)]
 fn probe_mask(
     probe: &[GpsPoint],
     accepted: &HashMap<Cell, Vec<(GpsPoint, u32)>>,
@@ -3571,12 +3572,19 @@ fn consensus_leaf(
         overlaps,
         activity_ids,
     };
-    process_cluster(0, cluster, sport, track_map, activity_to_route, config, None).map(
-        |mut sec| {
-            sec.id = String::new();
-            sec
-        },
+    process_cluster(
+        0,
+        cluster,
+        sport,
+        track_map,
+        activity_to_route,
+        config,
+        None,
     )
+    .map(|mut sec| {
+        sec.id = String::new();
+        sec
+    })
 }
 
 /// The render leaf of one candidate: pass penalties and minority runs as
@@ -3612,6 +3620,7 @@ fn render_leaf(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn detect_for_cluster_with_grid(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -3908,7 +3917,7 @@ fn detect_for_cluster_with_grid(
         // Arc reach, never plan reach — a separate stem candidate a
         // ring away gains nothing.
         if mask.iter().any(|&m| m) {
-            let strict: Vec<bool> = probe.iter().map(|p| own_lapped(p)).collect();
+            let strict: Vec<bool> = probe.iter().map(own_lapped).collect();
             if strict.iter().any(|&s| s) {
                 let mut cum2 = Vec::with_capacity(probe.len());
                 let mut acc2 = 0.0;
@@ -5630,6 +5639,7 @@ struct LeafMemos {
     /// The render stage's expensive pure leaves — pass penalties and
     /// minority runs — keyed by the candidate's portion set, one
     /// `(activity, start, end, penalty, run)` row per portion.
+    #[allow(clippy::type_complexity)]
     render: HashMap<RenderKey, Vec<(String, usize, usize, f64, f64)>>,
     /// Drawn-line recounts ([`compute_portions_over`]) with the intersecting
     /// track ids they were computed over. Replayed while that population is

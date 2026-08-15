@@ -246,7 +246,12 @@ fn main() {
         .collect();
     let starts: HashMap<String, i64> = tracks
         .iter()
-        .filter_map(|(id, _)| dates.get(id).and_then(|d| epoch_of(d)).map(|e| (id.clone(), e)))
+        .filter_map(|(id, _)| {
+            dates
+                .get(id)
+                .and_then(|d| epoch_of(d))
+                .map(|e| (id.clone(), e))
+        })
         .collect();
 
     println!(
@@ -294,7 +299,11 @@ fn main() {
         );
         println!("digest cold {:016x}", catalogue_digest(&result.catalogue));
         let mut times: Vec<u128> = Vec::new();
-        let steps = if bulk { 0 } else { fold.min(tracks.len() - split) };
+        let steps = if bulk {
+            0
+        } else {
+            fold.min(tracks.len() - split)
+        };
         for i in 0..steps {
             let pool = &tracks[..split + i + 1];
             let new_id = [tracks[split + i].0.as_str()];
@@ -313,10 +322,18 @@ fn main() {
             );
             let ms = start.elapsed().as_millis();
             times.push(ms);
-            println!("  add {} {} ms, {} sections", i + 1, ms, result.catalogue.len());
+            println!(
+                "  add {} {} ms, {} sections",
+                i + 1,
+                ms,
+                result.catalogue.len()
+            );
         }
         if !times.is_empty() {
-            println!("digest warm_final {:016x}", catalogue_digest(&result.catalogue));
+            println!(
+                "digest warm_final {:016x}",
+                catalogue_digest(&result.catalogue)
+            );
         }
         if bulk && tracks.len() > split {
             let new_ids: Vec<&str> = tracks[split..].iter().map(|(id, _)| id.as_str()).collect();
