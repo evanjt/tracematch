@@ -1527,3 +1527,81 @@ fn stub_contributors_are_not_claimed_by_the_drawn_line() {
         "activity_ids claims activities with no pass over the drawn line"
     );
 }
+
+// ------------------------------------ rule 7: ground is sport-agnostic
+
+/// Sports for a corpus: the first `runs` tracks are Run, the rest Ride.
+fn mixed(tracks: &[(String, Vec<GpsPoint>)], runs: usize) -> HashMap<String, String> {
+    tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| {
+            let sport = if i < runs { "Run" } else { "Ride" };
+            (id.clone(), sport.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn pooling_counts_every_sport_on_shared_ground() {
+    let tracks = shapes::plain_corridor(4);
+    let sports = mixed(&tracks, 3);
+
+    let sections = detect_sections_unified(&tracks, &[], &sports, &config());
+
+    let main = sections
+        .iter()
+        .max_by(|a, b| a.activity_ids.len().cmp(&b.activity_ids.len()))
+        .expect("shared corridor formed no section");
+    assert_eq!(
+        main.activity_ids.len(),
+        4,
+        "pooled detection dropped a traversal on sport"
+    );
+    assert_eq!(main.sport_type, "Run", "section took the minority label");
+}
+
+/// Partitioned, the lone ride falls below `min_activities` in its own
+/// bucket, so its traversal is lost rather than relabelled.
+#[test]
+fn partitioning_strands_the_minority_sport() {
+    let tracks = shapes::plain_corridor(4);
+    let sports = mixed(&tracks, 3);
+    let config = SectionConfig {
+        pool_sports: false,
+        ..config()
+    };
+
+    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
+
+    let ride = tracks[3].0.as_str();
+    assert!(
+        sections
+            .iter()
+            .all(|s| !s.activity_ids.iter().any(|id| id == ride)),
+        "the ride cleared a bucket it cannot clear"
+    );
+}
+
+/// An even split has no majority, so the label falls to a rule.
+#[test]
+fn tied_sports_label_the_same_way_whatever_the_order() {
+    let tracks = shapes::plain_corridor(4);
+    let sports = mixed(&tracks, 2);
+    let mut reversed = tracks.clone();
+    reversed.reverse();
+
+    let forward = detect_sections_unified(&tracks, &[], &sports, &config());
+    let backward = detect_sections_unified(&reversed, &[], &sports, &config());
+
+    let label = |s: &[FrequentSection]| {
+        s.iter()
+            .max_by(|a, b| a.activity_ids.len().cmp(&b.activity_ids.len()))
+            .map(|s| s.sport_type.clone())
+    };
+    assert_eq!(
+        label(&forward),
+        label(&backward),
+        "a tied sport label depends on input order"
+    );
+}
