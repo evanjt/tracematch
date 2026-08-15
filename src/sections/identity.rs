@@ -333,11 +333,13 @@ pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> Ident
 /// candidate inherits which id.
 ///
 /// The rule is a mutual-best pairing on the same-corridor graph. Each candidate
-/// nominates the SENIOR prior it shares ground with (the merge rule), among the
-/// priors that clear `params.merge_mutual_floor`; each prior nominates the
-/// candidate it overlaps MOST (the split rule). A carry is confirmed only where
-/// the two nominations agree, which yields every case the design names with the
-/// correct side-specific tie-break and no HashMap-order leak:
+/// nominates a prior — an extent-agreeing 1:1 match first, else the SENIOR
+/// contained or same-corridor prior (the merge rule) — among the priors that
+/// clear `params.merge_mutual_floor`; each prior nominates the candidate it
+/// overlaps MOST (the split rule). A carry is confirmed only where the two
+/// nominations agree, which yields every case the design names with the
+/// correct side-specific tie-break and no HashMap-order leak. Pairing a
+/// catalogue against itself is the identity map (all carries):
 /// - 1:1 -> both nominate each other -> [`Decision::Carry`].
 /// - split (one prior, several candidates) -> the prior nominates its best piece,
 ///   which alone confirms ([`Decision::SplitInherit`]); the rest mint.
@@ -398,36 +400,52 @@ pub fn plan_identity_tuned(
         }
     }
 
-    // Each candidate nominates a prior in two tiers: first the senior among
-    // priors CONTAINED in the candidate's corridor (the genuine merge shape —
-    // a retiring prior lies inside its successor), then, when none is
-    // contained, the senior among all same-corridor priors (the split shape —
-    // a piece nominates the prior it came from). Containment first stops a
-    // mere one-way overlap from a senior neighbour out-nominating the
-    // candidate's mutual-best prior, which starved the junior and minted
-    // churn ids on its ground (marginal capture). Seniority is earliest
-    // first_seen, then more visits, then more metres, then smaller id.
+    // Each candidate nominates a prior in three tiers. First a prior whose
+    // extent AGREES with the candidate (mutual overlap at or above
+    // RECUT_AGREEMENT): a 1:1 match, ranked by overlap then seniority. This
+    // tier makes the pairing idempotent — a catalogue paired against itself
+    // is all carries — where containment-plus-seniority let a short senior
+    // prior inside a long candidate's corridor out-nominate the candidate's
+    // own exact match, minting a duplicate on every converged detect. Then
+    // the senior among priors CONTAINED in the candidate's corridor (the
+    // genuine merge shape — a retiring prior lies inside its successor).
+    // Then the senior among all same-corridor priors (the split shape — a
+    // piece nominates the prior it came from). Containment before the rest
+    // stops a mere one-way overlap from a senior neighbour out-nominating
+    // the candidate's mutual-best prior (marginal capture). Seniority is
+    // earliest first_seen, then more visits, then more metres, then smaller id.
     let cand_pick: Vec<Option<usize>> = (0..nc)
         .map(|j| {
+            let tier_of = |i: usize| -> u8 {
+                if mo[i][j] >= RECUT_AGREEMENT {
+                    2
+                } else if contained[i][j] {
+                    1
+                } else {
+                    0
+                }
+            };
             let mut best: Option<usize> = None;
-            let mut best_contained = false;
             for i in 0..np {
                 if !(edge[i][j] && mo[i][j] >= params.merge_mutual_floor) {
                     continue;
                 }
                 let wins = match best {
                     None => true,
-                    Some(b) => {
-                        if contained[i][j] != best_contained {
-                            contained[i][j]
-                        } else {
-                            more_senior(&prior[i], &prior[b])
+                    Some(b) => match tier_of(i).cmp(&tier_of(b)) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => {
+                            if tier_of(i) == 2 && mo[i][j] != mo[b][j] {
+                                mo[i][j] > mo[b][j]
+                            } else {
+                                more_senior(&prior[i], &prior[b])
+                            }
                         }
-                    }
+                    },
                 };
                 if wins {
                     best = Some(i);
-                    best_contained = contained[i][j];
                 }
             }
             best
@@ -1300,6 +1318,34 @@ mod tests {
     }
 
     #[test]
+    fn self_pairing_is_the_identity_map() {
+        // A short senior prior sits inside the long junior's corridor, both
+        // ridden and both in the catalogue. Pairing the catalogue against
+        // itself must carry every id and retire nothing: containment plus
+        // seniority alone let the short prior out-nominate the long
+        // candidate's own exact match, minting a duplicate on every
+        // converged detect.
+        let long = line(46.0, 7.0, 100);
+        let short: Vec<GpsPoint> = long[20..40].to_vec();
+        let away = line(46.0, 9.0, 60);
+        let priors = vec![
+            prior("s_short", short.clone(), 1, 5),
+            prior("s_long", long.clone(), 2, 9),
+            prior("s_away", away.clone(), 3, 2),
+        ];
+        let next = vec![cand(short, 5), cand(long, 9), cand(away, 2)];
+        let plan = plan_identity(&priors, &next);
+        for (j, id) in ["s_short", "s_long", "s_away"].iter().enumerate() {
+            assert_eq!(
+                plan.decisions[j].carried_id(),
+                Some(*id),
+                "candidate {j} must carry its own id"
+            );
+        }
+        assert!(plan.retired.is_empty(), "a fixed point retires nothing");
+    }
+
+    #[test]
     fn merge_seniority_ignores_input_order() {
         // Same as above but the junior B is listed first; the senior A still wins.
         let z = line(46.0, 7.0, 100);
@@ -1317,12 +1363,14 @@ mod tests {
     #[test]
     fn merge_floor_lets_the_dominant_junior_win_over_a_marginal_senior() {
         // A (senior) is a short section marginally inside the long candidate Z;
-        // B (junior) dominantly covers Z. At the default 0.0 floor seniority
-        // wins, so A captures Z. Above A's marginal overlap the dominant junior
-        // B wins instead, and A folds into B.
+        // B (junior) dominantly covers Z without agreeing on its extent, so
+        // neither prior reaches the 1:1 agreement tier. At the default 0.0
+        // floor seniority wins, so A captures Z. Above A's marginal overlap
+        // the dominant junior B wins instead, and A folds into B.
         let long = line(46.0, 7.0, 120);
         let short = long[..20].to_vec();
-        let prior = vec![prior("s_A", short, 1, 3), prior("s_B", long.clone(), 2, 9)];
+        let most = long[..90].to_vec();
+        let prior = vec![prior("s_A", short, 1, 3), prior("s_B", most, 2, 9)];
         let next = vec![cand(long, 12)];
 
         let default_plan = plan_identity(&prior, &next);
