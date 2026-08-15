@@ -79,12 +79,23 @@ pub fn select_medoid(
                 .collect()
         }
     };
+    let trig: Vec<Vec<(f64, f64, f64)>> = resampled
+        .iter()
+        .map(|pts| {
+            pts.iter()
+                .map(|p| {
+                    let lat = p.latitude.to_radians();
+                    (lat, p.longitude.to_radians(), lat.cos())
+                })
+                .collect()
+        })
+        .collect();
     let amd = |i: usize, j: usize| -> f64 {
         if traces[i].1.is_empty() || traces[j].1.is_empty() {
             return f64::MAX;
         }
-        let a_to_b = matching::average_min_distance(&resampled[i], &resampled[j]);
-        let b_to_a = matching::average_min_distance(&resampled[j], &resampled[i]);
+        let a_to_b = amd_directed_pruned(&resampled[i], &trig[i], &resampled[j], &trig[j]);
+        let b_to_a = amd_directed_pruned(&resampled[j], &trig[j], &resampled[i], &trig[i]);
         (a_to_b + b_to_a) / 2.0
     };
 
@@ -172,6 +183,40 @@ pub(crate) fn compute_stability(
         return 0.0;
     }
     (1.0 - (amd / proximity_threshold)).clamp(0.0, 1.0)
+}
+
+/// One direction of AMD with the haversine evaluated only for each point's
+/// winner: the distance is strictly monotone in the half-chord term, so the
+/// scan compares that cheap term (with per-point cached `cos lat`) and the
+/// full formula runs once per source point. Same value as the plain scan.
+fn amd_directed_pruned(
+    a: &[GpsPoint],
+    a_trig: &[(f64, f64, f64)],
+    b: &[GpsPoint],
+    b_trig: &[(f64, f64, f64)],
+) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::INFINITY;
+    }
+    let total: f64 = a
+        .iter()
+        .zip(a_trig)
+        .map(|(p1, &(lat1, lng1, cos1))| {
+            let mut best_term = f64::INFINITY;
+            let mut best_j = 0usize;
+            for (j, &(lat2, lng2, cos2)) in b_trig.iter().enumerate() {
+                let sdlat = ((lat2 - lat1) * 0.5).sin();
+                let sdlng = ((lng2 - lng1) * 0.5).sin();
+                let term = sdlat * sdlat + cos1 * cos2 * sdlng * sdlng;
+                if term < best_term {
+                    best_term = term;
+                    best_j = j;
+                }
+            }
+            crate::geo_utils::haversine_distance(p1, &b[best_j])
+        })
+        .sum();
+    total / a.len() as f64
 }
 
 /// Average Minimum Distance between two polylines.
