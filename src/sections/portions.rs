@@ -24,6 +24,18 @@ pub fn compute_activity_portions(
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
+    let candidates = portion_candidates(representative_polyline, all_tracks, config);
+    compute_portions_over(representative_polyline, all_tracks, &candidates, config)
+}
+
+/// Track ids whose extent reaches the polyline's padded bounds, sorted. The
+/// complete input population of [`compute_portions_over`]: a track outside
+/// the padded bounds can contribute no portion.
+pub(crate) fn portion_candidates<'a>(
+    representative_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&'a str, &[GpsPoint]>,
+    config: &SectionConfig,
+) -> Vec<&'a str> {
     let bounds = polyline_bounds(representative_polyline, config.proximity_threshold);
     // Sorted so iteration order is stable across runs (HashMap iteration
     // is randomized, which propagated into section detection output
@@ -34,7 +46,16 @@ pub fn compute_activity_portions(
         .map(|(id, _)| *id)
         .collect();
     candidates.sort_unstable();
+    candidates
+}
 
+/// Qualifying passes of the candidate tracks over the polyline.
+pub(crate) fn compute_portions_over(
+    representative_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
+    candidates: &[&str],
+    config: &SectionConfig,
+) -> Vec<SectionPortion> {
     let matcher = LineMatcher::new(representative_polyline, config);
     let ref_tree = build_rtree(representative_polyline);
     let compute_for_activity = |activity_id: &&str| -> Vec<SectionPortion> {
