@@ -3486,6 +3486,132 @@ fn detect_for_cluster(
 /// incremental build the grid ([`build_coverage_grid`]) then call this, so
 /// a touched cluster's recompute matches the batch exactly.
 #[allow(clippy::too_many_arguments)]
+/// The memo keys of one candidate: the sorted portion set plus the config
+/// bits each leaf reads. One constructor so the warm-up pass and the
+/// selection loop can never disagree on a key.
+fn candidate_keys(
+    portions: &[Portion],
+    sport_tracks: &[(&str, &[GpsPoint])],
+    sport: &str,
+    config: &SectionConfig,
+    ref_lat: f64,
+    cell_size: f64,
+) -> (ConsensusKey, RenderKey) {
+    let mut sp: Vec<(String, usize, usize)> = portions
+        .iter()
+        .map(|&(t, ps, pe, _)| (sport_tracks[t].0.to_string(), ps, pe))
+        .collect();
+    sp.sort();
+    (
+        ConsensusKey {
+            portions: sp.clone(),
+            sport: sport.to_string(),
+            proximity_bits: config.proximity_threshold.to_bits(),
+            min_activities: config.min_activities,
+            max_len_bits: config.max_section_length.to_bits(),
+        },
+        RenderKey {
+            portions: sp,
+            ref_lat_bits: ref_lat.to_bits(),
+            cell_size_bits: cell_size.to_bits(),
+        },
+    )
+}
+
+/// The consensus leaf of one candidate: synthesise the anchor-paired
+/// cluster and run [`process_cluster`], id left blank exactly as the memo
+/// stores it. Pure in the portion set, so many candidates can compute
+/// concurrently.
+fn consensus_leaf(
+    portions: &[Portion],
+    sport: &str,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    track_map: &HashMap<&str, &[GpsPoint]>,
+    activity_to_route: &HashMap<&str, &str>,
+    config: &SectionConfig,
+) -> Option<FrequentSection> {
+    let anchor = portions[0];
+    let anchor_id = sport_tracks[anchor.0].0.to_string();
+    let anchor_range = (anchor.1, anchor.2);
+    let anchor_pts =
+        &sport_tracks[anchor.0].1[anchor.1..anchor.2.min(sport_tracks[anchor.0].1.len())];
+    let center = if anchor_pts.is_empty() {
+        GpsPoint::new(0.0, 0.0)
+    } else {
+        anchor_pts[anchor_pts.len() / 2]
+    };
+
+    let mut overlaps: Vec<FullTrackOverlap> = Vec::with_capacity(portions.len());
+    let mut activity_ids: HashSet<String> = HashSet::with_capacity(portions.len());
+    activity_ids.insert(anchor_id.clone());
+    for &(t_idx, s, e, dist) in portions.iter().skip(1) {
+        let other_id = sport_tracks[t_idx].0.to_string();
+        activity_ids.insert(other_id.clone());
+        overlaps.push(FullTrackOverlap {
+            activity_a: anchor_id.clone(),
+            activity_b: other_id,
+            range_a: anchor_range,
+            range_b: (s, e),
+            center,
+            overlap_length: dist.min(anchor.3),
+        });
+    }
+    if overlaps.is_empty() {
+        overlaps.push(FullTrackOverlap {
+            activity_a: anchor_id.clone(),
+            activity_b: anchor_id,
+            range_a: anchor_range,
+            range_b: anchor_range,
+            center,
+            overlap_length: anchor.3,
+        });
+    }
+
+    let cluster = OverlapCluster {
+        overlaps,
+        activity_ids,
+    };
+    process_cluster(0, cluster, sport, track_map, activity_to_route, config, None).map(
+        |mut sec| {
+            sec.id = String::new();
+            sec
+        },
+    )
+}
+
+/// The render leaf of one candidate: pass penalties and minority runs as
+/// memo rows, in portion order. Pure in the portion set; the per-portion
+/// map fans out so even a single heavy candidate uses the machine.
+fn render_leaf(
+    portions: &[Portion],
+    sport_tracks: &[(&str, &[GpsPoint])],
+    ref_lat: f64,
+    cell_size: f64,
+) -> Vec<(String, usize, usize, f64, f64)> {
+    let near = cell_size * 0.2;
+    let gap = cell_size;
+    let fine = portion_point_index(portions, sport_tracks, ref_lat, 25.0);
+    // Distinct tracks, matching the index. Route choice is per outing: an
+    // athlete lapping ground ten times is still one contributor to where
+    // the line goes.
+    let distinct = portions.iter().map(|p| p.0).collect::<HashSet<_>>().len();
+    let leaf = |&(t, s, e, _): &Portion| {
+        let seg = &sport_tracks[t].1[s..e];
+        let pen = self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap));
+        let run = minority_run_m(seg, &fine, ref_lat, 25.0, 25.0, distinct);
+        (sport_tracks[t].0.to_string(), s, e, pen, run)
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        portions.par_iter().map(leaf).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        portions.iter().map(leaf).collect()
+    }
+}
+
 fn detect_for_cluster_with_grid(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
@@ -3629,6 +3755,52 @@ fn detect_for_cluster_with_grid(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.0.cmp(&b.0))
     });
+
+    // The selection loop below is inherently serial (occupation order), but
+    // its expensive leaves — consensus and the render penalties/runs — are
+    // pure per candidate. Warm the memos for the whole initial list
+    // concurrently, inserting in candidate order; the loop then mostly
+    // hits, and trimmed or salvaged variants still compute inline on their
+    // own portion sets.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let leaves_ro: &LeafMemos = leaves;
+        let computed: Vec<_> = candidates
+            .par_iter()
+            .map(|(_, _, portions, _)| {
+                let (ckey, rkey) = candidate_keys(
+                    portions,
+                    sport_tracks,
+                    sport,
+                    config,
+                    coverage.ref_lat,
+                    cell_size,
+                );
+                let cons = (!leaves_ro.consensus.contains_key(&ckey)).then(|| {
+                    consensus_leaf(
+                        portions,
+                        sport,
+                        sport_tracks,
+                        &track_map,
+                        &activity_to_route,
+                        config,
+                    )
+                });
+                let rows = (!leaves_ro.render.contains_key(&rkey))
+                    .then(|| render_leaf(portions, sport_tracks, coverage.ref_lat, cell_size));
+                (ckey, cons, rkey, rows)
+            })
+            .collect();
+        for (ckey, cons, rkey, rows) in computed {
+            if let Some(c) = cons {
+                leaves.consensus.entry(ckey).or_insert(c);
+            }
+            if let Some(r) = rows {
+                leaves.render.entry(rkey).or_insert(r);
+            }
+        }
+    }
 
     let backoff_grid = CellGrid::new(cell_size, coverage.ref_lat);
     let mut accepted_pts: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
@@ -3873,89 +4045,33 @@ fn detect_for_cluster_with_grid(
             }
         };
 
-        // Synthesise an OverlapCluster (anchor-paired) for process_cluster.
-        let anchor = portions[0];
-        let anchor_id = sport_tracks[anchor.0].0.to_string();
-        let anchor_range = (anchor.1, anchor.2);
-        let anchor_pts =
-            &sport_tracks[anchor.0].1[anchor.1..anchor.2.min(sport_tracks[anchor.0].1.len())];
-        let center = if anchor_pts.is_empty() {
-            GpsPoint::new(0.0, 0.0)
-        } else {
-            anchor_pts[anchor_pts.len() / 2]
-        };
-
-        let mut overlaps: Vec<FullTrackOverlap> = Vec::with_capacity(portions.len());
-        let mut activity_ids: HashSet<String> = HashSet::with_capacity(portions.len());
-        activity_ids.insert(anchor_id.clone());
-        for &(t_idx, s, e, dist) in portions.iter().skip(1) {
-            let other_id = sport_tracks[t_idx].0.to_string();
-            activity_ids.insert(other_id.clone());
-            overlaps.push(FullTrackOverlap {
-                activity_a: anchor_id.clone(),
-                activity_b: other_id,
-                range_a: anchor_range,
-                range_b: (s, e),
-                center,
-                overlap_length: dist.min(anchor.3),
-            });
-        }
-        if overlaps.is_empty() {
-            overlaps.push(FullTrackOverlap {
-                activity_a: anchor_id.clone(),
-                activity_b: anchor_id,
-                range_a: anchor_range,
-                range_b: anchor_range,
-                center,
-                overlap_length: anchor.3,
-            });
-        }
-
-        let cluster = OverlapCluster {
-            overlaps,
-            activity_ids,
-        };
-
-        let sorted_portions: Vec<(String, usize, usize)> = {
-            let mut v: Vec<(String, usize, usize)> = portions
-                .iter()
-                .map(|&(t, ps, pe, _)| (sport_tracks[t].0.to_string(), ps, pe))
-                .collect();
-            v.sort();
-            v
-        };
-        let ckey = ConsensusKey {
-            portions: sorted_portions.clone(),
-            sport: sport.to_string(),
-            proximity_bits: config.proximity_threshold.to_bits(),
-            min_activities: config.min_activities,
-            max_len_bits: config.max_section_length.to_bits(),
-        };
+        let (ckey, rkey) = candidate_keys(
+            &portions,
+            sport_tracks,
+            sport,
+            config,
+            coverage.ref_lat,
+            cell_size,
+        );
         let processed = match leaves.consensus.get(&ckey).cloned() {
-            Some(hit) => hit.map(|mut sec| {
-                sec.id = format!("sec_{}_{}", sport.to_lowercase(), *section_idx);
-                sec
-            }),
+            Some(hit) => hit,
             None => {
-                let fresh = process_cluster(
-                    *section_idx,
-                    cluster,
+                let fresh = consensus_leaf(
+                    &portions,
                     sport,
+                    sport_tracks,
                     &track_map,
                     &activity_to_route,
                     config,
-                    None,
                 );
-                leaves.consensus.insert(
-                    ckey,
-                    fresh.clone().map(|mut sec| {
-                        sec.id = String::new();
-                        sec
-                    }),
-                );
+                leaves.consensus.insert(ckey, fresh.clone());
                 fresh
             }
-        };
+        }
+        .map(|mut sec| {
+            sec.id = format!("sec_{}_{}", sport.to_lowercase(), *section_idx);
+            sec
+        });
         if let Some(mut section) = processed {
             // The polyline must be a real trace, never a synthetic
             // average: replace the consensus geometry with a real
@@ -3987,11 +4103,6 @@ fn detect_for_cluster_with_grid(
             // memo instead of re-walking every pass on every fold. Values
             // sit per (activity, range) triple: a hit is independent of the
             // live portion order.
-            let rkey = RenderKey {
-                portions: sorted_portions.clone(),
-                ref_lat_bits: coverage.ref_lat.to_bits(),
-                cell_size_bits: cell_size.to_bits(),
-            };
             let cached: Option<(Vec<f64>, Vec<f64>)> = leaves.render.get(&rkey).and_then(|hit| {
                 let by_portion: HashMap<(&str, usize, usize), (f64, f64)> = hit
                     .iter()
@@ -4006,42 +4117,10 @@ fn detect_for_cluster_with_grid(
             let (pens, runs): (Vec<f64>, Vec<f64>) = match cached {
                 Some(hit) => hit,
                 None => {
-                    let pens: Vec<f64> = portions
-                        .iter()
-                        .map(|&(t, s, e, _)| {
-                            let seg = &sport_tracks[t].1[s..e];
-                            self_pass_penalty(seg, near, gap)
-                                .max(out_and_back_penalty(seg, near, gap))
-                        })
-                        .collect();
-                    let runs: Vec<f64> = portions
-                        .iter()
-                        .map(|&(t, s, e, _)| {
-                            minority_run_m(
-                                &sport_tracks[t].1[s..e],
-                                &fine,
-                                coverage.ref_lat,
-                                25.0,
-                                25.0,
-                                // Distinct tracks, matching the index. Route
-                                // choice is per outing: an athlete lapping
-                                // ground ten times is still one contributor
-                                // to where the line goes.
-                                portions.iter().map(|p| p.0).collect::<HashSet<_>>().len(),
-                            )
-                        })
-                        .collect();
-                    leaves.render.insert(
-                        rkey,
-                        portions
-                            .iter()
-                            .zip(pens.iter().zip(runs.iter()))
-                            .map(|(&(t, ps, pe, _), (&p, &r))| {
-                                (sport_tracks[t].0.to_string(), ps, pe, p, r)
-                            })
-                            .collect(),
-                    );
-                    (pens, runs)
+                    let rows = render_leaf(&portions, sport_tracks, coverage.ref_lat, cell_size);
+                    let out = rows.iter().map(|&(_, _, _, p, r)| (p, r)).unzip();
+                    leaves.render.insert(rkey, rows);
+                    out
                 }
             };
             let default_i = if was_trimmed {
