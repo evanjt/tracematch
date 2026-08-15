@@ -5908,8 +5908,8 @@ pub fn detect_sections_unified_incremental_dated(
         );
         relabel_sports(&mut out.catalogue, sport_types);
         relabel_sports(&mut out.added, sport_types);
-        relabel_sports(&mut out.dissolved, sport_types);
-        // `previous` on every delta came from the caller already labelled.
+        // `previous` on every delta, and every dissolved prior, came from
+        // the caller already labelled.
         for c in out.changed.iter_mut().chain(out.held.iter_mut()) {
             relabel_sports(std::slice::from_mut(&mut c.current), sport_types);
         }

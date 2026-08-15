@@ -1569,13 +1569,17 @@ fn pooling_counts_every_sport_on_shared_ground() {
     assert_eq!(main.sport_type, "Run", "section took the minority label");
 }
 
-/// Partitioned by default, the lone ride falls below `min_activities` in its
-/// own bucket, so its traversal is lost rather than relabelled.
+/// Partitioned, the lone ride falls below `min_activities` in its own
+/// bucket, so its traversal is lost rather than relabelled.
 #[test]
 fn partitioning_strands_the_minority_sport() {
     let tracks = shapes::plain_corridor(4);
     let sports = mixed(&tracks, 3);
-    let sections = detect_sections_unified(&tracks, &[], &sports, &config());
+    let config = SectionConfig {
+        pool_sports: false,
+        ..config()
+    };
+    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
 
     let ride = tracks[3].0.as_str();
     assert!(
@@ -1724,6 +1728,103 @@ fn pooled_fold_agrees_with_the_pooled_batch() {
             "warm fold ({order}) churned {} added and {} dissolved with nothing new",
             warm.added.len(),
             warm.dissolved.len()
+        );
+    }
+}
+
+/// Scenario: a corridor cut from three runs, then folded over with three
+/// rides on the same ground.
+/// Expected behaviour: the fold's catalogue carries the same labels a
+/// batch detect over the whole pool derives. The detector holds no memory
+/// of a prior's label, so freezing one is the engine's job.
+#[test]
+fn a_pooled_fold_labels_sport_the_way_the_batch_does() {
+    let tracks = shapes::plain_corridor(7);
+    let config = SectionConfig {
+        pool_sports: true,
+        ..config()
+    };
+    let starts = HashMap::new();
+    let policy = SectionUpdatePolicy::default();
+
+    let runs: Vec<(String, Vec<GpsPoint>)> = tracks[..3].to_vec();
+    let mut sports: HashMap<String, String> = runs
+        .iter()
+        .map(|(id, _)| (id.clone(), "Run".to_string()))
+        .collect();
+    let run_ids: Vec<&str> = runs.iter().map(|(id, _)| id.as_str()).collect();
+
+    let mut cache = SectionEvidenceCache::default();
+    let cold = detect_sections_unified_incremental_dated(
+        &mut cache,
+        &[],
+        &runs,
+        &run_ids,
+        &[],
+        &sports,
+        &starts,
+        &config,
+        &policy,
+    );
+    assert!(!cold.catalogue.is_empty(), "three runs cut no section");
+    assert!(
+        cold.catalogue.iter().all(|s| s.sport_type == "Run"),
+        "a run-only corridor derived another sport"
+    );
+
+    for (id, _) in &tracks[3..] {
+        sports.insert(id.clone(), "Ride".to_string());
+    }
+    let ride_ids: Vec<&str> = tracks[3..].iter().map(|(id, _)| id.as_str()).collect();
+    let warm = detect_sections_unified_incremental_dated(
+        &mut cache,
+        &cold.catalogue,
+        &tracks,
+        &ride_ids,
+        &[],
+        &sports,
+        &starts,
+        &config,
+        &policy,
+    );
+
+    let on_prior_ground: Vec<&FrequentSection> = warm
+        .catalogue
+        .iter()
+        .filter(|s| {
+            cold.catalogue
+                .iter()
+                .any(|c| shares_ground(&c.polyline, &s.polyline))
+        })
+        .collect();
+    assert!(
+        !on_prior_ground.is_empty(),
+        "the corridor left the catalogue"
+    );
+    assert!(
+        on_prior_ground.iter().any(|s| s
+            .activity_ids
+            .iter()
+            .any(|id| ride_ids.contains(&id.as_str()))),
+        "no ride joined the corridor, so the label was never at risk"
+    );
+
+    let batch =
+        detect_sections_unified_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
+    assert!(
+        batch.sections.iter().any(|b| b.sport_type == "Ride"),
+        "the rides never outnumbered the runs, so the equality below is vacuous"
+    );
+    for s in on_prior_ground {
+        let twin = batch
+            .sections
+            .iter()
+            .find(|b| shares_ground(&b.polyline, &s.polyline))
+            .expect("the batch cut the same ground");
+        assert_eq!(
+            s.sport_type, twin.sport_type,
+            "the fold labelled {} as {} where the batch derives {}",
+            s.id, s.sport_type, twin.sport_type
         );
     }
 }
