@@ -608,7 +608,8 @@ fn better_candidate(
 /// calibrated values; a `Tunables`-style struct rather than magic literals.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct HysteresisParams {
-    /// Consecutive decisive plans before a dissolve or re-cut applies.
+    /// Consecutive decisive plans before a dissolve or re-cut applies. An armed
+    /// step ([`HysteresisState::arm_decisive`]) runs at 1 instead.
     pub k: u8,
     /// A dissolve counts toward the debounce only at or above this pressure.
     pub dissolve_pressure_hi: f64,
@@ -747,6 +748,11 @@ pub struct HysteresisState {
     /// Monotonic counter minting first_seen ordinals and `s_<n>` ids. Only ever
     /// grows, so a fresh id never collides with a live or tombstoned one.
     ordinal: u64,
+    /// Set by [`arm_decisive`](Self::arm_decisive) and consumed by the next
+    /// step, which then runs at `k = 1`. Part of the state, so the fold stays a
+    /// pure function of it. Trailing and defaulted, so an older blob decodes.
+    #[serde(default)]
+    decisive: bool,
 }
 
 impl Default for HysteresisState {
@@ -763,7 +769,25 @@ impl HysteresisState {
             tombstones: BTreeMap::new(),
             pending: BTreeMap::new(),
             ordinal: 0,
+            decisive: false,
         }
+    }
+
+    /// Arm the next step to apply dissolves and re-cuts on the first decisive
+    /// plan instead of accumulating `k`.
+    ///
+    /// The debounce exists to absorb detector noise: a single add must not flip
+    /// the visible view. A caller-side event that changes what the detector
+    /// looks for is not that noise, so the batch it produces is trusted at once
+    /// and the view tracks it in one step. Additions are immediate either way;
+    /// this is only about how fast a departure or a re-cut lands.
+    pub fn arm_decisive(&mut self) {
+        self.decisive = true;
+    }
+
+    /// Whether the next step runs decisively.
+    pub fn is_decisive(&self) -> bool {
+        self.decisive
     }
 
     /// Fold a fresh batch catalogue into the visible view, damping churn.
@@ -794,6 +818,12 @@ impl HysteresisState {
         &mut self,
         next: &[CandidateSection],
     ) -> (StepOutcome, Vec<CandidateResolution>) {
+        // An armed step runs at k = 1: the first decisive plan applies.
+        let k = if std::mem::take(&mut self.decisive) {
+            1
+        } else {
+            self.params.k
+        };
         // A section mid re-cut competes on the batch geometry it is re-cutting TO
         // (its pending target), not its stale frozen footprint. Presenting the
         // stale, larger footprint lets it capture a neighbouring candidate's
@@ -866,9 +896,9 @@ impl HysteresisState {
         for (id, held) in old_visible {
             let carried_j = carried.get(id.as_str()).copied();
             let action = if let Some(j) = carried_j {
-                self.apply_carry(&id, &held, &next[j], &mut out)
+                self.apply_carry(&id, &held, &next[j], k, &mut out)
             } else if let Some(reason) = retired.get(id.as_str()) {
-                self.apply_retire(&id, &held, reason, &mut out)
+                self.apply_retire(&id, &held, reason, k, &mut out)
             } else {
                 // Unreachable in a correct plan; hold defensively rather than
                 // silently drop a section.
@@ -966,6 +996,7 @@ impl HysteresisState {
         id: &str,
         held: &HeldSection,
         cand: &CandidateSection,
+        k: u8,
         out: &mut StepOutcome,
     ) -> HeldAction {
         let visits = cand.visit_count.max(held.visit_count);
@@ -983,7 +1014,7 @@ impl HysteresisState {
         // erase the absence evidence a rotation accumulated.
         let ledger = self.pending.get(id);
         let streak = ledger.map_or(0, |p| p.recut_streak).saturating_add(1);
-        if streak >= self.params.k {
+        if streak >= k {
             out.recut_applied += 1;
             out.recut_ids.push(id.to_string());
             HeldAction::Keep(adopted)
@@ -1026,11 +1057,12 @@ impl HysteresisState {
         id: &str,
         held: &HeldSection,
         reason: &RetireReason,
+        k: u8,
         out: &mut StepOutcome,
     ) -> HeldAction {
         let ledger = self.pending.get(id);
         let streak = ledger.map_or(0, |p| p.dissolve_streak).saturating_add(1);
-        if streak >= self.params.k {
+        if streak >= k {
             out.dissolved += 1;
             out.retired.push(Retirement {
                 id: id.to_string(),
@@ -1475,6 +1507,54 @@ mod tests {
             state.is_tombstoned(&id),
             "a dissolved id is tombstoned, not forgotten"
         );
+    }
+
+    #[test]
+    fn an_armed_step_dissolves_gone_ground_at_once() {
+        let mut state = HysteresisState::default(); // k = 3
+        let p = line(46.0, 7.0, 100);
+        state.step(&[cand(p, 5)]);
+        let id = state.visible_ids()[0].clone();
+
+        state.arm_decisive();
+        let out = state.step(&[]);
+        assert_eq!(out.dissolved, 1, "an armed step needs no streak");
+        assert_eq!(state.visible_len(), 0);
+        assert!(state.is_tombstoned(&id));
+    }
+
+    #[test]
+    fn an_armed_step_adopts_a_re_cut_at_once() {
+        let mut state = HysteresisState::default();
+        let held = line(46.0, 7.0, 100);
+        state.step(&[cand(held, 5)]);
+        let id = state.visible_ids()[0].clone();
+
+        // Half the extent: a material re-cut, normally debounced.
+        let recut = line(46.0, 7.0, 40);
+        state.arm_decisive();
+        let out = state.step(&[cand(recut.clone(), 6)]);
+        assert_eq!(out.recut_applied, 1);
+        assert_eq!(state.visible_ids(), vec![id.clone()], "the id carries");
+        assert_eq!(state.ground_of(&id), Some(recut.as_slice()));
+    }
+
+    #[test]
+    fn arming_lasts_one_step() {
+        let mut state = HysteresisState::default();
+        let a = line(46.0, 7.0, 100);
+        let b = line(46.0, 9.0, 100);
+        state.step(&[cand(a.clone(), 5), cand(b, 5)]);
+
+        state.arm_decisive();
+        let armed = state.step(&[cand(a.clone(), 5)]);
+        assert_eq!(armed.dissolved, 1);
+        assert!(!state.is_decisive(), "the arm is consumed by one step");
+
+        // The surviving ground now goes: back to the full debounce.
+        let after = state.step(&[]);
+        assert_eq!(after.dissolved, 0, "k applies again on the next step");
+        assert_eq!(state.visible_len(), 1);
     }
 
     #[test]
