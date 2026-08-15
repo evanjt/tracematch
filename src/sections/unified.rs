@@ -4035,6 +4035,8 @@ fn detect_for_cluster_with_grid(
                         )
                     })
                     .collect();
+                // The final index tie-break keeps the ordering total, so the
+                // HashMap's iteration order never decides a tied pick.
                 rep_amd.keys().copied().min_by(|&a, &b| {
                     runs[a]
                         .partial_cmp(&runs[b])
@@ -4049,6 +4051,7 @@ fn detect_for_cluster_with_grid(
                                 .partial_cmp(&rep_amd[&b])
                                 .unwrap_or(std::cmp::Ordering::Equal),
                         )
+                        .then(a.cmp(&b))
                 })
             };
             // A section OCCUPIES its represented ground (the default,
