@@ -4786,6 +4786,46 @@ pub fn detect_sections_unified_dated(
     config: &SectionConfig,
     tun: &Tunables,
 ) -> UnifiedDetection {
+    if config.pool_sports {
+        let pooled = pooled_sports(tracks);
+        let mut out = detect_by_sport(tracks, seconds, &pooled, start_epochs, config, tun);
+        relabel_sports(&mut out.sections, sport_types);
+        return out;
+    }
+    detect_by_sport(tracks, seconds, sport_types, start_epochs, config, tun)
+}
+
+/// The sport every track carries under [`SectionConfig::pool_sports`],
+/// and the id prefix of every pooled section.
+pub const POOLED_SPORT: &str = "All";
+
+/// Label every track with [`POOLED_SPORT`], collapsing the partition to
+/// one bucket.
+fn pooled_sports(tracks: &[(String, Vec<GpsPoint>)]) -> HashMap<String, String> {
+    tracks
+        .iter()
+        .map(|(id, _)| (id.clone(), POOLED_SPORT.to_string()))
+        .collect()
+}
+
+/// Replace [`POOLED_SPORT`] with the sport a section's own traversals
+/// carry. A section with no mapped activity keeps the placeholder.
+fn relabel_sports(sections: &mut [FrequentSection], sport_types: &HashMap<String, String>) {
+    for s in sections.iter_mut() {
+        if s.activity_ids.iter().any(|id| sport_types.contains_key(id)) {
+            s.sport_type = super::dominant_sport(&s.activity_ids, sport_types);
+        }
+    }
+}
+
+fn detect_by_sport(
+    tracks: &[(String, Vec<GpsPoint>)],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    start_epochs: &HashMap<String, i64>,
+    config: &SectionConfig,
+    tun: &Tunables,
+) -> UnifiedDetection {
     const NO_TIME: &[f64] = &[];
     // Partition tracks per sport; sections never span sports.
     type SportTracks<'a> = (Vec<(&'a str, &'a [GpsPoint])>, Vec<&'a [f64]>);
@@ -5599,6 +5639,53 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
 /// identically and the parity gates keep holding under dated corpora.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_sections_unified_incremental_dated(
+    cache: &mut SectionEvidenceCache,
+    existing: &[FrequentSection],
+    pool: &[(String, Vec<GpsPoint>)],
+    new_activity_ids: &[&str],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    start_epochs: &HashMap<String, i64>,
+    config: &SectionConfig,
+    policy: &SectionUpdatePolicy,
+) -> UnifiedIncrementalResult {
+    if config.pool_sports {
+        let pooled = pooled_sports(pool);
+        let mut out = fold_by_sport(
+            cache,
+            existing,
+            pool,
+            new_activity_ids,
+            seconds,
+            &pooled,
+            start_epochs,
+            config,
+            policy,
+        );
+        relabel_sports(&mut out.catalogue, sport_types);
+        relabel_sports(&mut out.added, sport_types);
+        relabel_sports(&mut out.dissolved, sport_types);
+        // `previous` on every delta came from the caller already labelled.
+        for c in out.changed.iter_mut().chain(out.held.iter_mut()) {
+            relabel_sports(std::slice::from_mut(&mut c.current), sport_types);
+        }
+        return out;
+    }
+    fold_by_sport(
+        cache,
+        existing,
+        pool,
+        new_activity_ids,
+        seconds,
+        sport_types,
+        start_epochs,
+        config,
+        policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_by_sport(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],

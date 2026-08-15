@@ -387,6 +387,10 @@ pub struct SectionConfig {
     /// Which detection algorithm to use. Default: Corridor.
     #[serde(default)]
     pub detection_method: DetectionMethod,
+    /// Detect over one pool rather than one per sport, so a road two
+    /// sports share carries the traversals of both. Unified only.
+    #[serde(default = "default_pool_sports")]
+    pub pool_sports: bool,
 }
 
 fn default_jaccard_threshold() -> f64 {
@@ -406,6 +410,9 @@ fn default_divergence_threshold() -> f64 {
 }
 fn default_min_corridor_tracks() -> u32 {
     2
+}
+fn default_pool_sports() -> bool {
+    true
 }
 
 impl Default for SectionConfig {
@@ -433,6 +440,7 @@ impl Default for SectionConfig {
             divergence_threshold: default_divergence_threshold(),
             min_corridor_tracks: default_min_corridor_tracks(),
             detection_method: DetectionMethod::default(),
+            pool_sports: default_pool_sports(),
         }
     }
 }
@@ -709,9 +717,10 @@ pub(super) fn dominant_sport(
             *counts.entry(s.as_str()).or_insert(0) += 1;
         }
     }
+    // Ties resolve on the sport name, so the label never depends on map order.
     counts
         .into_iter()
-        .max_by_key(|(_, c)| *c)
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(s, _)| s.to_string())
         .unwrap_or_else(|| "Unknown".to_string())
 }
