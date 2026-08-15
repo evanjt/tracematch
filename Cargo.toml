@@ -127,3 +127,7 @@ required-features = ["real-corpus"]
 [[test]]
 name = "geolife_public_corpus"
 required-features = ["real-corpus"]
+
+[[test]]
+name = "full_corpus_bitwise"
+required-features = ["real-corpus"]
