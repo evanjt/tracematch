@@ -388,7 +388,8 @@ pub struct SectionConfig {
     #[serde(default)]
     pub detection_method: DetectionMethod,
     /// Detect over one pool rather than one per sport, so a road two
-    /// sports share carries the traversals of both. Unified only.
+    /// sports share carries the traversals of both. Unified only, and off
+    /// until the cached fold agrees with the batch under pooling.
     #[serde(default = "default_pool_sports")]
     pub pool_sports: bool,
 }
@@ -412,7 +413,7 @@ fn default_min_corridor_tracks() -> u32 {
     2
 }
 fn default_pool_sports() -> bool {
-    true
+    false
 }
 
 impl Default for SectionConfig {

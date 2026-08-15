@@ -1546,8 +1546,12 @@ fn mixed(tracks: &[(String, Vec<GpsPoint>)], runs: usize) -> HashMap<String, Str
 fn pooling_counts_every_sport_on_shared_ground() {
     let tracks = shapes::plain_corridor(4);
     let sports = mixed(&tracks, 3);
+    let config = SectionConfig {
+        pool_sports: true,
+        ..config()
+    };
 
-    let sections = detect_sections_unified(&tracks, &[], &sports, &config());
+    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
 
     let main = sections
         .iter()
@@ -1561,18 +1565,13 @@ fn pooling_counts_every_sport_on_shared_ground() {
     assert_eq!(main.sport_type, "Run", "section took the minority label");
 }
 
-/// Partitioned, the lone ride falls below `min_activities` in its own
-/// bucket, so its traversal is lost rather than relabelled.
+/// Partitioned by default, the lone ride falls below `min_activities` in its
+/// own bucket, so its traversal is lost rather than relabelled.
 #[test]
 fn partitioning_strands_the_minority_sport() {
     let tracks = shapes::plain_corridor(4);
     let sports = mixed(&tracks, 3);
-    let config = SectionConfig {
-        pool_sports: false,
-        ..config()
-    };
-
-    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
+    let sections = detect_sections_unified(&tracks, &[], &sports, &config());
 
     let ride = tracks[3].0.as_str();
     assert!(
@@ -1591,8 +1590,12 @@ fn tied_sports_label_the_same_way_whatever_the_order() {
     let mut reversed = tracks.clone();
     reversed.reverse();
 
-    let forward = detect_sections_unified(&tracks, &[], &sports, &config());
-    let backward = detect_sections_unified(&reversed, &[], &sports, &config());
+    let config = SectionConfig {
+        pool_sports: true,
+        ..config()
+    };
+    let forward = detect_sections_unified(&tracks, &[], &sports, &config);
+    let backward = detect_sections_unified(&reversed, &[], &sports, &config);
 
     let label = |s: &[FrequentSection]| {
         s.iter()
