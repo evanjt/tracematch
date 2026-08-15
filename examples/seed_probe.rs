@@ -175,7 +175,15 @@ fn main() {
     let ids: Vec<&str> = tracks.iter().map(|(id, _)| id.as_str()).collect();
     let t = Instant::now();
     let mut cold = detect_sections_unified_incremental_dated(
-        &mut cache, &[], &tracks, &ids, &[], &sports, &starts, &config, &policy,
+        &mut cache,
+        &[],
+        &tracks,
+        &ids,
+        &[],
+        &sports,
+        &starts,
+        &config,
+        &policy,
     )
     .catalogue;
     let fold_ms = t.elapsed().as_millis();
