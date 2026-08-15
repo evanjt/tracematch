@@ -388,8 +388,8 @@ pub struct SectionConfig {
     #[serde(default)]
     pub detection_method: DetectionMethod,
     /// Detect over one pool rather than one per sport, so a road two
-    /// sports share carries the traversals of both. Unified only, and off
-    /// until the cached fold agrees with the batch under pooling.
+    /// sports share carries the traversals of both. Unified only. The
+    /// sport label is derived from the traversals after the cut.
     #[serde(default = "default_pool_sports")]
     pub pool_sports: bool,
 }
@@ -413,7 +413,7 @@ fn default_min_corridor_tracks() -> u32 {
     2
 }
 fn default_pool_sports() -> bool {
-    false
+    true
 }
 
 impl Default for SectionConfig {
@@ -702,6 +702,9 @@ fn expand_cluster_to_activities(
     cluster
 }
 
+/// The label of a section no activity in `sport_types` traverses.
+pub(crate) const UNKNOWN_SPORT: &str = "Unknown";
+
 /// Pick the most-common sport among the given activities.
 ///
 /// Sections can contain activities from multiple sports (e.g., a road
@@ -723,7 +726,7 @@ pub(super) fn dominant_sport(
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(s, _)| s.to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
+        .unwrap_or_else(|| UNKNOWN_SPORT.to_string())
 }
 
 pub fn process_cluster(
