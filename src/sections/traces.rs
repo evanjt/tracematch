@@ -32,6 +32,24 @@ pub fn extract_activity_trace(
     let threshold_deg = (TRACE_PROXIMITY_THRESHOLD * 1.2) / 111_000.0;
     let threshold_deg_sq = threshold_deg * threshold_deg;
 
+    // Degree-space bounding box of the polyline, padded by the threshold. The
+    // near-predicate below is squared-degree distance, so a track point
+    // outside this box cannot be near any polyline point: four comparisons
+    // answer most points of a long track without touching the R-tree.
+    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in section_polyline {
+        bb.0 = bb.0.min(p.latitude);
+        bb.1 = bb.1.max(p.latitude);
+        bb.2 = bb.2.min(p.longitude);
+        bb.3 = bb.3.max(p.longitude);
+    }
+    let (lat0, lat1, lng0, lng1) = (
+        bb.0 - threshold_deg,
+        bb.1 + threshold_deg,
+        bb.2 - threshold_deg,
+        bb.3 + threshold_deg,
+    );
+
     // Find ALL contiguous sequences of points near the section
     let mut sequences: Vec<Vec<GpsPoint>> = Vec::new();
     let mut current_sequence: Vec<GpsPoint> = Vec::new();
@@ -42,11 +60,13 @@ pub fn extract_activity_trace(
         let query = [point.latitude, point.longitude];
 
         // Use R-tree for O(log n) nearest neighbor lookup
-        let is_near = if let Some(nearest) = polyline_tree.nearest_neighbor(&query) {
-            nearest.distance_2(&query) <= threshold_deg_sq
-        } else {
-            false
-        };
+        let is_near = point.latitude >= lat0
+            && point.latitude <= lat1
+            && point.longitude >= lng0
+            && point.longitude <= lng1
+            && polyline_tree
+                .nearest_neighbor(&query)
+                .is_some_and(|nearest| nearest.distance_2(&query) <= threshold_deg_sq);
 
         if is_near {
             // Point is near section - reset gap counter
