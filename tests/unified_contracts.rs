@@ -10,7 +10,11 @@ mod shapes;
 
 use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
-use tracematch::{Direction, FrequentSection, GpsPoint, SectionConfig, detect_sections_unified};
+use tracematch::{
+    Direction, FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
+    Tunables, detect_sections_unified, detect_sections_unified_dated,
+    detect_sections_unified_incremental_dated, shares_ground,
+};
 
 fn config() -> SectionConfig {
     SectionConfig::default()
@@ -1607,4 +1611,119 @@ fn tied_sports_label_the_same_way_whatever_the_order() {
         label(&backward),
         "a tied sport label depends on input order"
     );
+}
+
+// --------------------- rule 7: a pooled fold agrees with the pooled batch
+
+/// A long ride corridor with per-outing ends, plus a shorter run corridor
+/// 30 m off its flank. Pooled, the two populations cut sections on
+/// overlapping ground, the shape a per-sport partition never produces.
+fn parallel_sports() -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
+    let mut tracks = Vec::new();
+    let mut sports = HashMap::new();
+    for i in 0..4 {
+        let spur = 200.0 + 60.0 * i as f64;
+        let mut path = shapes::densify(&[(-300.0, -spur), (0.0, 0.0)]);
+        path.extend(shapes::densify(&[(0.0, 0.0), (3000.0, 0.0)]));
+        path.extend(shapes::densify(&[(3000.0, 0.0), (3300.0, spur)]));
+        let id = format!("ride_{i}");
+        let phase = i as f64 * 1.7;
+        tracks.push((
+            id.clone(),
+            shapes::track(&shapes::wobble(&path, shapes::HUMAN_WOBBLE_M, phase)),
+        ));
+        sports.insert(id, "Ride".to_string());
+    }
+    for i in 0..4 {
+        let spur = 400.0 + 60.0 * i as f64;
+        let mut path = shapes::densify(&[(900.0, spur), (1000.0, 30.0)]);
+        path.extend(shapes::densify(&[(1000.0, 30.0), (2000.0, 30.0)]));
+        path.extend(shapes::densify(&[(2000.0, 30.0), (2100.0, spur)]));
+        let id = format!("run_{i}");
+        let phase = i as f64 * 1.3;
+        tracks.push((
+            id.clone(),
+            shapes::track(&shapes::wobble(&path, shapes::HUMAN_WOBBLE_M, phase)),
+        ));
+        sports.insert(id, "Run".to_string());
+    }
+    (tracks, sports)
+}
+
+/// Every section on one side has a partner on the same ground on the
+/// other, and the two sides are the same size.
+fn assert_same_ground(left: &[FrequentSection], right: &[FrequentSection], what: &str) {
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "{what}: {} sections against {}",
+        left.len(),
+        right.len()
+    );
+    for l in left {
+        assert!(
+            right
+                .iter()
+                .any(|r| shares_ground(&l.polyline, &r.polyline)),
+            "{what}: {} has no partner on its ground",
+            l.id
+        );
+    }
+}
+
+#[test]
+fn pooled_fold_agrees_with_the_pooled_batch() {
+    // Expected behaviour: over one pool, a cold detect and a later fold
+    // that adds nothing describe the same ground, whatever order the
+    // caller holds the catalogue in, and the fold reports no churn.
+    let (tracks, sports) = parallel_sports();
+    let config = SectionConfig {
+        pool_sports: true,
+        ..config()
+    };
+    let ids: Vec<&str> = tracks.iter().map(|(id, _)| id.as_str()).collect();
+    let starts = HashMap::new();
+
+    let batch =
+        detect_sections_unified_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
+    let mut cache = SectionEvidenceCache::default();
+    let cold = detect_sections_unified_incremental_dated(
+        &mut cache,
+        &[],
+        &tracks,
+        &ids,
+        &[],
+        &sports,
+        &starts,
+        &config,
+        &SectionUpdatePolicy::default(),
+    );
+    assert_same_ground(&batch.sections, &cold.catalogue, "cold fold against batch");
+
+    let mut reversed = cold.catalogue.clone();
+    reversed.reverse();
+    for (order, existing) in [("as cut", &cold.catalogue), ("reversed", &reversed)] {
+        let warm = detect_sections_unified_incremental_dated(
+            &mut cache.clone(),
+            existing,
+            &tracks,
+            &[],
+            &[],
+            &sports,
+            &starts,
+            &config,
+            &SectionUpdatePolicy::default(),
+        );
+        assert_same_ground(
+            &batch.sections,
+            &warm.catalogue,
+            &format!("warm fold ({order}) against batch"),
+        );
+        assert!(
+            warm.added.is_empty() && warm.dissolved.is_empty(),
+            "warm fold ({order}) churned {} added and {} dissolved with nothing new",
+            warm.added.len(),
+            warm.dissolved.len()
+        );
+    }
 }
