@@ -3916,15 +3916,16 @@ fn detect_for_cluster_with_grid(
             activity_ids,
         };
 
+        let sorted_portions: Vec<(String, usize, usize)> = {
+            let mut v: Vec<(String, usize, usize)> = portions
+                .iter()
+                .map(|&(t, ps, pe, _)| (sport_tracks[t].0.to_string(), ps, pe))
+                .collect();
+            v.sort();
+            v
+        };
         let ckey = ConsensusKey {
-            portions: {
-                let mut v: Vec<(String, usize, usize)> = portions
-                    .iter()
-                    .map(|&(t, ps, pe, _)| (sport_tracks[t].0.to_string(), ps, pe))
-                    .collect();
-                v.sort();
-                v
-            },
+            portions: sorted_portions.clone(),
             sport: sport.to_string(),
             proximity_bits: config.proximity_threshold.to_bits(),
             min_activities: config.min_activities,
@@ -3980,30 +3981,69 @@ fn detect_for_cluster_with_grid(
             // were probed and both jitter); visits still count everyone.
             let near = cell_size * 0.2;
             let gap = cell_size;
-            let pens: Vec<f64> = portions
-                .iter()
-                .map(|&(t, s, e, _)| {
-                    let seg = &sport_tracks[t].1[s..e];
-                    self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap))
-                })
-                .collect();
             let fine = portion_point_index(&portions, sport_tracks, coverage.ref_lat, 25.0);
-            let runs: Vec<f64> = portions
-                .iter()
-                .map(|&(t, s, e, _)| {
-                    minority_run_m(
-                        &sport_tracks[t].1[s..e],
-                        &fine,
-                        coverage.ref_lat,
-                        25.0,
-                        25.0,
-                        // Distinct tracks, matching the index. Route choice
-                        // is per outing: an athlete lapping ground ten times
-                        // is still one contributor to where the line goes.
-                        portions.iter().map(|p| p.0).collect::<HashSet<_>>().len(),
-                    )
-                })
-                .collect();
+            // Pass penalties and minority runs are pure functions of the
+            // portion set, so an unchanged candidate replays them from the
+            // memo instead of re-walking every pass on every fold. Values
+            // sit per (activity, range) triple: a hit is independent of the
+            // live portion order.
+            let rkey = RenderKey {
+                portions: sorted_portions.clone(),
+                ref_lat_bits: coverage.ref_lat.to_bits(),
+                cell_size_bits: cell_size.to_bits(),
+            };
+            let cached: Option<(Vec<f64>, Vec<f64>)> = leaves.render.get(&rkey).and_then(|hit| {
+                let by_portion: HashMap<(&str, usize, usize), (f64, f64)> = hit
+                    .iter()
+                    .map(|&(ref id, ps, pe, p, r)| ((id.as_str(), ps, pe), (p, r)))
+                    .collect();
+                portions
+                    .iter()
+                    .map(|&(t, ps, pe, _)| by_portion.get(&(sport_tracks[t].0, ps, pe)).copied())
+                    .collect::<Option<Vec<(f64, f64)>>>()
+                    .map(|v| v.into_iter().unzip())
+            });
+            let (pens, runs): (Vec<f64>, Vec<f64>) = match cached {
+                Some(hit) => hit,
+                None => {
+                    let pens: Vec<f64> = portions
+                        .iter()
+                        .map(|&(t, s, e, _)| {
+                            let seg = &sport_tracks[t].1[s..e];
+                            self_pass_penalty(seg, near, gap)
+                                .max(out_and_back_penalty(seg, near, gap))
+                        })
+                        .collect();
+                    let runs: Vec<f64> = portions
+                        .iter()
+                        .map(|&(t, s, e, _)| {
+                            minority_run_m(
+                                &sport_tracks[t].1[s..e],
+                                &fine,
+                                coverage.ref_lat,
+                                25.0,
+                                25.0,
+                                // Distinct tracks, matching the index. Route
+                                // choice is per outing: an athlete lapping
+                                // ground ten times is still one contributor
+                                // to where the line goes.
+                                portions.iter().map(|p| p.0).collect::<HashSet<_>>().len(),
+                            )
+                        })
+                        .collect();
+                    leaves.render.insert(
+                        rkey,
+                        portions
+                            .iter()
+                            .zip(pens.iter().zip(runs.iter()))
+                            .map(|(&(t, ps, pe, _), (&p, &r))| {
+                                (sport_tracks[t].0.to_string(), ps, pe, p, r)
+                            })
+                            .collect(),
+                    );
+                    (pens, runs)
+                }
+            };
             let default_i = if was_trimmed {
                 (0..portions.len()).max_by(|&a, &b| {
                     portions[a]
@@ -4448,8 +4488,37 @@ fn detect_for_cluster_with_grid(
             // artefact: a pass-weighted medoid shifts with new laps,
             // and the count must not move when the visible line does
             // not.
-            let drawn_portions =
-                super::portions::compute_activity_portions(&section.polyline, &track_map, config);
+            let drawn_candidates =
+                super::portions::portion_candidates(&section.polyline, &track_map, config);
+            let dkey = DrawnKey {
+                render: (sport_tracks[t_idx].0.to_string(), rs, re),
+                proximity_bits: config.proximity_threshold.to_bits(),
+                cell_size_bits: cell_size.to_bits(),
+            };
+            let drawn_portions = match leaves.drawn.get(&dkey) {
+                Some((ids, hit))
+                    if ids.len() == drawn_candidates.len()
+                        && ids.iter().zip(&drawn_candidates).all(|(a, b)| a == b) =>
+                {
+                    hit.clone()
+                }
+                _ => {
+                    let fresh = super::portions::compute_portions_over(
+                        &section.polyline,
+                        &track_map,
+                        &drawn_candidates,
+                        config,
+                    );
+                    leaves.drawn.insert(
+                        dkey,
+                        (
+                            drawn_candidates.iter().map(|s| s.to_string()).collect(),
+                            fresh.clone(),
+                        ),
+                    );
+                    fresh
+                }
+            };
             if !drawn_portions.is_empty() {
                 section.visit_count = drawn_portions.len() as u32;
                 // One population: a cluster contributor with no qualifying
@@ -5424,7 +5493,7 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 /// On-disk layout version of [`SectionEvidenceCache`]. Bump when the stored
 /// per-cluster shape changes so a persisted blob from an older build is
 /// recognised as stale and the engine cold-rebatches instead of trusting it.
-const EVIDENCE_CACHE_VERSION: u32 = 1;
+const EVIDENCE_CACHE_VERSION: u32 = 2;
 
 /// Persisted per-(sport, geo-cluster) evidence backing
 /// [`detect_sections_unified_incremental_cached`]. The engine holds one across
@@ -5479,6 +5548,15 @@ struct LeafMemos {
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.
     consensus: HashMap<ConsensusKey, Option<FrequentSection>>,
+    /// The render stage's expensive pure leaves — pass penalties and
+    /// minority runs — keyed by the candidate's portion set, one
+    /// `(activity, start, end, penalty, run)` row per portion.
+    render: HashMap<RenderKey, Vec<(String, usize, usize, f64, f64)>>,
+    /// Drawn-line recounts ([`compute_portions_over`]) with the intersecting
+    /// track ids they were computed over. Replayed while that population is
+    /// unchanged: a track outside the line's padded bounds contributes
+    /// nothing, so a distant new activity cannot change the count.
+    drawn: HashMap<DrawnKey, (Vec<String>, Vec<SectionPortion>)>,
 }
 
 /// Complete input fingerprint of one [`track_portion`] call: the activity,
@@ -5502,6 +5580,8 @@ struct TrackPortionKey {
 const MEMO_CELL_SETS_CAP: usize = 20_000;
 const MEMO_TRACK_PORTIONS_CAP: usize = 200_000;
 const MEMO_CONSENSUS_CAP: usize = 10_000;
+const MEMO_RENDER_CAP: usize = 10_000;
+const MEMO_DRAWN_CAP: usize = 10_000;
 
 /// Complete input fingerprint of one [`process_cluster`] call: the portion
 /// set (activity id + range), the sport label baked into the id and the
@@ -5513,6 +5593,27 @@ struct ConsensusKey {
     proximity_bits: u64,
     min_activities: u32,
     max_len_bits: u64,
+}
+
+/// Complete input fingerprint of the render stage's pure leaves for one
+/// candidate: the portion set plus the geometry constants the penalties and
+/// minority runs read.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct RenderKey {
+    portions: Vec<(String, usize, usize)>,
+    ref_lat_bits: u64,
+    cell_size_bits: u64,
+}
+
+/// Fingerprint of one drawn-line recount: the rendered pass's identity plus
+/// the geometry constants the matcher reads. The value carries the sorted
+/// intersecting-track population the result was computed over, so a hit is
+/// declared only when that population is unchanged.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct DrawnKey {
+    render: (String, usize, usize),
+    proximity_bits: u64,
+    cell_size_bits: u64,
 }
 
 impl Default for SectionEvidenceCache {
@@ -5795,6 +5896,12 @@ fn fold_by_sport(
     }
     if leaves.consensus.len() > MEMO_CONSENSUS_CAP {
         leaves.consensus.clear();
+    }
+    if leaves.render.len() > MEMO_RENDER_CAP {
+        leaves.render.clear();
+    }
+    if leaves.drawn.len() > MEMO_DRAWN_CAP {
+        leaves.drawn.clear();
     }
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
