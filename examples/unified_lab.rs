@@ -20,8 +20,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracematch::{
-    DetectionProgressCallback, Direction, FrequentSection, GpsPoint, MatchConfig, RouteSignature,
+    CandidateSection, Decision, DetectionProgressCallback, Direction, FrequentSection, GpsPoint,
+    HysteresisParams, HysteresisState, IdentityParams, MatchConfig, PriorSection, RouteSignature,
     SectionConfig, Tunables, geo_utils::haversine_distance, matching::resample_route,
+    plan_identity_tuned,
 };
 
 #[path = "common/corpus.rs"]
@@ -609,6 +611,26 @@ fn day_of(date: &str) -> Option<i64> {
     Some(era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy)
 }
 
+/// Civil timestamp ("YYYY-MM-DDTHH:MM:SS...") to epoch seconds; a
+/// date-only string lands at midday so day gaps stay unambiguous.
+fn epoch_of(date: &str) -> Option<i64> {
+    if date.get(0..4)?.parse::<i64>().ok()? < 2000 {
+        // Anonymised exports pin the date to 1970: not a real start, so
+        // the activity counts as its own occasion rather than joining
+        // every other anonymised file in one giant fake trip.
+        return None;
+    }
+    let days = day_of(date)?;
+    let tod = (|| {
+        let h: i64 = date.get(11..13)?.parse().ok()?;
+        let m: i64 = date.get(14..16)?.parse().ok()?;
+        let s: i64 = date.get(17..19)?.parse().ok()?;
+        Some(h * 3600 + m * 60 + s)
+    })()
+    .unwrap_or(12 * 3600);
+    Some(days * 86400 + tod)
+}
+
 fn bearing_deg(a: &GpsPoint, b: &GpsPoint) -> f64 {
     let (la, lb) = (a.latitude.to_radians(), b.latitude.to_radians());
     let dl = (b.longitude - a.longitude).to_radians();
@@ -952,6 +974,43 @@ fn resample_sections(secs: &[FrequentSection]) -> Vec<Vec<GpsPoint>> {
         .collect()
 }
 
+/// Of the `before` sections whose GROUND survives in `after` (containment >= 50%
+/// at 60 m, the survival rule used everywhere else here), the fraction that
+/// survive under the SAME id. Mirrors the E2E harness `identity_retention`,
+/// applied to a labelled catalogue so raw positional ids and stable ids are
+/// scored identically. 100% when nothing survives (vacuously stable), matching
+/// the survival closure's empty convention.
+fn identity_retention(
+    before: &[(String, Vec<GpsPoint>)],
+    after: &[(String, Vec<GpsPoint>)],
+) -> f64 {
+    if before.is_empty() {
+        return 1.0;
+    }
+    let mut ground_survivors = 0usize;
+    let mut id_survivors = 0usize;
+    for (id_b, g_b) in before {
+        if !after
+            .iter()
+            .any(|(_, g_a)| containment(g_b, g_a, 60.0) >= 0.5)
+        {
+            continue;
+        }
+        ground_survivors += 1;
+        if after
+            .iter()
+            .any(|(id_a, g_a)| id_a == id_b && containment(g_b, g_a, 60.0) >= 0.5)
+        {
+            id_survivors += 1;
+        }
+    }
+    if ground_survivors == 0 {
+        1.0
+    } else {
+        id_survivors as f64 / ground_survivors as f64
+    }
+}
+
 fn peak_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -997,6 +1056,11 @@ fn main() {
     let mut stability = false;
     let mut windows = false;
     let mut sweep = false;
+    let mut replay_identity = false;
+    let mut hyst_k: Option<u8> = None;
+    let mut hyst_dissolve: Option<f64> = None;
+    let mut hyst_recut: Option<f64> = None;
+    let mut hyst_floor: Option<f64> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1024,12 +1088,48 @@ fn main() {
                 windows = true;
                 i += 1;
             }
+            "--replay-identity" => {
+                replay_identity = true;
+                i += 1;
+            }
+            "--hyst-k" => {
+                hyst_k = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--hyst-dissolve" => {
+                hyst_dissolve = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--hyst-recut" => {
+                hyst_recut = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--hyst-floor" => {
+                hyst_floor = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
             "--sweep" => {
                 sweep = true;
                 i += 1;
             }
             _ => i += 1,
         }
+    }
+    // Identity replay reuses the loading-window detections, so it implies the
+    // window pass. Params default to the identity.rs plateau values; the CLI
+    // overrides let a tuning run pass explicit values without touching defaults.
+    if replay_identity {
+        windows = true;
+    }
+    let mut hyst_params = HysteresisParams::default();
+    if let Some(k) = hyst_k {
+        hyst_params.k = k;
+    }
+    if let Some(d) = hyst_dissolve {
+        hyst_params.dissolve_pressure_hi = d;
+    }
+    if let Some(r) = hyst_recut {
+        hyst_params.recut_agreement = r;
     }
 
     // GeoLife public-data battery. When LAB_GEOLIFE_DIR points at an existing
@@ -1061,7 +1161,7 @@ fn main() {
     }
 
     let t_load = Instant::now();
-    let activities = if use_geolife {
+    let mut activities = if use_geolife {
         let g = geolife_dir.as_ref().unwrap();
         let max_users = env_usize("LAB_GEOLIFE_MAX_USERS", 15);
         let max_per_user = env_usize("LAB_GEOLIFE_MAX_PER_USER", 25);
@@ -1069,6 +1169,30 @@ fn main() {
     } else {
         load_corpus(&dir)
     };
+    // Mirrors production, which passes an empty seconds slice to the detector.
+    let no_seconds = std::env::var("LAB_NO_SECONDS").is_ok();
+    let with_seconds = activities.iter().filter(|a| !a.seconds.is_empty()).count();
+    println!(
+        "Per-point times on {}/{} activities ({:.0}%){}",
+        with_seconds,
+        activities.len(),
+        100.0 * with_seconds as f64 / activities.len().max(1) as f64,
+        if no_seconds { ", blanked" } else { "" }
+    );
+    if no_seconds {
+        for a in &mut activities {
+            a.seconds.clear();
+        }
+    }
+    // Mirrors production ingest, which builds every GpsPoint without elevation.
+    if std::env::var("LAB_NO_ELEVATION").is_ok() {
+        for a in &mut activities {
+            for p in &mut a.points {
+                p.elevation = None;
+            }
+        }
+        println!("Elevation stripped from every point");
+    }
     println!(
         "Loaded {} activities in {} ({} points, elevation on {:.0}%)",
         activities.len(),
@@ -1145,6 +1269,14 @@ fn main() {
     }
     let match_config = MatchConfig::default();
     let mut reports: Vec<MethodReport> = Vec::new();
+    let start_epochs: HashMap<String, i64> = if std::env::var("LAB_NO_DATES").is_ok() {
+        HashMap::new()
+    } else {
+        activities
+            .iter()
+            .filter_map(|a| epoch_of(&a.date).map(|e| (a.id.clone(), e)))
+            .collect()
+    };
     let activities_by_id: HashMap<&str, &Activity> =
         activities.iter().map(|a| (a.id.as_str(), a)).collect();
 
@@ -1225,10 +1357,11 @@ fn main() {
                     tracematch::detect_sections_flow_graph(&tracks, &sport_types, &section_config)
                 }
                 "unified" => {
-                    let out = tracematch::detect_sections_unified_explained(
+                    let out = tracematch::detect_sections_unified_dated(
                         &tracks,
                         &seconds,
                         &sport_types,
+                        &start_epochs,
                         &section_config,
                         &tracematch::Tunables::DEFAULT,
                     );
@@ -1420,8 +1553,15 @@ fn main() {
                 .map(|(id, _)| (id.clone(), "All".to_string()))
                 .collect();
             let t = Instant::now();
-            let sections =
-                tracematch::detect_sections_unified(&tracks, &secs, &types, &section_config);
+            let sections = tracematch::detect_sections_unified_dated(
+                &tracks,
+                &secs,
+                &types,
+                &start_epochs,
+                &section_config,
+                &tracematch::Tunables::DEFAULT,
+            )
+            .sections;
             runs.push((label, tracks.len(), sections, t.elapsed().as_millis()));
         }
         let rs_all: Vec<Vec<Vec<GpsPoint>>> = runs
@@ -1522,6 +1662,391 @@ fn main() {
                 med * 100.0,
             );
         }
+
+        // --- Identity + hysteresis: the visible view over the same windows ---
+        // Feed each window's detected catalogue through the B2 hysteresis layer
+        // in horizon order, snapshot the visible catalogue after each step, and
+        // score the SAME survival metric on it. Raw reproduces the churn
+        // baseline (survive->full above); visible is what a user's catalogue
+        // actually shows once identity is assigned once and re-cuts/dissolves
+        // are debounced.
+        if replay_identity {
+            println!();
+            println!("=== Identity + hysteresis replay (visible view, same windows) ===");
+            let d = HysteresisParams::default();
+            let overridden = hyst_params.k != d.k
+                || hyst_params.dissolve_pressure_hi != d.dissolve_pressure_hi
+                || hyst_params.recut_agreement != d.recut_agreement;
+            println!(
+                "  base params: k={} dissolve_pressure_hi={:.2} recut_agreement={:.2} ({})",
+                hyst_params.k,
+                hyst_params.dissolve_pressure_hi,
+                hyst_params.recut_agreement,
+                if overridden { "overridden" } else { "defaults" },
+            );
+
+            // Raw positional ids per window (floor-independent): the id-reshuffle
+            // contrast against the stable ids the hysteresis layer assigns.
+            let raw_ids: Vec<Vec<(String, Vec<GpsPoint>)>> = runs
+                .iter()
+                .zip(rs_all.iter())
+                .map(|((_, _, secs, _), grounds)| {
+                    secs.iter()
+                        .zip(grounds.iter())
+                        .map(|(s, g)| (s.id.clone(), g.clone()))
+                        .collect()
+                })
+                .collect();
+            // Churn events between two ground lists (disappeared + appeared) at
+            // the same 60 m / 50% ground match the survival metric uses.
+            let churn = |a: &[Vec<GpsPoint>], b: &[Vec<GpsPoint>]| -> usize {
+                let gone = a
+                    .iter()
+                    .filter(|f| !b.iter().any(|o| containment(f, o, 60.0) >= 0.5))
+                    .count();
+                let appeared = b
+                    .iter()
+                    .filter(|o| !a.iter().any(|f| containment(o, f, 60.0) >= 0.5))
+                    .count();
+                gone + appeared
+            };
+
+            struct ReplaySummary {
+                final_visible: usize,
+                final_overlaps: usize,
+                total_minted: usize,
+                total_dissolved: usize,
+                total_recut: usize,
+                merge_inherit: usize,
+                mint: usize,
+                raw_churn: usize,
+                visible_churn: usize,
+                vis_idk_first: f64,
+            }
+
+            // One replay at a given merge floor. Detection is already done, so
+            // this re-runs only the cheap hysteresis fold; both floors share the
+            // identical raw catalogues, so the raw churn is a shared baseline.
+            let run_replay = |floor: f64| -> ReplaySummary {
+                let mut params = hyst_params;
+                params.merge_mutual_floor = floor;
+                println!();
+                println!("--- merge_mutual_floor = {floor:.2} ---");
+                let mut state = HysteresisState::new(params);
+                let mut vis: Vec<Vec<(String, Vec<GpsPoint>)>> = Vec::new();
+                let (mut n_carry, mut n_split, mut n_merge, mut n_mint) =
+                    (0usize, 0usize, 0usize, 0usize);
+                let (mut t_mint, mut t_diss, mut t_recut) = (0usize, 0usize, 0usize);
+                for (label, n_acts, sections, _) in runs.iter() {
+                    let cands: Vec<CandidateSection> = sections
+                        .iter()
+                        .map(|s| {
+                            let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+                            CandidateSection {
+                                polyline: resample_route(&s.polyline, t),
+                                visit_count: s.visit_count,
+                            }
+                        })
+                        .collect();
+                    // Decision mix (observational): re-derive the plan against the
+                    // pre-step visible view at this floor. first_seen is exact (the
+                    // mint ordinal is the id suffix); visit_count only breaks ties.
+                    let prior: Vec<PriorSection> = state
+                        .visible_grounds()
+                        .into_iter()
+                        .map(|(id, g)| PriorSection {
+                            first_seen: id.trim_start_matches("s_").parse().unwrap_or(0),
+                            id,
+                            polyline: g,
+                            visit_count: 0,
+                        })
+                        .collect();
+                    let plan = plan_identity_tuned(
+                        &prior,
+                        &cands,
+                        &IdentityParams {
+                            merge_mutual_floor: floor,
+                        },
+                    );
+                    for decision in plan.decisions {
+                        match decision {
+                            Decision::Carry { .. } => n_carry += 1,
+                            Decision::SplitInherit { .. } => n_split += 1,
+                            Decision::MergeInherit { .. } => n_merge += 1,
+                            Decision::Mint { .. } => n_mint += 1,
+                        }
+                    }
+                    let o = state.step(&cands);
+                    t_mint += o.minted;
+                    t_diss += o.dissolved;
+                    t_recut += o.recut_applied;
+                    println!(
+                        "  {:<4} {:>5} acts  raw {:>3} -> visible {:>3}   minted {:>2}  restored {:>2}  \
+                         dissolved {:>2}  re-cut {:>2}  debouncing {:>2}",
+                        label,
+                        n_acts,
+                        o.raw_count,
+                        o.visible_count,
+                        o.minted,
+                        o.restored,
+                        o.dissolved,
+                        o.recut_applied,
+                        o.debouncing,
+                    );
+                    vis.push(state.visible_grounds());
+                }
+
+                let vis_grounds: Vec<Vec<Vec<GpsPoint>>> = vis
+                    .iter()
+                    .map(|snap| snap.iter().map(|(_, g)| g.clone()).collect())
+                    .collect();
+                let vlast = vis_grounds.len() - 1;
+
+                // Settle phase. The loading-window replay ends right after the
+                // largest (final) reshuffle, so retirements are left mid-debounce
+                // (streak < k) and re-cuts unsnapped — the visible count is frozen
+                // in transit, not converged. A real drip keeps detecting; here we
+                // feed the FINAL window a few more detects so the plan-retirement
+                // debounce drains stale-but-covered duplicates and re-cuts snap to
+                // the batch geometry. This is the honest "visible converges toward
+                // raw" check.
+                let raw_final = rs_all[last].len();
+                let final_cands: Vec<CandidateSection> = runs[last]
+                    .2
+                    .iter()
+                    .map(|s| {
+                        let t = ((s.distance_meters / 50.0).ceil() as usize).clamp(2, 400);
+                        CandidateSection {
+                            polyline: resample_route(&s.polyline, t),
+                            visit_count: s.visit_count,
+                        }
+                    })
+                    .collect();
+                let settle_from = state.visible_len();
+                let mut settle_dissolved = 0usize;
+                for _ in 0..(hyst_params.k as usize + 2) {
+                    settle_dissolved += state.step(&final_cands).dissolved;
+                }
+                let settled = state.visible_grounds();
+                let settled_grounds: Vec<Vec<GpsPoint>> =
+                    settled.iter().map(|(_, g)| g.clone()).collect();
+                let settled_overlaps = settled_grounds
+                    .iter()
+                    .enumerate()
+                    .filter(|(a, ga)| {
+                        settled_grounds
+                            .iter()
+                            .enumerate()
+                            .any(|(b, gb)| *a != b && containment(ga, gb, 60.0) >= 0.5)
+                    })
+                    .count();
+                // Identity retention of the last visible window onto the settled
+                // view: ids must survive the settle (the drain retires stale
+                // ground, it must not renumber the survivors).
+                let settled_retention = identity_retention(&vis[vlast], &settled) * 100.0;
+
+                println!(
+                    "  {:<7} {:>9} {:>13} {:>13} {:>13}",
+                    "horizon", "raw->full", "visible->full", "raw id-keep", "vis id-keep"
+                );
+                for i in 0..runs.len() {
+                    let raw_full = survival(&rs_all[i], &rs_all[last]) * 100.0;
+                    let vis_full = survival(&vis_grounds[i], &vis_grounds[vlast]) * 100.0;
+                    let raw_idk = identity_retention(&raw_ids[i], &raw_ids[last]) * 100.0;
+                    let vis_idk = identity_retention(&vis[i], &vis[vlast]) * 100.0;
+                    println!(
+                        "  {:<7} {:>8.0}% {:>12.0}% {:>12.0}% {:>12.0}%",
+                        runs[i].0, raw_full, vis_full, raw_idk, vis_idk,
+                    );
+                }
+
+                // Visible extent drift per window step: for ids carried between
+                // consecutive snapshots, how far the VISIBLE geometry moved now
+                // that the registry adopts (the raw baseline for this ladder is
+                // Round 8c's same-reference 54/30/38/51% at median extent delta
+                // 29/16/16/10%).
+                let ep_shift = |a: &[GpsPoint], b: &[GpsPoint]| -> f64 {
+                    let (Some(af), Some(al), Some(bf), Some(bl)) =
+                        (a.first(), a.last(), b.first(), b.last())
+                    else {
+                        return f64::INFINITY;
+                    };
+                    let fwd = haversine_distance(af, bf).max(haversine_distance(al, bl));
+                    let rev = haversine_distance(af, bl).max(haversine_distance(al, bf));
+                    fwd.min(rev)
+                };
+                println!("  visible drift per window step (carried ids):");
+                for i in 0..last {
+                    let a: std::collections::BTreeMap<&str, &Vec<GpsPoint>> =
+                        vis[i].iter().map(|(id, g)| (id.as_str(), g)).collect();
+                    let mut same = 0usize;
+                    let mut shifts: Vec<f64> = Vec::new();
+                    let mut deltas: Vec<f64> = Vec::new();
+                    for (id, gb) in &vis[i + 1] {
+                        let Some(ga) = a.get(id.as_str()) else {
+                            continue;
+                        };
+                        let s = ep_shift(ga.as_slice(), gb);
+                        let la = tracematch::matching::calculate_route_distance(ga.as_slice());
+                        let lb = tracematch::matching::calculate_route_distance(gb);
+                        if s < 1.0 && (la - lb).abs() < 1.0 {
+                            same += 1;
+                        } else {
+                            shifts.push(s);
+                            deltas.push(if la.max(lb) > 0.0 {
+                                (la - lb).abs() / la.max(lb)
+                            } else {
+                                0.0
+                            });
+                        }
+                    }
+                    shifts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                    deltas.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                    let carried = same + shifts.len();
+                    let med = shifts.get(shifts.len() / 2).copied().unwrap_or(0.0);
+                    let p90 = shifts
+                        .get(((shifts.len() * 9) / 10).min(shifts.len().saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let dmed = deltas.get(deltas.len() / 2).copied().unwrap_or(0.0);
+                    println!(
+                        "    {:>4}→{:<4} carried {:>3}  same geometry {:>3.0}%  moved {:>3}: shift med {:>4.0} / p90 {:>4.0} m  extent delta med {:>3.0}%",
+                        runs[i].0,
+                        runs[i + 1].0,
+                        carried,
+                        if carried > 0 {
+                            same as f64 / carried as f64 * 100.0
+                        } else {
+                            0.0
+                        },
+                        shifts.len(),
+                        med,
+                        p90,
+                        dmed * 100.0,
+                    );
+                }
+
+                let mut raw_churn = 0usize;
+                let mut visible_churn = 0usize;
+                for i in 0..last {
+                    raw_churn += churn(&rs_all[i], &rs_all[i + 1]);
+                    visible_churn += churn(&vis_grounds[i], &vis_grounds[i + 1]);
+                }
+                // Overlapping visible sections at the final view: a section whose
+                // ground is co-covered by another visible one (the duplication
+                // signature the merge floor targets).
+                let fin = &vis_grounds[vlast];
+                let final_overlaps = fin
+                    .iter()
+                    .enumerate()
+                    .filter(|(a, ga)| {
+                        fin.iter()
+                            .enumerate()
+                            .any(|(b, gb)| *a != b && containment(ga, gb, 60.0) >= 0.5)
+                    })
+                    .count();
+                println!(
+                    "  churn events: raw {}  visible {}  (damped {:.0}%);  \
+                     final visible {}  overlapping {}",
+                    raw_churn,
+                    visible_churn,
+                    if raw_churn > 0 {
+                        100.0 * raw_churn.saturating_sub(visible_churn) as f64 / raw_churn as f64
+                    } else {
+                        0.0
+                    },
+                    fin.len(),
+                    final_overlaps,
+                );
+                println!(
+                    "  decision mix over {} detects: carry {}  split-inherit {}  merge-inherit {}  mint {}",
+                    runs.len(),
+                    n_carry,
+                    n_split,
+                    n_merge,
+                    n_mint,
+                );
+                println!(
+                    "  SETTLED (+{} detects of the final window): visible {} -> {}  (raw {})  \
+                     overlapping {}  dissolved-in-settle {}  id-retention {:.0}%",
+                    hyst_params.k as usize + 2,
+                    settle_from,
+                    settled.len(),
+                    raw_final,
+                    settled_overlaps,
+                    settle_dissolved,
+                    settled_retention,
+                );
+                ReplaySummary {
+                    final_visible: fin.len(),
+                    final_overlaps,
+                    total_minted: t_mint,
+                    total_dissolved: t_diss,
+                    total_recut: t_recut,
+                    merge_inherit: n_merge,
+                    mint: n_mint,
+                    raw_churn,
+                    visible_churn,
+                    vis_idk_first: identity_retention(&vis[0], &vis[vlast]) * 100.0,
+                }
+            };
+
+            let hi = hyst_floor.unwrap_or(0.4);
+            let off = run_replay(0.0);
+            let on = run_replay(hi);
+            println!();
+            println!("=== merge_mutual_floor OFF (0.00) vs {hi:.2} ===");
+            let row = |name: &str, a: String, b: String| {
+                println!("  {name:<24} {a:>12}  {b:>12}");
+            };
+            row("metric", "floor 0.00".into(), format!("floor {hi:.2}"));
+            row(
+                "final visible",
+                off.final_visible.to_string(),
+                on.final_visible.to_string(),
+            );
+            row(
+                "overlapping (dup)",
+                off.final_overlaps.to_string(),
+                on.final_overlaps.to_string(),
+            );
+            row(
+                "total minted",
+                off.total_minted.to_string(),
+                on.total_minted.to_string(),
+            );
+            row(
+                "total dissolved",
+                off.total_dissolved.to_string(),
+                on.total_dissolved.to_string(),
+            );
+            row(
+                "total re-cut",
+                off.total_recut.to_string(),
+                on.total_recut.to_string(),
+            );
+            row(
+                "merge-inherit",
+                off.merge_inherit.to_string(),
+                on.merge_inherit.to_string(),
+            );
+            row("mint decisions", off.mint.to_string(), on.mint.to_string());
+            row(
+                "visible churn",
+                off.visible_churn.to_string(),
+                on.visible_churn.to_string(),
+            );
+            row(
+                "raw churn",
+                off.raw_churn.to_string(),
+                on.raw_churn.to_string(),
+            );
+            row(
+                "90d->full vis id-keep",
+                format!("{:.0}%", off.vis_idk_first),
+                format!("{:.0}%", on.vis_idk_first),
+            );
+        }
     }
 
     // --- Constants plateau sweep (pooled, one factor at a time) ---------
@@ -1607,6 +2132,17 @@ fn main() {
                 vec![10_000.0, 25_000.0, 50_000.0, 100_000.0, 200_000.0],
                 |t, v| t.cluster_gap_m = v,
             ),
+            ("self_pass_clean", vec![0.02, 0.05, 0.08, 0.10], |t, v| {
+                t.self_pass_clean = v
+            }),
+            ("minority_run_m", vec![40.0, 60.0, 80.0, 100.0], |t, v| {
+                t.minority_run_m = v
+            }),
+            (
+                "occasion_span_h",
+                vec![72.0, 120.0, 168.0, 240.0, 336.0],
+                |t, v| t.occasion_span_h = v,
+            ),
         ];
 
         let bbox = |pts: &[GpsPoint]| -> (f64, f64, f64, f64) {
@@ -1645,20 +2181,24 @@ fn main() {
                 let mut tun = Tunables::DEFAULT;
                 set(&mut tun, v);
                 let t0 = Instant::now();
-                let full = tracematch::detect_sections_unified_tuned(
+                let full = tracematch::detect_sections_unified_dated(
                     &tracks,
                     &all_secs,
                     &types,
+                    &start_epochs,
                     &section_config,
                     &tun,
-                );
-                let jk = tracematch::detect_sections_unified_tuned(
+                )
+                .sections;
+                let jk = tracematch::detect_sections_unified_dated(
                     &jk_tracks,
                     &jk_secs,
                     &types,
+                    &start_epochs,
                     &section_config,
                     &tun,
-                );
+                )
+                .sections;
                 let ms = t0.elapsed().as_millis();
 
                 let full_rs = resample_sections(&full);
@@ -1813,7 +2353,15 @@ fn main() {
                     .collect()
             };
             let detect = |ts: &[(String, Vec<GpsPoint>)], ss: &[&[f64]]| -> Vec<FrequentSection> {
-                tracematch::detect_sections_unified(ts, ss, &types(ts), &section_config)
+                tracematch::detect_sections_unified_dated(
+                    ts,
+                    ss,
+                    &types(ts),
+                    &start_epochs,
+                    &section_config,
+                    &tracematch::Tunables::DEFAULT,
+                )
+                .sections
             };
 
             let full = detect(&full_tracks, &full_secs);
