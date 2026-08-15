@@ -11,11 +11,10 @@
 //! Four scenarios:
 //! (a) a long held section splits into two as a branch gains support,
 //! (b) two long held neighbours fuse into one corridor,
-//! (c) the marginal-capture tangle found reading `plan_identity`: a candidate
-//!     edged to a MARGINAL senior and a DOMINANT junior, where seniority alone
-//!     lets the marginal prior capture (or block) the candidate's identity. This
-//!     one measures the pathology under a full hysteresis run and evaluates the
-//!     opt-in `merge_mutual_floor` fix with numbers,
+//! (c) the marginal-capture tangle: a candidate edged to a MARGINAL senior and
+//!     a DOMINANT junior. The agreement tier keeps an extent-agreeing match's
+//!     id at every floor; the hysteresis run and the opt-in
+//!     `merge_mutual_floor` cover the shapes without an exact match,
 //! (d) a 3-prior/3-candidate braid, asserting the plan is byte-identical across
 //!     runs and stable under input permutation.
 //!
@@ -281,10 +280,11 @@ fn marginal_capture_grounds() -> (Vec<GpsPoint>, Vec<GpsPoint>) {
 }
 
 #[test]
-fn marginal_capture_plan_is_wrong_by_default_and_fixed_by_floor() {
+fn marginal_capture_corridor_keeps_its_exact_match_at_every_floor() {
     let (long, short) = marginal_capture_grounds();
     // A (senior, first_seen 1) sits on `short` and is marginally inside `long`.
-    // B (junior, first_seen 2) sits on `long` and dominantly overlaps it.
+    // B (junior, first_seen 2) sits on `long` itself: an extent-agreeing 1:1
+    // match for the fused candidate.
     let held = vec![
         prior("s_A_short", short.clone(), 1, 3),
         prior("s_B_long", long.clone(), 2, 9),
@@ -298,61 +298,40 @@ fn marginal_capture_plan_is_wrong_by_default_and_fixed_by_floor() {
         "mutual(short senior A, long Z) = {mo_a:.3}   mutual(long junior B, long Z) = {mo_b:.3}"
     );
 
-    // DEFAULT (floor 0.0): seniority alone decides, so the marginal senior A
-    // captures Z and the dominant junior B merges away under A's id.
-    let default_plan = plan_identity(&held, &[cand(long.clone(), 12)]);
-    println!(
-        "default plan: {:?} | retired {:?}",
-        default_plan.decisions, default_plan.retired
-    );
-    assert_eq!(
-        default_plan.decisions,
-        vec![Decision::MergeInherit {
-            id: "s_A_short".into()
-        }],
-        "pre-change: the long corridor inherits the SHORT senior's id (the wart)"
-    );
-    assert_eq!(
-        default_plan.retired,
-        vec![Retirement {
-            id: "s_B_long".into(),
-            reason: RetireReason::MergedInto {
-                id: "s_A_short".into()
+    // The agreement tier outranks containment-plus-seniority, so the corridor
+    // stays under its exact match's id and the marginal senior folds into it,
+    // with or without the merge floor. Seniority alone would hand Z to the
+    // marginal senior A and re-mint churn ids on B's ground.
+    for floor in [0.0, 0.4] {
+        let plan = plan_identity_tuned(
+            &held,
+            &[cand(long.clone(), 12)],
+            &IdentityParams {
+                merge_mutual_floor: floor,
             },
-        }],
-        "pre-change: the dominant junior loses its id to the marginal senior"
-    );
-
-    // WITH FLOOR: a floor above A's marginal overlap removes A from Z's merge
-    // candidacy, so the dominant junior B keeps Z under its own id and the short
-    // senior A folds into B instead. 0.4 sits in the (0.3, 0.5) window that fixes
-    // the tangles while still letting a genuine half-and-half merge (scenario b,
-    // each party at mutual 0.5) resolve by seniority.
-    let floor = IdentityParams {
-        merge_mutual_floor: 0.4,
-    };
-    let floored = plan_identity_tuned(&held, &[cand(long.clone(), 12)], &floor);
-    println!(
-        "floored plan: {:?} | retired {:?}",
-        floored.decisions, floored.retired
-    );
-    assert_eq!(
-        floored.decisions,
-        vec![Decision::MergeInherit {
-            id: "s_B_long".into()
-        }],
-        "with the floor: the dominant junior keeps the corridor's id"
-    );
-    assert_eq!(
-        floored.retired,
-        vec![Retirement {
-            id: "s_A_short".into(),
-            reason: RetireReason::MergedInto {
+        );
+        println!(
+            "floor {floor}: plan {:?} | retired {:?}",
+            plan.decisions, plan.retired
+        );
+        assert_eq!(
+            plan.decisions,
+            vec![Decision::MergeInherit {
                 id: "s_B_long".into()
-            },
-        }],
-        "with the floor: the short senior folds into the dominant corridor"
-    );
+            }],
+            "floor {floor}: the corridor keeps its exact match's id"
+        );
+        assert_eq!(
+            plan.retired,
+            vec![Retirement {
+                id: "s_A_short".into(),
+                reason: RetireReason::MergedInto {
+                    id: "s_B_long".into()
+                },
+            }],
+            "floor {floor}: the marginal senior folds into the corridor"
+        );
+    }
 }
 
 /// The (c2) variant WITH an alternative home for the senior, driven through a
