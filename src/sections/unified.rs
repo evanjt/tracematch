@@ -62,7 +62,7 @@
 //!    no single pass actually connected.
 
 use super::density_grid::{CellGrid, bresenham_cells, runs_in_cells};
-use super::identity::shares_ground;
+use super::identity::{IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground};
 use super::overlap::{FullTrackOverlap, OverlapCluster};
 use super::postprocess::required_visits_for_length;
 use super::{FrequentSection, SectionConfig, SectionPortion, process_cluster};
@@ -5080,6 +5080,53 @@ fn endpoint_shift_m(a: &FrequentSection, b: &FrequentSection) -> f64 {
     forward.min(reversed)
 }
 
+/// Pair each dissolved prior with a minted candidate on the same ground,
+/// writing the pairing into `carrier` and returning the prior indices it
+/// rescued from retirement.
+///
+/// The mutual-best round leaves a pair unconfirmed when a neighbour the
+/// candidate contains out-nominates the prior that actually holds its
+/// ground, which pooled detection reaches often (one bucket cuts both a
+/// long corridor and the shorter one inside it). Pairing what the round
+/// left over keeps identity a fixpoint, so refolding an unchanged pool
+/// carries every id instead of dissolving and re-minting one. A pair must
+/// agree to within [`RECUT_AGREEMENT`], so a split loser still mints.
+/// Priors run in catalogue order, each taking its highest-overlap free
+/// candidate, ties by index.
+fn pair_leftovers(
+    plan: &IdentityPlan,
+    existing: &[FrequentSection],
+    fresh: &[FrequentSection],
+    index_of: &HashMap<&str, usize>,
+    carrier: &mut [Option<usize>],
+) -> HashSet<usize> {
+    let mut rescued = HashSet::new();
+    for r in &plan.retired {
+        if !matches!(r.reason, RetireReason::Dissolved) {
+            continue;
+        }
+        let Some(&pi) = index_of.get(r.id.as_str()) else {
+            continue;
+        };
+        let prior = &existing[pi];
+        let mut best: Option<(usize, f64)> = None;
+        for (j, cand) in fresh.iter().enumerate() {
+            if carrier[j].is_some() {
+                continue;
+            }
+            let overlap = mutual_overlap(&prior.polyline, &cand.polyline);
+            if overlap >= RECUT_AGREEMENT && best.is_none_or(|(_, b)| overlap > b) {
+                best = Some((j, overlap));
+            }
+        }
+        if let Some((j, _)) = best {
+            carrier[j] = Some(pi);
+            rescued.insert(pi);
+        }
+    }
+    rescued
+}
+
 /// Turn a freshly detected catalogue plus the caller's prior one into the
 /// fold outcome, honouring `policy`.
 ///
@@ -5111,7 +5158,7 @@ fn resolve_fold(
     config: &SectionConfig,
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
 ) -> UnifiedIncrementalResult {
-    use super::identity::{CandidateSection, PriorSection, RetireReason, plan_identity};
+    use super::identity::{CandidateSection, PriorSection, plan_identity};
 
     // The identity plan pairs priors to candidates. Seniority (merge
     // inheritance) is the caller's list order: earlier is more senior.
@@ -5153,11 +5200,12 @@ fn resolve_fold(
     };
 
     // Per-candidate carrier from the plan, then each prior's fate.
-    let carrier: Vec<Option<usize>> = plan
+    let mut carrier: Vec<Option<usize>> = plan
         .decisions
         .iter()
         .map(|d| d.carried_id().and_then(|id| index_of.get(id).copied()))
         .collect();
+    let rescued = pair_leftovers(&plan, existing, &fresh, &index_of, &mut carrier);
 
     let mut changed = Vec::new();
     let mut held = Vec::new();
@@ -5190,6 +5238,9 @@ fn resolve_fold(
         let Some(&pi) = index_of.get(r.id.as_str()) else {
             continue;
         };
+        if rescued.contains(&pi) {
+            continue;
+        }
         let prior = &existing[pi];
         match &r.reason {
             _ if explicit_pin.contains(prior.id.as_str()) => {
