@@ -1672,3 +1672,121 @@ fn compute_polyline_containment_with_rtree(
 
     contained_count as f64 / polyline_a.len() as f64
 }
+
+#[cfg(test)]
+mod dominant_sport_tests {
+    use super::*;
+
+    fn sport_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, sport)| (id.to_string(), sport.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn two_way_tie_resolves_on_sport_name_regardless_of_input_order() {
+        let sport_types =
+            sport_map(&[("a1", "Run"), ("a2", "Ride"), ("a3", "Run"), ("a4", "Ride")]);
+
+        let orderings = [
+            ["a1", "a2", "a3", "a4"],
+            ["a2", "a1", "a4", "a3"],
+            ["a4", "a3", "a2", "a1"],
+            ["a3", "a1", "a2", "a4"],
+        ];
+
+        for order in orderings {
+            let ids: Vec<String> = order.iter().map(|s| s.to_string()).collect();
+            assert_eq!(dominant_sport(&ids, &sport_types), "Ride");
+        }
+    }
+
+    /// Every sport ties on count, so a map-order winner would land on the
+    /// alphabetically-first name only by chance, in each of these sets.
+    #[test]
+    fn wide_ties_always_resolve_on_the_first_sport_name() {
+        let sport_sets: [&[&str]; 4] = [
+            &[
+                "AlpineSki",
+                "EBikeRide",
+                "Hike",
+                "Ride",
+                "Rowing",
+                "Run",
+                "Swim",
+                "VirtualRide",
+                "Walk",
+                "Workout",
+            ],
+            &[
+                "Badminton",
+                "Canoeing",
+                "Elliptical",
+                "GravelRide",
+                "IceSkate",
+                "Kayaking",
+                "MountainBikeRide",
+                "NordicSki",
+                "Snowboard",
+                "TrailRun",
+            ],
+            &[
+                "Handcycle",
+                "InlineSkate",
+                "Kitesurf",
+                "RockClimbing",
+                "Sail",
+                "Skateboard",
+                "Snowshoe",
+                "StandUpPaddling",
+                "Surfing",
+                "Velomobile",
+            ],
+            &[
+                "Crossfit",
+                "Golf",
+                "Pilates",
+                "Racquetball",
+                "Soccer",
+                "Squash",
+                "TableTennis",
+                "Tennis",
+                "WeightTraining",
+                "Yoga",
+            ],
+        ];
+
+        for sports in sport_sets {
+            let mut sorted: Vec<&str> = sports.to_vec();
+            sorted.sort_unstable();
+            let expected = sorted[0].to_string();
+
+            let mut sport_types = HashMap::new();
+            let mut ids = Vec::new();
+            for (i, sport) in sports.iter().enumerate() {
+                for visit in 0..2 {
+                    let id = format!("a{i}-{visit}");
+                    sport_types.insert(id.clone(), sport.to_string());
+                    ids.push(id);
+                }
+            }
+
+            assert_eq!(dominant_sport(&ids, &sport_types), expected);
+            ids.reverse();
+            assert_eq!(dominant_sport(&ids, &sport_types), expected);
+        }
+    }
+
+    #[test]
+    fn majority_sport_wins() {
+        let sport_types = sport_map(&[("a1", "Ride"), ("a2", "Run"), ("a3", "Run")]);
+        let ids: Vec<String> = ["a1", "a2", "a3"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(dominant_sport(&ids, &sport_types), "Run");
+    }
+
+    #[test]
+    fn unknown_when_no_sports_are_known() {
+        assert_eq!(dominant_sport(&[], &HashMap::new()), "Unknown");
+    }
+}
