@@ -60,6 +60,34 @@ pub fn select_medoid(
         return (traces[0].0.to_string(), traces[0].1.clone());
     }
 
+    // Resample every pass once. AMD compares 50-point resamples, and
+    // resampling inside each pairwise call made every pass pay a full-track
+    // walk per pair instead of per trace.
+    let resampled: Vec<Vec<GpsPoint>> = {
+        #[cfg(feature = "parallel")]
+        {
+            traces
+                .par_iter()
+                .map(|(_, t)| matching::resample_route(t, 50))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            traces
+                .iter()
+                .map(|(_, t)| matching::resample_route(t, 50))
+                .collect()
+        }
+    };
+    let amd = |i: usize, j: usize| -> f64 {
+        if traces[i].1.is_empty() || traces[j].1.is_empty() {
+            return f64::MAX;
+        }
+        let a_to_b = matching::average_min_distance(&resampled[i], &resampled[j]);
+        let b_to_a = matching::average_min_distance(&resampled[j], &resampled[i]);
+        (a_to_b + b_to_a) / 2.0
+    };
+
     // For small clusters, compute full pairwise AMD
     // For larger clusters (>10), use approximate method
     let use_full_pairwise = traces.len() <= 10;
@@ -71,16 +99,10 @@ pub fn select_medoid(
         // Compute AMD for each trace to all others
         #[cfg(feature = "parallel")]
         {
-            let (idx, _) = traces
-                .par_iter()
-                .enumerate()
-                .map(|(i, (_, trace_i))| {
-                    let total: f64 = traces
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, _)| *j != i)
-                        .map(|(_, (_, trace_j))| average_min_distance(trace_i, trace_j))
-                        .sum();
+            let (idx, _) = (0..traces.len())
+                .into_par_iter()
+                .map(|i| {
+                    let total: f64 = (0..traces.len()).filter(|&j| j != i).map(|j| amd(i, j)).sum();
                     (i, total)
                 })
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -90,12 +112,12 @@ pub fn select_medoid(
 
         #[cfg(not(feature = "parallel"))]
         {
-            for (i, (_, trace_i)) in traces.iter().enumerate() {
+            for i in 0..traces.len() {
                 let mut total_amd = 0.0;
 
-                for (j, (_, trace_j)) in traces.iter().enumerate() {
+                for j in 0..traces.len() {
                     if i != j {
-                        total_amd += average_min_distance(trace_i, trace_j);
+                        total_amd += amd(i, j);
                     }
                 }
 
@@ -109,7 +131,7 @@ pub fn select_medoid(
         // Approximate: compare each to a random sample of 5 others
         let sample_size = 5.min(traces.len() - 1);
 
-        for (i, (_, trace_i)) in traces.iter().enumerate() {
+        for i in 0..traces.len() {
             let mut total_amd = 0.0;
             let mut count = 0;
 
@@ -117,7 +139,7 @@ pub fn select_medoid(
             let step = traces.len() / sample_size;
             for j in (0..traces.len()).step_by(step.max(1)).take(sample_size) {
                 if i != j {
-                    total_amd += average_min_distance(trace_i, &traces[j].1);
+                    total_amd += amd(i, j);
                     count += 1;
                 }
             }
