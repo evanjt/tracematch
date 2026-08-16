@@ -376,3 +376,141 @@ pub fn segment_gradient(points: &[GpsPoint]) -> Option<f64> {
 
     Some(((elev_end - elev_start) / total_dist) * 100.0)
 }
+
+/// A climb must clear this before it counts towards elevation gain,
+/// filtering barometric and GPS noise between real rises.
+pub const ELEVATION_GAIN_HYSTERESIS_M: f64 = 3.0;
+
+/// Elevation gain (m) and net grade (%) of one real track slice.
+///
+/// Returns `None` unless at least 90% of the points carry elevation.
+/// Elevations are conditioned by a 3-point mean, gain accumulates only
+/// when a rise clears [`ELEVATION_GAIN_HYSTERESIS_M`] above the last
+/// anchor, and grade is the net elevation change over the track's
+/// horizontal distance (the [`segment_gradient`] formula).
+pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let carrying = points.iter().filter(|p| p.elevation.is_some()).count();
+    if (carrying as f64) < 0.9 * points.len() as f64 {
+        return None;
+    }
+
+    let elevs: Vec<f64> = points.iter().filter_map(|p| p.elevation).collect();
+    let n = elevs.len();
+    let smoothed: Vec<f64> = (0..n)
+        .map(|i| {
+            let lo = i.saturating_sub(1);
+            let hi = (i + 1).min(n - 1);
+            elevs[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
+        })
+        .collect();
+
+    let mut gain = 0.0;
+    let mut anchor = smoothed[0];
+    for &e in &smoothed[1..] {
+        let delta = e - anchor;
+        if delta >= ELEVATION_GAIN_HYSTERESIS_M {
+            gain += delta;
+            anchor = e;
+        } else if delta <= -ELEVATION_GAIN_HYSTERESIS_M {
+            anchor = e;
+        }
+    }
+
+    let mut total_dist = 0.0;
+    for w in points.windows(2) {
+        total_dist += haversine_distance(&w[0], &w[1]);
+    }
+    if total_dist < 1.0 {
+        return Some((gain, 0.0));
+    }
+    let first = points.iter().find_map(|p| p.elevation)?;
+    let last = points.iter().rev().find_map(|p| p.elevation)?;
+    let grade = ((last - first) / total_dist) * 100.0;
+
+    Some((gain, grade))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(elevations: &[Option<f64>]) -> Vec<GpsPoint> {
+        // Points ~11 m apart along a meridian at synthetic coordinates.
+        elevations
+            .iter()
+            .enumerate()
+            .map(|(i, e)| GpsPoint {
+                latitude: 47.0 + i as f64 * 0.0001,
+                longitude: 8.0,
+                elevation: *e,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flat_track_reports_zero_gain_and_grade() {
+        let pts = track(&[Some(500.0); 20]);
+        let (gain, grade) = elevation_stats(&pts).unwrap();
+        assert_eq!(gain, 0.0);
+        assert_eq!(grade, 0.0);
+    }
+
+    #[test]
+    fn single_climb_reports_rise_and_positive_grade() {
+        let elevs: Vec<Option<f64>> = (0..21).map(|i| Some(400.0 + i as f64 * 5.0)).collect();
+        let pts = track(&elevs);
+        let (gain, grade) = elevation_stats(&pts).unwrap();
+        // Smoothing halves the first and last steps; the middle rise survives.
+        assert!((gain - 95.0).abs() < 5.0, "gain {gain}");
+        assert!(grade > 4.0, "grade {grade}");
+    }
+
+    #[test]
+    fn hysteresis_ignores_noise_on_a_climb() {
+        // A steady 50 m rise carrying +-1 m sawtooth noise: hysteresis keeps
+        // the oscillations from inflating the gain past the true rise.
+        let elevs: Vec<Option<f64>> = (0..51)
+            .map(|i| {
+                let noise = if i % 2 == 0 { 1.0 } else { -1.0 };
+                Some(300.0 + i as f64 + noise)
+            })
+            .collect();
+        let pts = track(&elevs);
+        let (gain, _) = elevation_stats(&pts).unwrap();
+        assert!((40.0..=55.0).contains(&gain), "gain {gain}");
+    }
+
+    #[test]
+    fn descent_reports_zero_gain_and_negative_grade() {
+        let elevs: Vec<Option<f64>> = (0..21).map(|i| Some(600.0 - i as f64 * 5.0)).collect();
+        let pts = track(&elevs);
+        let (gain, grade) = elevation_stats(&pts).unwrap();
+        assert_eq!(gain, 0.0);
+        assert!(grade < -4.0, "grade {grade}");
+    }
+
+    #[test]
+    fn sparse_elevation_below_floor_is_none() {
+        let elevs: Vec<Option<f64>> = (0..20)
+            .map(|i| if i % 2 == 0 { Some(500.0) } else { None })
+            .collect();
+        assert!(elevation_stats(&track(&elevs)).is_none());
+    }
+
+    #[test]
+    fn ninety_percent_coverage_passes_the_floor() {
+        let mut elevs: Vec<Option<f64>> = (0..20).map(|i| Some(500.0 + i as f64)).collect();
+        elevs[3] = None;
+        elevs[11] = None;
+        assert!(elevation_stats(&track(&elevs)).is_some());
+    }
+
+    #[test]
+    fn short_track_is_none() {
+        assert!(elevation_stats(&track(&[Some(500.0)])).is_none());
+        assert!(elevation_stats(&[]).is_none());
+    }
+}

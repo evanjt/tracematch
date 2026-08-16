@@ -4776,6 +4776,15 @@ fn detect_for_cluster_with_grid(
     );
     reconcile_seam_overruns(&mut sections, coverage.ref_lat, config.min_section_length);
 
+    // Elevation metadata off each section's own emitted slice, after every
+    // reslice has settled; never averaged across tracks.
+    for s in sections.iter_mut() {
+        if let Some((gain, grade)) = crate::geo_utils::elevation_stats(&s.polyline) {
+            s.elevation_gain_m = Some(gain);
+            s.avg_grade_percent = Some(grade);
+        }
+    }
+
     sections
 }
 
@@ -6945,6 +6954,8 @@ mod seam_tests {
             scale: None,
             is_user_defined: false,
             stability: 1.0,
+            elevation_gain_m: None,
+            avg_grade_percent: None,
             version: 1,
             updated_at: None,
             created_at: None,
