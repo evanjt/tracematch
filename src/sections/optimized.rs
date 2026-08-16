@@ -305,6 +305,8 @@ pub fn split_section_at_index(
             scale: section.scale,
             is_user_defined: true, // Mark as user-modified
             stability: 0.0,        // Needs recalculation
+            elevation_gain_m: None,
+            avg_grade_percent: None,
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),
@@ -329,6 +331,8 @@ pub fn split_section_at_index(
             scale: section.scale,
             is_user_defined: true,
             stability: 0.0, // Needs recalculation
+            elevation_gain_m: None,
+            avg_grade_percent: None,
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),

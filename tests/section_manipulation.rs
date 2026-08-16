@@ -102,6 +102,8 @@ fn test_find_sections_in_route() {
         consensus_state: None,
         updated_at: None,
         stability: 0.5,
+        elevation_gain_m: None,
+        avg_grade_percent: None,
     };
 
     let config = SectionConfig::default();
@@ -172,6 +174,8 @@ fn test_split_section_at_index() {
         consensus_state: None,
         updated_at: None,
         stability: 0.5,
+        elevation_gain_m: None,
+        avg_grade_percent: None,
     };
 
     // Split at index 50
@@ -247,6 +251,8 @@ fn test_split_section_at_point() {
         consensus_state: None,
         updated_at: None,
         stability: 0.5,
+        elevation_gain_m: None,
+        avg_grade_percent: None,
     };
 
     // Split at the midpoint (approximately index 50)
@@ -329,6 +335,8 @@ fn test_recalculate_section_polyline() {
         consensus_state: None,
         updated_at: None,
         stability: 0.5,
+        elevation_gain_m: None,
+        avg_grade_percent: None,
     };
 
     let config = SectionConfig::default();

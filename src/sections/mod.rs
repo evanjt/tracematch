@@ -566,6 +566,16 @@ pub struct FrequentSection {
     #[serde(default)]
     pub stability: f64,
 
+    /// Elevation gain (m) over the representative slice, hysteresis
+    /// accumulated; None when the slice lacks elevation coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation_gain_m: Option<f64>,
+
+    /// Net grade (%) over the representative slice; None with
+    /// `elevation_gain_m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_grade_percent: Option<f64>,
+
     /// Number of times this section has been recalibrated
     #[serde(default = "default_version")]
     pub version: u32,
@@ -867,6 +877,8 @@ pub fn process_cluster(
         scale: scale_name,
         is_user_defined: false,
         stability,
+        elevation_gain_m: None,
+        avg_grade_percent: None,
         version: 1,
         updated_at: None,
         created_at: None,
