@@ -60,6 +60,15 @@
 //!    different days. Boundaries, visits, and evidence are untouched —
 //!    only the reference pick is coordinated, and never across ground
 //!    no single pass actually connected.
+//! 8. **Lift exclusion.** Spans a track was carried rather than
+//!    travelled are excluded before they can raise a candidate
+//!    ([`confirmed_lift_spans_tuned`]): sustained climb against no
+//!    effort, confirmed across tracks so a single odd ascent cannot
+//!    veto real ground. Elevation is required to raise a candidate at
+//!    all, so this is inert on a track carrying none.
+//! 9. **Reasons as data.** Every surviving boundary and every backed-off
+//!    candidate records why, as a [`BoundaryRecord`] rather than a log
+//!    line, so the decision is inspectable after the fact.
 
 use super::density_grid::{CellGrid, bresenham_cells, runs_in_cells};
 use super::identity::{IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground};
@@ -304,8 +313,8 @@ pub struct Tunables {
     /// is rendered instead, and a candidate with no pass under the
     /// floor backs off as a junction blob. Wide margin on the review
     /// corpora: kept single passes and clean laps measure <= 0.14, a
-    /// mid-line spin 0.34, a directionless junction 0.60; the plateau
-    /// sweep lands with A1.
+    /// mid-line spin 0.34, a directionless junction 0.60. The plateau
+    /// sweep is done; these values sit in its flat middle.
     pub self_pass_max: f64,
     /// Clean-render bar: the default render (longest portion, or the
     /// medoid) keeps its stability privilege only while essentially
@@ -315,7 +324,7 @@ pub struct Tunables {
     /// penalty's blind band: a knot 100-200 m along-trace is charged
     /// by [`self_pass_penalty`] but too tight for the dwell cut).
     /// Sits above the clean-line noise floor (straight passes measure
-    /// < 0.02); plateau sweep beside `self_pass_max`.
+    /// < 0.02). Swept beside `self_pass_max`.
     pub self_pass_clean: f64,
     /// Majority-render bar: the longest contiguous stretch of a
     /// rendered line allowed on minority ground (supported by fewer
@@ -327,7 +336,7 @@ pub struct Tunables {
     /// sustained run marks a variant walk; scattered single samples (a
     /// staircase jog, an end taper) never trip it. Three samples at
     /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
-    /// floor; plateau sweep beside `self_pass_max`.
+    /// floor. Swept beside `self_pass_max`.
     pub minority_run_m: f64,
     /// Occasion span floor, in hours. Support counts distinct calendar
     /// DAYS, and — when every visit is dated — additionally requires
