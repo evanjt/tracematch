@@ -3398,6 +3398,7 @@ fn unify_chain_references(
         sections[m].polyline = pts[s..e].to_vec();
         sections[m].distance_meters = crate::matching::calculate_route_distance(&pts[s..e]);
         sections[m].representative_activity_id = sport_tracks[t].0.to_string();
+        sections[m].representative_range = Some((s as u32, e as u32));
     }
 }
 
@@ -4580,6 +4581,7 @@ fn detect_for_cluster_with_grid(
                 crate::matching::calculate_route_distance(&section.polyline)
             };
             section.representative_activity_id = sport_tracks[t_idx].0.to_string();
+            section.representative_range = Some((rs as u32, re as u32));
             // Counts and junctions follow the DRAWN line. The medoid
             // line they were first computed against is a selection
             // artefact: a pass-weighted medoid shifts with new laps,
@@ -4906,6 +4908,10 @@ fn reconcile_seam_overruns(sections: &mut [FrequentSection], ref_lat: f64, min_l
         }
         sections[i].polyline = kept.to_vec();
         sections[i].distance_meters = kept_m;
+        // The clip is relative to the line, so the range shifts with it.
+        sections[i].representative_range = sections[i]
+            .representative_range
+            .map(|(start, _)| (start + s as u32, start + e as u32));
     }
 }
 
@@ -6950,6 +6956,7 @@ mod seam_tests {
             sport_type: "All".to_string(),
             polyline: pts,
             representative_activity_id: "a".to_string(),
+            representative_range: None,
             activity_ids: vec!["a".to_string()],
             activity_portions: Vec::new(),
             route_ids: Vec::new(),

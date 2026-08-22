@@ -137,6 +137,9 @@ fn process_fold_section(section: FrequentSection, config: &SectionConfig) -> Vec
                 let mut outbound = section.clone();
                 outbound.id = format!("{}_out", section.id);
                 outbound.polyline = outbound_polyline;
+                outbound.representative_range = section
+                    .representative_range
+                    .map(|(start, _)| (start, start + fold_idx as u32));
                 outbound.distance_meters = outbound_length;
                 // Update activity traces to only include outbound portion
                 outbound.activity_traces = HashMap::new(); // Will be recomputed
@@ -151,6 +154,9 @@ fn process_fold_section(section: FrequentSection, config: &SectionConfig) -> Vec
                 let mut return_section = section.clone();
                 return_section.id = format!("{}_ret", section.id);
                 return_section.polyline = return_polyline;
+                return_section.representative_range = section
+                    .representative_range
+                    .map(|(start, end)| (start + fold_idx as u32, end));
                 return_section.distance_meters = return_length;
                 return_section.activity_traces = HashMap::new();
                 result.push(return_section);
@@ -291,6 +297,9 @@ fn process_heading_section(section: FrequentSection) -> Vec<FrequentSection> {
             let mut new_section = section.clone();
             new_section.id = format!("{}_h{}", section.id, split_count);
             new_section.polyline = seg_polyline;
+            new_section.representative_range = section
+                .representative_range
+                .map(|(start, _)| (start + seg_start as u32, start + seg_end as u32));
             new_section.distance_meters = seg_length;
             new_section.activity_traces = HashMap::new();
             result.push(new_section);
@@ -515,6 +524,9 @@ fn process_gradient_section(section: FrequentSection) -> Vec<FrequentSection> {
             let mut new_section = section.clone();
             new_section.id = format!("{}_g{}", section.id, split_count);
             new_section.polyline = seg_polyline;
+            new_section.representative_range = section
+                .representative_range
+                .map(|(start, _)| (start + seg_start as u32, start + seg_end as u32));
             new_section.distance_meters = seg_length;
             new_section.activity_traces = HashMap::new();
             result.push(new_section);
@@ -1146,6 +1158,13 @@ fn split_section_by_density(
     for (split_idx, candidate) in candidates.iter().enumerate() {
         // Extract the high-density portion
         let split_polyline = section.polyline[candidate.start_idx..=candidate.end_idx].to_vec();
+        // Inclusive end on the parent line, half-open on the track.
+        let split_range = section.representative_range.map(|(start, _)| {
+            (
+                start + candidate.start_idx as u32,
+                start + candidate.end_idx as u32 + 1,
+            )
+        });
         let split_density = section.point_density[candidate.start_idx..=candidate.end_idx].to_vec();
         let split_distance = calculate_route_distance(&split_polyline);
 
@@ -1217,6 +1236,7 @@ fn split_section_by_density(
                 sport_type: section.sport_type.clone(),
                 polyline: split_polyline,
                 representative_activity_id: section.representative_activity_id.clone(),
+                representative_range: split_range,
                 activity_ids: split_activity_ids,
                 activity_portions: split_activity_portions,
                 route_ids: section.route_ids.clone(),
@@ -1431,6 +1451,7 @@ mod tests {
             sport_type: "Run".to_string(),
             polyline: reference.clone(),
             representative_activity_id: activity_id_strings[0].clone(),
+            representative_range: None,
             activity_ids: activity_id_strings.clone(),
             activity_portions: Vec::new(),
             route_ids: vec![],
@@ -1528,6 +1549,7 @@ mod tests {
                 .map(|i| GpsPoint::new(45.0 + (i as f64) * 0.0001, 7.0))
                 .collect(),
             representative_activity_id: String::new(),
+            representative_range: None,
             activity_ids: (0..visits).map(|i| format!("a_{i}")).collect(),
             activity_portions: Vec::new(),
             route_ids: vec![],

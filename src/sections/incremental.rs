@@ -245,6 +245,7 @@ pub fn detect_sections_incremental(
                     && consensus.polyline.len() >= 2
                 {
                     updated.polyline = consensus.polyline;
+                    updated.representative_range = None;
                     updated.distance_meters = calculate_route_distance(&updated.polyline);
                     updated.confidence = consensus.confidence;
                     updated.observation_count = consensus.observation_count;
@@ -385,6 +386,7 @@ mod tests {
             sport_type: sport.to_string(),
             polyline: vec![GpsPoint::new(0.0, 0.0); 2],
             representative_activity_id: String::new(),
+            representative_range: None,
             activity_ids: vec![],
             activity_portions: vec![],
             route_ids: vec![],

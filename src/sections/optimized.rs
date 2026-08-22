@@ -284,6 +284,16 @@ pub fn split_section_at_index(
 
     let base_id = section.id.trim_end_matches(char::is_numeric);
 
+    // Both halves are index slices of the parent line, so each keeps a real
+    // range into the same activity.
+    let split = split_index as u32;
+    let first_range = section
+        .representative_range
+        .map(|(start, _)| (start, start + split + 1));
+    let second_range = section
+        .representative_range
+        .map(|(start, end)| (start + split, end));
+
     Some(SplitResult {
         first: FrequentSection {
             id: format!("{}_a", base_id),
@@ -291,6 +301,7 @@ pub fn split_section_at_index(
             sport_type: section.sport_type.clone(),
             polyline: first_polyline,
             representative_activity_id: section.representative_activity_id.clone(),
+            representative_range: first_range,
             activity_ids: section.activity_ids.clone(),
             activity_portions: vec![], // Need recalculation
             route_ids: section.route_ids.clone(),
@@ -318,6 +329,7 @@ pub fn split_section_at_index(
             sport_type: section.sport_type.clone(),
             polyline: second_polyline,
             representative_activity_id: section.representative_activity_id.clone(),
+            representative_range: second_range,
             activity_ids: section.activity_ids.clone(),
             activity_portions: vec![],
             route_ids: section.route_ids.clone(),
@@ -439,6 +451,8 @@ pub fn recalculate_section_polyline(
         observation_count: consensus.observation_count,
         version: section.version + 1,
         stability,
+        // Averaging leaves the line a slice of nothing, so the range dies here.
+        representative_range: None,
         ..section.clone()
     }
 }
