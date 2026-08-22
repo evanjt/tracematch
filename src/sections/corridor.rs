@@ -746,8 +746,7 @@ fn skeleton_segment_to_section(
         sport_type: sport_type.to_string(),
         polyline,
         representative_activity_id: rep_id,
-        // An evolved consensus line is a slice of no single activity.
-        representative_range: None,
+        representative_range: Some((best.start as u32, best.end as u32)),
         visit_count: activity_ids.len() as u32,
         activity_ids,
         activity_portions,
@@ -962,7 +961,7 @@ pub(super) fn detect_sections_via_corridor(
             sport_type: section_sport,
             polyline,
             representative_activity_id: rep_id,
-            representative_range: None,
+            representative_range: Some((best.start as u32, best.end as u32)),
             visit_count: activity_ids.len() as u32,
             activity_ids,
             activity_portions,
