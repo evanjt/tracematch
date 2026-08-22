@@ -520,6 +520,10 @@ pub struct FrequentSection {
     /// Which activity provided the initial representative polyline (medoid)
     #[serde(alias = "representative_activity_id")]
     pub representative_activity_id: String,
+    /// Half-open range into the representative's track that `polyline` was
+    /// sliced from. `None` for an averaged line, which is a slice of nothing.
+    #[serde(default, alias = "representative_range")]
+    pub representative_range: Option<(u32, u32)>,
     /// All activity IDs that traverse this section
     #[serde(alias = "activity_ids")]
     pub activity_ids: Vec<String>,
@@ -854,6 +858,7 @@ pub fn process_cluster(
         sport_type: sport_type.to_string(),
         polyline: consensus.polyline,
         representative_activity_id: representative_id,
+        representative_range: None,
         // The section's POPULATION, from discovery. Rule 8 leans on it:
         // two lines on the same ground are duplicates only when the same
         // users travel both, so the other bank of a river stays its own

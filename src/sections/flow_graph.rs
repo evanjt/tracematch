@@ -557,6 +557,7 @@ fn edge_to_section(
         sport_type: section_sport,
         polyline,
         representative_activity_id: rep_id,
+        representative_range: None,
         visit_count: activity_ids.len() as u32,
         activity_ids,
         activity_portions,
