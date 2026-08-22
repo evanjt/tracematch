@@ -396,9 +396,15 @@ fn fold_traces_with_optional_cache(
                 if pts.is_empty() {
                     return None;
                 }
+                // A cached tree indexes the array it was built from. Callers
+                // key the cache by activity id, and the same id can arrive here
+                // as a full track or as a portion of one, so trust the cache
+                // only when it indexes this array. The cache is an
+                // optimisation; a mismatch must cost a rebuild, not a panic in
+                // `trace[nearest.idx]`.
                 let tree = match cached {
-                    Some(t) => t.clone(),
-                    None => std::sync::Arc::new(build_rtree(pts)),
+                    Some(t) if t.size() == pts.len() => t.clone(),
+                    _ => std::sync::Arc::new(build_rtree(pts)),
                 };
                 Some((id.clone(), *pts, tree))
             })
@@ -410,9 +416,15 @@ fn fold_traces_with_optional_cache(
                 if pts.is_empty() {
                     return None;
                 }
+                // A cached tree indexes the array it was built from. Callers
+                // key the cache by activity id, and the same id can arrive here
+                // as a full track or as a portion of one, so trust the cache
+                // only when it indexes this array. The cache is an
+                // optimisation; a mismatch must cost a rebuild, not a panic in
+                // `trace[nearest.idx]`.
                 let tree = match cached {
-                    Some(t) => t.clone(),
-                    None => std::sync::Arc::new(build_rtree(pts)),
+                    Some(t) if t.size() == pts.len() => t.clone(),
+                    _ => std::sync::Arc::new(build_rtree(pts)),
                 };
                 Some((id.clone(), *pts, tree))
             })
