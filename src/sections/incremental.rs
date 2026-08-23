@@ -222,10 +222,15 @@ pub fn detect_sections_incremental(
                         .filter(|id| !new_ids_to_fold.contains(id))
                         .cloned()
                         .collect();
-                    let pre_traces_map =
+                    let mut pre_traces_map =
                         extract_all_activity_traces(&pre_update_ids, &updated.polyline, &track_map);
-                    let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> =
-                        pre_traces_map.into_iter().collect();
+                    // The fold is order-sensitive and HashMap iteration is
+                    // randomised per run, so walk the section's own activity
+                    // order instead of the map's.
+                    let mut all_traces_pairs: Vec<(String, Vec<GpsPoint>)> = pre_update_ids
+                        .iter()
+                        .filter_map(|id| pre_traces_map.remove(id).map(|t| (id.clone(), t)))
+                        .collect();
                     all_traces_pairs.extend(new_traces_for_section);
 
                     let mut acc = ConsensusAccumulator::new(updated.polyline.clone());
