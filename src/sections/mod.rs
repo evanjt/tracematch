@@ -786,15 +786,11 @@ pub fn process_cluster(
         v.sort();
         v
     };
-    let activity_traces_for_consensus =
-        extract_all_activity_traces(&activity_id_vec, &representative_polyline, track_map);
-
-    // Collect all traces in sorted-activity-id order so consensus is
-    // deterministic. (HashMap::values() iteration order is randomized.)
-    let all_traces: Vec<Vec<GpsPoint>> = activity_id_vec
-        .iter()
-        .filter_map(|id| activity_traces_for_consensus.get(id).cloned())
-        .collect();
+    let all_traces: Vec<Vec<GpsPoint>> =
+        extract_all_activity_traces(&activity_id_vec, &representative_polyline, track_map)
+            .into_iter()
+            .map(|(_, trace)| trace)
+            .collect();
 
     // Compute consensus polyline from all overlapping tracks
     let consensus = compute_consensus_polyline(
