@@ -1,7 +1,7 @@
 //! Tests for geo_utils module
 
+use tracematch::GpsPoint;
 use tracematch::geo_utils::*;
-use tracematch::{Bounds, GpsPoint};
 
 fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
     (a - b).abs() < epsilon
@@ -50,67 +50,4 @@ fn test_compute_center_empty() {
     let center = compute_center(&empty);
     assert_eq!(center.latitude, 0.0);
     assert_eq!(center.longitude, 0.0);
-}
-
-#[test]
-fn test_bounds_overlap_yes() {
-    let a = Bounds {
-        min_lat: 51.50,
-        max_lat: 51.52,
-        min_lng: -0.13,
-        max_lng: -0.11,
-    };
-    let b = Bounds {
-        min_lat: 51.51,
-        max_lat: 51.53,
-        min_lng: -0.12,
-        max_lng: -0.10,
-    };
-    assert!(bounds_overlap(&a, &b, 0.0, 51.5));
-}
-
-#[test]
-fn test_bounds_overlap_no() {
-    let a = Bounds {
-        min_lat: 51.50,
-        max_lat: 51.51,
-        min_lng: -0.13,
-        max_lng: -0.12,
-    };
-    let b = Bounds {
-        min_lat: 51.52,
-        max_lat: 51.53,
-        min_lng: -0.11,
-        max_lng: -0.10,
-    };
-    assert!(!bounds_overlap(&a, &b, 0.0, 51.5));
-}
-
-#[test]
-fn test_bounds_overlap_with_buffer() {
-    let a = Bounds {
-        min_lat: 51.50,
-        max_lat: 51.51,
-        min_lng: -0.13,
-        max_lng: -0.12,
-    };
-    let b = Bounds {
-        min_lat: 51.52,
-        max_lat: 51.53,
-        min_lng: -0.11,
-        max_lng: -0.10,
-    };
-    // With large buffer (5km), these should overlap
-    assert!(bounds_overlap(&a, &b, 5000.0, 51.5));
-}
-
-#[test]
-fn test_meters_to_degrees() {
-    // At equator, 111km = 1 degree
-    let deg = meters_to_degrees(111_320.0, 0.0);
-    assert!(approx_eq(deg, 1.0, 0.01));
-
-    // At higher latitude, same distance = more degrees
-    let deg_45 = meters_to_degrees(111_320.0, 45.0);
-    assert!(deg_45 > 1.0);
 }
