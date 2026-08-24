@@ -1054,10 +1054,14 @@ fn fold_track_into_grid(
     // of its fine-cell classes (ties to the lower class), so one
     // double-clipped fine cell can't relabel a whole corridor cell.
     let mut per_cell: HashMap<Cell, [u32; PASS_CLASS_MAX as usize]> = HashMap::new();
+    // Counts per cell, and addition does not care about arrival order.
+    #[allow(clippy::iter_over_hash_type)]
     for (_, (pc, sc)) in scratch {
         let class = sc.levels.iter().map(|&(_, n)| n).max().unwrap_or(1);
         per_cell.entry(pc).or_default()[(class - 1) as usize] += 1;
     }
+    // Each cell's mode is computed and stored independently of the others.
+    #[allow(clippy::iter_over_hash_type)]
     for (pc, counts) in per_cell {
         let mode = counts
             .iter()
@@ -1098,6 +1102,8 @@ fn pass_classes_agree(coverage: &CoverageGrid, a: Cell, b: Cell, divergence: f64
     };
     let mut shared = 0usize;
     let mut mismatch = 0usize;
+    // Both bodies only advance counters.
+    #[allow(clippy::iter_over_hash_type)]
     for (t, ca) in pa {
         if let Some(cb) = pb.get(t) {
             shared += 1;
@@ -1401,6 +1407,8 @@ fn join_usage_mismatch(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> (usiz
         else {
             continue;
         };
+        // Both bodies only advance counters.
+        #[allow(clippy::iter_over_hash_type)]
         for (t, ka) in pa {
             if let Some(kb) = pb.get(t) {
                 shared += 1;
@@ -2159,6 +2167,8 @@ impl LineMatcher {
         }
         // One ring of jitter tolerance mid-run, as portions_for grants.
         let mut dilated: HashSet<Cell> = HashSet::with_capacity(core.len() * 9);
+        // Builds a set, so only membership survives.
+        #[allow(clippy::iter_over_hash_type)]
         for c in &core {
             for dy in -1..=1i32 {
                 for dx in -1..=1i32 {
@@ -2722,6 +2732,8 @@ fn candidate_support(
     // Cell bounding box: most of a contributor's outing is nowhere near
     // the candidate, and four compares are far cheaper than a set probe.
     let (mut y0, mut y1, mut x0, mut x1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    // A bounding box over min and max, which is commutative.
+    #[allow(clippy::iter_over_hash_type)]
     for c in cell_set {
         y0 = y0.min(c.0);
         y1 = y1.max(c.0);
@@ -2729,6 +2741,8 @@ fn candidate_support(
         x1 = x1.max(c.1);
     }
     let mut cell_tracks_local: HashMap<Cell, Vec<&str>> = HashMap::new();
+    // Per-contributor work landing on distinct keys.
+    #[allow(clippy::iter_over_hash_type)]
     for &t in &contributors {
         let pts = sport_tracks[t].1;
         let mut touched: HashSet<Cell> = HashSet::new();
@@ -2767,6 +2781,8 @@ fn candidate_support(
             })
             .collect();
         let id = sport_tracks[t].0;
+        // The ids in a cell feed cell_support_days, which returns a set size.
+        #[allow(clippy::iter_over_hash_type)]
         for c in dilated {
             cell_tracks_local.entry(c).or_default().push(id);
         }
@@ -3389,6 +3405,8 @@ fn unify_chain_references(
         chosen.insert(mb, (ti, mid, eb));
     }
 
+    // Each iteration writes one section, keyed by the member it came from.
+    #[allow(clippy::iter_over_hash_type)]
     for (&m, &(t, s, e)) in &chosen {
         let pts = sport_tracks[t].1;
         let e = e.min(pts.len());
@@ -6016,6 +6034,8 @@ fn fold_by_sport(
     if leaves.drawn.len() > MEMO_DRAWN_CAP {
         leaves.drawn.clear();
     }
+    // Each cluster is recomputed on its own.
+    #[allow(clippy::iter_over_hash_type)]
     for (sport, clusters) in cache.sports.iter_mut() {
         for c in clusters.iter_mut() {
             if c.dirty {
