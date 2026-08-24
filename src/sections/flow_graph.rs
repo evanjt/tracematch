@@ -18,6 +18,11 @@
 //!    derived from cell centers and route/activity counts from the
 //!    inverted index.
 
+// Corridor and FlowGraph are retired detectors kept only as the migration
+// fallback until they are deleted. They carry order-dependent traversals
+// that are not worth repairing on a path that is going away.
+#![allow(clippy::iter_over_hash_type)]
+
 use super::density_grid::{CellGrid, bresenham_cells};
 use super::{FrequentSection, SectionConfig};
 use crate::GpsPoint;

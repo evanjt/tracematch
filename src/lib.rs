@@ -37,6 +37,12 @@
 //! }
 //! ```
 
+// A hash container that escapes a function boundary carries its per-construction
+// seed into whatever the caller derives from the order. Warn rather than deny:
+// this crate is published, and a denied lint becomes a downstream build failure
+// on a future toolchain. CI supplies `-D` for this one lint.
+#![warn(clippy::iter_over_hash_type)]
+
 use geo::{Coord, LineString, algorithm::simplify::Simplify};
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -347,6 +347,9 @@ pub(super) fn detect_clusters_via_density(
     // Phase B: inverted index cell → tracks.
     let mut cell_to_tracks: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
     for (t_idx, cells) in track_cells.iter().enumerate() {
+        // The set picks which entries are touched, not the order within one:
+        // every vec still receives t_idx ascending from the outer walk.
+        #[allow(clippy::iter_over_hash_type)]
         for c in cells {
             cell_to_tracks.entry(*c).or_default().push(t_idx as u32);
         }
