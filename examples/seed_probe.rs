@@ -98,12 +98,11 @@ fn seed(
             continue;
         }
         scans += section.activity_ids.len();
-        let traces_map =
+        let traces =
             extract_all_activity_traces(&section.activity_ids, &section.polyline, &track_map);
-        if traces_map.is_empty() {
+        if traces.is_empty() {
             continue;
         }
-        let traces: Vec<(String, Vec<GpsPoint>)> = traces_map.into_iter().collect();
         let acc = build_accumulator_from_traces(&section.polyline, &traces, proximity_threshold);
         section.consensus_state = Some(acc);
         seeded += 1;

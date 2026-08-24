@@ -110,16 +110,23 @@ pub fn extract_activity_trace(
 }
 
 /// Extract activity traces for all activities in a section.
-/// Returns a map of activity_id -> overlapping GPS points
+///
+/// Returns `(activity_id, overlapping GPS points)` in `activity_ids` order, and
+/// activities with no overlap are dropped. The order is part of the contract:
+/// the consensus accumulator folds these sequentially, so a caller that received
+/// a map would fold in hash order and produce a different line on every run.
+/// A pair list also admits two entries for one activity, which a map cannot.
 pub fn extract_all_activity_traces(
     activity_ids: &[String],
     section_polyline: &[GpsPoint],
     track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
-) -> std::collections::HashMap<String, Vec<GpsPoint>> {
+) -> Vec<(String, Vec<GpsPoint>)> {
     let polyline_tree = build_rtree(section_polyline);
 
+    // `filter_map` + `collect` into a `Vec` concatenates rayon's per-thread
+    // buffers left to right, so this stays parallel and stays in source order.
     #[cfg(feature = "parallel")]
-    let traces: std::collections::HashMap<String, Vec<GpsPoint>> = activity_ids
+    let traces: Vec<(String, Vec<GpsPoint>)> = activity_ids
         .par_iter()
         .filter_map(|activity_id| {
             track_map.get(activity_id.as_str()).and_then(|track| {
@@ -134,7 +141,7 @@ pub fn extract_all_activity_traces(
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let traces: std::collections::HashMap<String, Vec<GpsPoint>> = activity_ids
+    let traces: Vec<(String, Vec<GpsPoint>)> = activity_ids
         .iter()
         .filter_map(|activity_id| {
             track_map.get(activity_id.as_str()).and_then(|track| {
