@@ -3,7 +3,7 @@
 //! This module provides functionality to group similar routes together
 //! using spatial indexing and Union-Find for efficient grouping.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::geo_utils::haversine_distance;
 use crate::grouping_filter::{
@@ -598,7 +598,7 @@ fn compute_matches_and_split(
 
 /// Build RouteGroup instances with full metadata from grouped activity IDs.
 fn build_route_groups(
-    groups_map: HashMap<String, Vec<String>>,
+    groups_map: BTreeMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
 ) -> Vec<RouteGroup> {
     build_route_groups_with_existing_reps(groups_map, sig_map, &HashMap::new())
@@ -607,7 +607,7 @@ fn build_route_groups(
 /// Build RouteGroup instances, preserving existing representatives when available.
 /// This ensures incremental loading produces stable results.
 fn build_route_groups_with_existing_reps(
-    groups_map: HashMap<String, Vec<String>>,
+    groups_map: BTreeMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
     existing_reps: &HashMap<String, String>,
 ) -> Vec<RouteGroup> {

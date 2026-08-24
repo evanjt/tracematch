@@ -3,7 +3,7 @@
 //! This module provides a generic Union-Find implementation with path compression
 //! for efficient grouping operations. Used by route grouping algorithms.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
 /// Union-Find data structure with path compression.
@@ -120,18 +120,21 @@ impl<T: Eq + Hash + Clone + Ord> UnionFind<T> {
     }
 
     /// Get all unique groups as a map from root -> members.
-    /// Members within each group are sorted for deterministic iteration.
-    pub fn groups(&mut self) -> HashMap<T, Vec<T>> {
+    ///
+    /// Ordered by root, and members within each group are sorted, so a caller
+    /// that folds or enumerates the result gets the same answer on every run.
+    /// A `HashMap` here would carry a per-construction hash seed into whatever
+    /// the caller derives from the order.
+    pub fn groups(&mut self) -> BTreeMap<T, Vec<T>> {
         let mut items: Vec<T> = self.parent.keys().cloned().collect();
-        items.sort(); // Deterministic iteration order
-        let mut groups: HashMap<T, Vec<T>> = HashMap::new();
+        items.sort();
+        let mut groups: BTreeMap<T, Vec<T>> = BTreeMap::new();
 
         for item in items {
             let root = self.find(&item);
             groups.entry(root).or_default().push(item);
         }
 
-        // Sort members within each group for determinism
         for members in groups.values_mut() {
             members.sort();
         }

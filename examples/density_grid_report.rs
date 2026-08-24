@@ -337,7 +337,7 @@ fn detect_via_density_grid(
     }
 
     // Group cells by root representative
-    let components: HashMap<(i32, i32), Vec<(i32, i32)>> = uf.groups();
+    let components: std::collections::BTreeMap<(i32, i32), Vec<(i32, i32)>> = uf.groups();
     stats.components = components.len();
     stats.connect_ms = t0.elapsed().as_millis();
 
