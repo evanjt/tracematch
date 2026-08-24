@@ -19,7 +19,7 @@ pub fn select_medoid(
     // Every pass is its own candidate, keyed by (activity, range): the
     // medoid is weighted by traversal, so lapped ground is represented
     // by its typical revolution, not by whichever pass came first.
-    let mut traces: Vec<(&str, Vec<GpsPoint>)> = Vec::new();
+    let mut candidates: Vec<(&str, usize, usize, Vec<GpsPoint>)> = Vec::new();
     let mut seen: std::collections::HashSet<(&str, usize, usize)> =
         std::collections::HashSet::new();
 
@@ -34,7 +34,7 @@ pub fn select_medoid(
             let end = overlap.range_a.1.min(track.len());
             let points = track[overlap.range_a.0..end].to_vec();
             if !points.is_empty() {
-                traces.push((&overlap.activity_a, points));
+                candidates.push((&overlap.activity_a, overlap.range_a.0, end, points));
             }
         }
         // Add track B's overlapping portion
@@ -47,10 +47,24 @@ pub fn select_medoid(
             let end = overlap.range_b.1.min(track.len());
             let points = track[overlap.range_b.0..end].to_vec();
             if !points.is_empty() {
-                traces.push((&overlap.activity_b, points));
+                candidates.push((&overlap.activity_b, overlap.range_b.0, end, points));
             }
         }
     }
+
+    // The overlaps arrive in whatever order the caller assembled them, and both
+    // the sampled comparison set and the first-wins tie-breaks below read
+    // positions. Canonicalise by (activity, range) so the medoid is a function
+    // of the candidate set rather than of its arrangement.
+    candidates.sort_by(|a, b| {
+        a.0.cmp(b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let traces: Vec<(&str, Vec<GpsPoint>)> = candidates
+        .into_iter()
+        .map(|(id, _, _, pts)| (id, pts))
+        .collect();
 
     if traces.is_empty() {
         return (String::new(), Vec::new());
@@ -119,7 +133,7 @@ pub fn select_medoid(
                         .sum();
                     (i, total)
                 })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
                 .unwrap_or((0, f64::MAX));
             best_idx = idx;
         }
