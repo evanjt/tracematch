@@ -12,8 +12,6 @@
 //! | [`haversine_distance`] | Great-circle distance between two GPS points |
 //! | [`compute_bounds`] | Bounding box of a GPS track |
 //! | [`compute_center`] | Centroid of a GPS track |
-//! | [`bounds_overlap`] | Check if two bounding boxes overlap |
-//! | [`meters_to_degrees`] | Convert meters to approximate degrees at a latitude |
 //!
 //! ## Example
 //!
@@ -95,38 +93,6 @@ pub fn haversine_distance(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
     Haversine::distance(point1, point2)
 }
 
-/// Convert meters to approximate degrees at a given latitude.
-///
-/// Uses the WGS84 ellipsoid approximation for latitude-dependent conversion.
-/// More accurate at the given latitude than a fixed conversion factor.
-///
-/// # Arguments
-///
-/// * `meters` - Distance in meters to convert
-/// * `latitude` - Reference latitude for the conversion (in degrees)
-///
-/// # Returns
-///
-/// Approximate distance in degrees.
-///
-/// # Notes
-///
-/// - At the equator, 1 degree ≈ 111,320 meters
-/// - At 45°N/S, 1 degree ≈ 78,710 meters (longitude) / 111,132 meters (latitude)
-/// - At the poles, longitude degrees become meaningless
-///
-/// This function returns a single value suitable for bounding box calculations
-/// where a square search area is acceptable.
-#[inline]
-pub fn meters_to_degrees(meters: f64, latitude: f64) -> f64 {
-    // At the equator, 1 degree ≈ 111,320 meters
-    // This decreases with cos(latitude) for longitude
-    // For simplicity, use a conservative (larger) value based on latitude
-    let lat_rad = latitude.to_radians();
-    let meters_per_degree = 111_320.0 * lat_rad.cos().max(0.1);
-    meters / meters_per_degree
-}
-
 // =============================================================================
 // Bounding Box Functions
 // =============================================================================
@@ -169,52 +135,6 @@ pub fn compute_bounds(points: &[GpsPoint]) -> Bounds {
         min_lng: f64::MAX,
         max_lng: f64::MIN,
     })
-}
-
-/// Check if two bounding boxes overlap, with an optional buffer.
-///
-/// Useful for quick spatial filtering before expensive point-by-point comparisons.
-/// Two tracks with non-overlapping bounds cannot share any common points.
-///
-/// # Arguments
-///
-/// * `a` - First bounding box
-/// * `b` - Second bounding box
-/// * `buffer_meters` - Buffer distance in meters to expand the overlap check
-/// * `reference_lat` - Reference latitude for meter-to-degree conversion
-///
-/// # Returns
-///
-/// `true` if the bounding boxes overlap (including buffer), `false` otherwise.
-///
-/// # Example
-///
-/// ```rust
-/// use tracematch::{Bounds, geo_utils};
-///
-/// let bounds_a = Bounds {
-///     min_lat: 51.50, max_lat: 51.51,
-///     min_lng: -0.13, max_lng: -0.12,
-/// };
-///
-/// let bounds_b = Bounds {
-///     min_lat: 51.505, max_lat: 51.515,
-///     min_lng: -0.125, max_lng: -0.115,
-/// };
-///
-/// // These bounds overlap
-/// assert!(geo_utils::bounds_overlap(&bounds_a, &bounds_b, 0.0, 51.5));
-///
-/// // With a large negative buffer, they might not
-/// // (negative buffer shrinks the overlap zone)
-/// ```
-pub fn bounds_overlap(a: &Bounds, b: &Bounds, buffer_meters: f64, reference_lat: f64) -> bool {
-    let buffer_deg = meters_to_degrees(buffer_meters, reference_lat);
-
-    !(a.max_lat + buffer_deg < b.min_lat
-        || b.max_lat + buffer_deg < a.min_lat
-        || a.max_lng + buffer_deg < b.min_lng
-        || b.max_lng + buffer_deg < a.min_lng)
 }
 
 // =============================================================================
