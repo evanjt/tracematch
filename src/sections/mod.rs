@@ -769,14 +769,19 @@ pub fn process_cluster(
     // Compute activity portions for pace comparison
     let activity_portions = compute_activity_portions(&representative_polyline, track_map, config);
 
-    // Collect route IDs
-    let route_ids: Vec<String> = cluster
-        .activity_ids
-        .iter()
-        .filter_map(|aid| activity_to_route.get(aid.as_str()).map(|s| s.to_string()))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Collect route IDs. Sorted after the dedupe, like `activity_id_vec` below:
+    // the set drains in hash order and this list is stored on the section.
+    let route_ids: Vec<String> = {
+        let mut ids: Vec<String> = cluster
+            .activity_ids
+            .iter()
+            .filter_map(|aid| activity_to_route.get(aid.as_str()).map(|s| s.to_string()))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        ids.sort();
+        ids
+    };
 
     // Extract traces for consensus computation only (not stored in section).
     // Sort for stable iteration order — HashSet iteration is randomized
