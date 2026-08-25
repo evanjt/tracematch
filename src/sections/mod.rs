@@ -57,7 +57,7 @@ pub use progress::{
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
 pub use consensus::{
-    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult, TraceRTreeCache,
+    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult, TraceKey, TraceRTreeCache,
     build_accumulator_from_traces, build_trace_rtree_cache, merge_traces_into_consensus,
     merge_traces_into_consensus_with_cache,
 };
@@ -73,7 +73,10 @@ pub(crate) use postprocess::{
     split_high_variance_sections,
 };
 pub use rtree::{IndexedPoint, build_rtree};
-pub use traces::{extract_activity_trace, extract_all_activity_traces};
+pub use traces::{
+    extract_activity_passes, extract_activity_trace, extract_all_activity_traces,
+    longest_pass_per_activity,
+};
 // Assign-once identity + hysteresis (B2): pure decision layer over the churny
 // batch catalogue. tracematch decides which candidate inherits which prior id;
 // the engine owns the id strings and the persistence.
