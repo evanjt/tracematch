@@ -14,8 +14,8 @@
 use super::optimized::find_sections_in_route;
 use super::progress::{DetectionPhase, DetectionProgressCallback};
 use super::{
-    ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion, build_trace_rtree_cache,
-    extract_all_activity_traces, merge_traces_into_consensus_with_cache,
+    ConsensusAccumulator, FrequentSection, SectionConfig, SectionPortion, TraceKey,
+    build_trace_rtree_cache, extract_all_activity_traces, merge_traces_into_consensus_with_cache,
 };
 use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint, RouteGroup};
@@ -139,7 +139,12 @@ pub fn detect_sections_incremental(
     // Tier 2.2: pre-build R-trees for every NEW track once. The same new
     // activity often touches multiple sections; reusing one Arc<RTree>
     // across all merge calls in this batch amortises the build cost.
-    let new_tracks_owned: Vec<(String, Vec<GpsPoint>)> = new_tracks.to_vec();
+    // A whole new track folds as that activity's pass 0; the per-pass
+    // split happens where traces are extracted against a section line.
+    let new_tracks_owned: Vec<(TraceKey, Vec<GpsPoint>)> = new_tracks
+        .iter()
+        .map(|(id, pts)| ((id.clone(), 0), pts.clone()))
+        .collect();
     let trace_rtree_cache = build_trace_rtree_cache(&new_tracks_owned);
 
     let mut updated_sections: Vec<FrequentSection> = Vec::with_capacity(existing_sections.len());
@@ -192,12 +197,12 @@ pub fn detect_sections_incremental(
                 let new_ids_to_fold: Vec<String> =
                     new_matches.iter().map(|(aid, _)| aid.clone()).collect();
 
-                let new_traces_for_section: Vec<(String, Vec<GpsPoint>)> = new_ids_to_fold
+                let new_traces_for_section: Vec<(TraceKey, Vec<GpsPoint>)> = new_ids_to_fold
                     .iter()
                     .filter_map(|aid| {
                         track_map
                             .get(aid.as_str())
-                            .map(|pts| (aid.clone(), pts.to_vec()))
+                            .map(|pts| ((aid.clone(), 0), pts.to_vec()))
                     })
                     .collect();
 

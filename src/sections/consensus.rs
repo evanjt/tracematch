@@ -58,9 +58,10 @@ pub struct ConsensusAccumulator {
     pub per_point: Vec<ConsensusPointAccumulator>,
     /// Number of traces folded in so far.
     pub trace_count: u32,
-    /// Activity IDs that have been folded in. Prevents double-counting
-    /// the same activity if incremental detection sees it twice.
-    pub absorbed_activity_ids: Vec<String>,
+    /// Traversals that have been folded in, keyed by activity and pass
+    /// index. Prevents double-counting the same pass if incremental
+    /// detection sees it twice, without collapsing an activity's laps.
+    pub absorbed_activity_ids: Vec<TraceKey>,
 }
 
 impl ConsensusAccumulator {
@@ -253,7 +254,7 @@ pub fn compute_consensus_polyline(
 /// done in a single pass so we avoid the duplicate R-tree builds.
 pub fn build_accumulator_from_traces(
     reference: &[GpsPoint],
-    traces: &[(String, Vec<GpsPoint>)],
+    traces: &[(TraceKey, Vec<GpsPoint>)],
     proximity_threshold: f64,
 ) -> ConsensusAccumulator {
     let mut accumulator = ConsensusAccumulator::new(reference.to_vec());
@@ -262,7 +263,7 @@ pub fn build_accumulator_from_traces(
         return accumulator;
     }
 
-    let trace_views: Vec<(String, &[GpsPoint])> = traces
+    let trace_views: Vec<(TraceKey, &[GpsPoint])> = traces
         .iter()
         .map(|(id, t)| (id.clone(), t.as_slice()))
         .collect();
@@ -276,19 +277,22 @@ pub fn build_accumulator_from_traces(
 /// across multiple sections in the same incremental run amortises the
 /// R-tree construction cost — important when many sections are touched
 /// by the same handful of new activities.
-pub type TraceRTreeCache = std::collections::HashMap<String, std::sync::Arc<RTree<IndexedPoint>>>;
+/// One traversal: the activity and its zero-based pass over the section.
+pub type TraceKey = (String, u32);
+
+pub type TraceRTreeCache = std::collections::HashMap<TraceKey, std::sync::Arc<RTree<IndexedPoint>>>;
 
 /// Build R-trees for every (id, points) pair in `traces`. Skips empty
 /// tracks. Suitable for sharing via [`merge_traces_into_consensus_with_cache`].
-pub fn build_trace_rtree_cache(traces: &[(String, Vec<GpsPoint>)]) -> TraceRTreeCache {
+pub fn build_trace_rtree_cache(traces: &[(TraceKey, Vec<GpsPoint>)]) -> TraceRTreeCache {
     #[cfg(feature = "parallel")]
-    let pairs: Vec<(String, std::sync::Arc<RTree<IndexedPoint>>)> = traces
+    let pairs: Vec<(TraceKey, std::sync::Arc<RTree<IndexedPoint>>)> = traces
         .par_iter()
-        .filter_map(|(id, pts)| {
+        .filter_map(|(key, pts)| {
             if pts.is_empty() {
                 None
             } else {
-                Some((id.clone(), std::sync::Arc::new(build_rtree(pts))))
+                Some((key.clone(), std::sync::Arc::new(build_rtree(pts))))
             }
         })
         .collect();
@@ -314,7 +318,7 @@ pub fn build_trace_rtree_cache(traces: &[(String, Vec<GpsPoint>)]) -> TraceRTree
 /// each section's merge reuses the same R-tree instead of rebuilding.
 pub fn merge_traces_into_consensus_with_cache(
     accumulator: &mut ConsensusAccumulator,
-    new_traces: &[(String, Vec<GpsPoint>)],
+    new_traces: &[(TraceKey, Vec<GpsPoint>)],
     cache: &TraceRTreeCache,
     proximity_threshold: f64,
 ) -> ConsensusResult {
@@ -328,19 +332,16 @@ pub fn merge_traces_into_consensus_with_cache(
         };
     }
 
-    let already: std::collections::HashSet<&str> = accumulator
-        .absorbed_activity_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let already: std::collections::HashSet<&TraceKey> =
+        accumulator.absorbed_activity_ids.iter().collect();
     let to_fold: Vec<(
-        String,
+        TraceKey,
         &[GpsPoint],
         Option<std::sync::Arc<RTree<IndexedPoint>>>,
     )> = new_traces
         .iter()
-        .filter(|(id, _)| !already.contains(id.as_str()))
-        .map(|(id, t)| (id.clone(), t.as_slice(), cache.get(id).cloned()))
+        .filter(|(key, _)| !already.contains(key))
+        .map(|(key, t)| (key.clone(), t.as_slice(), cache.get(key).cloned()))
         .collect();
 
     if !to_fold.is_empty() {
@@ -360,7 +361,7 @@ pub fn merge_traces_into_consensus_with_cache(
 /// double-counting in batched incremental runs.
 pub fn merge_traces_into_consensus(
     accumulator: &mut ConsensusAccumulator,
-    new_traces: &[(String, Vec<GpsPoint>)],
+    new_traces: &[(TraceKey, Vec<GpsPoint>)],
     proximity_threshold: f64,
 ) -> ConsensusResult {
     // Thin wrapper over the cached path with an empty cache. R-trees get
@@ -382,22 +383,22 @@ pub fn merge_traces_into_consensus(
 fn fold_traces_with_optional_cache(
     accumulator: &mut ConsensusAccumulator,
     traces: &[(
-        String,
+        TraceKey,
         &[GpsPoint],
         Option<std::sync::Arc<RTree<IndexedPoint>>>,
     )],
     proximity_threshold: f64,
 ) {
-    let owned: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
+    let owned: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
         #[cfg(feature = "parallel")]
-        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        let built: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
             .par_iter()
             .filter_map(|(id, pts, cached)| {
                 if pts.is_empty() {
                     return None;
                 }
                 // A cached tree indexes the array it was built from. Callers
-                // key the cache by activity id, and the same id can arrive here
+                // key the cache by traversal, and the same key can arrive here
                 // as a full track or as a portion of one, so trust the cache
                 // only when it indexes this array. The cache is an
                 // optimisation; a mismatch must cost a rebuild, not a panic in
@@ -410,14 +411,14 @@ fn fold_traces_with_optional_cache(
             })
             .collect();
         #[cfg(not(feature = "parallel"))]
-        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        let built: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
             .iter()
             .filter_map(|(id, pts, cached)| {
                 if pts.is_empty() {
                     return None;
                 }
                 // A cached tree indexes the array it was built from. Callers
-                // key the cache by activity id, and the same id can arrive here
+                // key the cache by traversal, and the same key can arrive here
                 // as a full track or as a portion of one, so trust the cache
                 // only when it indexes this array. The cache is an
                 // optimisation; a mismatch must cost a rebuild, not a panic in
@@ -447,13 +448,13 @@ fn fold_traces_with_optional_cache(
 /// `trace_count` and `absorbed_activity_ids`.
 fn fold_traces_into_accumulator(
     accumulator: &mut ConsensusAccumulator,
-    traces: &[(String, &[GpsPoint])],
+    traces: &[(TraceKey, &[GpsPoint])],
     proximity_threshold: f64,
 ) {
     // Build trees and delegate to the resolved-trees folder.
-    let resolved: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
+    let resolved: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = {
         #[cfg(feature = "parallel")]
-        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        let built: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
             .par_iter()
             .filter_map(|(id, pts)| {
                 if pts.is_empty() {
@@ -464,7 +465,7 @@ fn fold_traces_into_accumulator(
             })
             .collect();
         #[cfg(not(feature = "parallel"))]
-        let built: Vec<(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
+        let built: Vec<(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)> = traces
             .iter()
             .filter_map(|(id, pts)| {
                 if pts.is_empty() {
@@ -494,7 +495,7 @@ fn fold_traces_into_accumulator(
 /// ([`fold_traces_with_optional_cache`]).
 fn fold_resolved_into_accumulator(
     accumulator: &mut ConsensusAccumulator,
-    resolved: &[(String, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)],
+    resolved: &[(TraceKey, &[GpsPoint], std::sync::Arc<RTree<IndexedPoint>>)],
     proximity_threshold: f64,
 ) {
     if resolved.is_empty() {
@@ -670,8 +671,13 @@ mod tests {
     fn full_and_incremental_paths_produce_equivalent_polylines() {
         // Build 5 traces; full vs incremental-via-accumulator must match.
         let reference = make_corridor(47.37, 8.55, 80);
-        let traces: Vec<(String, Vec<GpsPoint>)> = (0..5)
-            .map(|i| (format!("a_{i}"), jitter(&reference, 1e-5, (i + 1) as u64)))
+        let traces: Vec<(TraceKey, Vec<GpsPoint>)> = (0..5)
+            .map(|i| {
+                (
+                    (format!("a_{i}"), 0),
+                    jitter(&reference, 1e-5, (i + 1) as u64),
+                )
+            })
             .collect();
 
         let traces_only: Vec<Vec<GpsPoint>> = traces.iter().map(|(_, t)| t.clone()).collect();
@@ -702,8 +708,13 @@ mod tests {
     #[test]
     fn incremental_in_two_batches_matches_single_batch() {
         let reference = make_corridor(47.37, 8.55, 60);
-        let traces: Vec<(String, Vec<GpsPoint>)> = (0..6)
-            .map(|i| (format!("a_{i}"), jitter(&reference, 1e-5, (i + 1) as u64)))
+        let traces: Vec<(TraceKey, Vec<GpsPoint>)> = (0..6)
+            .map(|i| {
+                (
+                    (format!("a_{i}"), 0),
+                    jitter(&reference, 1e-5, (i + 1) as u64),
+                )
+            })
             .collect();
 
         // Path A: all at once
@@ -732,9 +743,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_activity_id_not_double_counted() {
+    fn duplicate_traversal_not_double_counted() {
         let reference = make_corridor(47.37, 8.55, 30);
-        let trace = ("a_dup".to_string(), jitter(&reference, 1e-5, 1));
+        let trace = (("a_dup".to_string(), 0), jitter(&reference, 1e-5, 1));
         let mut acc = ConsensusAccumulator::new(reference.clone());
         merge_traces_into_consensus(&mut acc, &[trace.clone()], 50.0);
         let mid_total_weight = acc.per_point[0].total_weight;
@@ -744,7 +755,7 @@ mod tests {
 
         assert_eq!(
             mid_total_weight, after,
-            "duplicate activity_id was counted twice"
+            "the same traversal was counted twice"
         );
         assert_eq!(acc.trace_count, 1);
     }
@@ -752,7 +763,7 @@ mod tests {
     #[test]
     fn accumulator_serializes_round_trip() {
         let reference = make_corridor(47.37, 8.55, 20);
-        let trace = ("a".to_string(), jitter(&reference, 1e-5, 1));
+        let trace = (("a".to_string(), 0), jitter(&reference, 1e-5, 1));
 
         let mut acc = ConsensusAccumulator::new(reference.clone());
         merge_traces_into_consensus(&mut acc, &[trace.clone()], 50.0);
@@ -762,7 +773,7 @@ mod tests {
 
         // Add another trace; merging into the deserialized accumulator
         // should produce the same result as merging into the original.
-        let extra = ("b".to_string(), jitter(&reference, 1e-5, 2));
+        let extra = (("b".to_string(), 0), jitter(&reference, 1e-5, 2));
         let r1 = merge_traces_into_consensus(&mut acc, &[extra.clone()], 50.0);
         let r2 = merge_traces_into_consensus(&mut acc2, &[extra], 50.0);
 
@@ -776,8 +787,13 @@ mod tests {
     #[test]
     fn build_accumulator_matches_compute() {
         let reference = make_corridor(47.37, 8.55, 50);
-        let traces: Vec<(String, Vec<GpsPoint>)> = (0..4)
-            .map(|i| (format!("a_{i}"), jitter(&reference, 1e-5, (i + 1) as u64)))
+        let traces: Vec<(TraceKey, Vec<GpsPoint>)> = (0..4)
+            .map(|i| {
+                (
+                    (format!("a_{i}"), 0),
+                    jitter(&reference, 1e-5, (i + 1) as u64),
+                )
+            })
             .collect();
         let traces_only: Vec<Vec<GpsPoint>> = traces.iter().map(|(_, t)| t.clone()).collect();
 

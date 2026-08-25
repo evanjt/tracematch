@@ -3,6 +3,7 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use super::consensus::TraceKey;
 use super::rtree::{IndexedPoint, build_rtree};
 use crate::GpsPoint;
 use rstar::{PointDistance, RTree};
@@ -13,16 +14,15 @@ const TRACE_PROXIMITY_THRESHOLD: f64 = 50.0;
 /// Minimum points to consider a valid overlap trace
 const MIN_TRACE_POINTS: usize = 3;
 
-/// Extract the portion(s) of a GPS track that overlap with a section.
-/// Returns ALL passes over the section (not just the longest) merged together.
-/// This handles out-and-back routes where the activity crosses the section twice.
+/// Extract every pass a GPS track makes over a section, in track order.
+/// An out-and-back route yields two passes, a three-lap interval three.
 /// Uses R-tree for efficient O(log n) proximity lookups.
 /// Tolerates small gaps (up to 3 points) due to GPS noise.
-pub fn extract_activity_trace(
+pub fn extract_activity_passes(
     track: &[GpsPoint],
     section_polyline: &[GpsPoint],
     polyline_tree: &RTree<IndexedPoint>,
-) -> Vec<GpsPoint> {
+) -> Vec<Vec<GpsPoint>> {
     if track.len() < MIN_TRACE_POINTS || section_polyline.len() < 2 {
         return Vec::new();
     }
@@ -94,66 +94,138 @@ pub fn extract_activity_trace(
         sequences.push(current_sequence);
     }
 
-    // Return only the FIRST (longest) sequence to avoid "straight line" artifacts
-    // When multiple passes are merged, the LineString draws a closing line from
-    // the end of pass 1 to start of pass 2, creating an unwanted straight line.
-    // Each pass should be treated as a separate lap, handled at the UI layer.
-    if sequences.is_empty() {
-        return Vec::new();
-    }
-
-    // Return the longest sequence (most representative of the actual path)
     sequences
+}
+
+/// The single pass that best represents a track's run over a section:
+/// the longest. Map rendering wants one line, because a LineString over
+/// several passes draws a closing straight line between them.
+pub fn extract_activity_trace(
+    track: &[GpsPoint],
+    section_polyline: &[GpsPoint],
+    polyline_tree: &RTree<IndexedPoint>,
+) -> Vec<GpsPoint> {
+    extract_activity_passes(track, section_polyline, polyline_tree)
         .into_iter()
         .max_by_key(|seq| seq.len())
         .unwrap_or_default()
 }
 
-/// Extract activity traces for all activities in a section.
+/// Extract every pass over a section for all its activities.
 ///
-/// Returns `(activity_id, overlapping GPS points)` in `activity_ids` order, and
-/// activities with no overlap are dropped. The order is part of the contract:
-/// the consensus accumulator folds these sequentially, so a caller that received
-/// a map would fold in hash order and produce a different line on every run.
-/// A pair list also admits two entries for one activity, which a map cannot.
+/// Returns `((activity_id, pass index), overlapping GPS points)` in
+/// `activity_ids` order, passes in track order, and activities with no
+/// overlap are dropped. The order is part of the contract: the consensus
+/// accumulator folds these sequentially, so a caller that received a map
+/// would fold in hash order and produce a different line on every run.
+/// The pass index is what keeps a lapped activity's traversals distinct.
 pub fn extract_all_activity_traces(
     activity_ids: &[String],
     section_polyline: &[GpsPoint],
     track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
-) -> Vec<(String, Vec<GpsPoint>)> {
+) -> Vec<(TraceKey, Vec<GpsPoint>)> {
     let polyline_tree = build_rtree(section_polyline);
 
     // `filter_map` + `collect` into a `Vec` concatenates rayon's per-thread
     // buffers left to right, so this stays parallel and stays in source order.
     #[cfg(feature = "parallel")]
-    let traces: Vec<(String, Vec<GpsPoint>)> = activity_ids
+    let traces: Vec<(TraceKey, Vec<GpsPoint>)> = activity_ids
         .par_iter()
-        .filter_map(|activity_id| {
-            track_map.get(activity_id.as_str()).and_then(|track| {
-                let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
-                if trace.is_empty() {
-                    None
-                } else {
-                    Some((activity_id.clone(), trace))
-                }
-            })
+        .flat_map_iter(|activity_id| {
+            passes_for(activity_id, section_polyline, &polyline_tree, track_map).into_iter()
         })
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let traces: Vec<(String, Vec<GpsPoint>)> = activity_ids
+    let traces: Vec<(TraceKey, Vec<GpsPoint>)> = activity_ids
         .iter()
-        .filter_map(|activity_id| {
-            track_map.get(activity_id.as_str()).and_then(|track| {
-                let trace = extract_activity_trace(track, section_polyline, &polyline_tree);
-                if trace.is_empty() {
-                    None
-                } else {
-                    Some((activity_id.clone(), trace))
-                }
-            })
+        .flat_map(|activity_id| {
+            passes_for(activity_id, section_polyline, &polyline_tree, track_map)
         })
         .collect();
 
     traces
+}
+
+fn passes_for(
+    activity_id: &str,
+    section_polyline: &[GpsPoint],
+    polyline_tree: &RTree<IndexedPoint>,
+    track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
+) -> Vec<(TraceKey, Vec<GpsPoint>)> {
+    let Some(track) = track_map.get(activity_id) else {
+        return Vec::new();
+    };
+    extract_activity_passes(track, section_polyline, polyline_tree)
+        .into_iter()
+        .filter(|pass| !pass.is_empty())
+        .enumerate()
+        .map(|(i, pass)| ((activity_id.to_string(), i as u32), pass))
+        .collect()
+}
+
+/// Collapse per-pass traces to one line per activity, the longest pass.
+/// For callers that draw a single line and cannot show laps separately.
+pub fn longest_pass_per_activity(
+    traces: Vec<(TraceKey, Vec<GpsPoint>)>,
+) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut best: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    for ((activity_id, _), pass) in traces {
+        match best.iter_mut().find(|(id, _)| *id == activity_id) {
+            Some((_, held)) if held.len() < pass.len() => *held = pass,
+            Some(_) => {}
+            None => best.push((activity_id, pass)),
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sections::rtree::build_rtree;
+
+    fn line(from: f64, to: f64) -> Vec<GpsPoint> {
+        let step = if to >= from { 0.0001 } else { -0.0001 };
+        let count = ((to - from) / step).round() as i64;
+        (0..=count)
+            .map(|i| GpsPoint {
+                latitude: from + step * i as f64,
+                longitude: 7.0,
+                elevation: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_out_and_back_track_contributes_two_passes() {
+        let section = line(46.0, 46.005);
+        let mut track = line(46.0, 46.006);
+        track.extend(line(46.006, 45.999));
+        let tree = build_rtree(&section);
+
+        let passes = extract_activity_passes(&track, &section, &tree);
+        assert_eq!(passes.len(), 2, "an out and back crosses the section twice");
+
+        let track_map = std::collections::HashMap::from([("act", track.as_slice())]);
+        let traces = extract_all_activity_traces(&["act".to_string()], &section, &track_map);
+        assert_eq!(
+            traces.iter().map(|(key, _)| key.1).collect::<Vec<_>>(),
+            vec![0, 1],
+            "the passes must be keyed by a zero-based index"
+        );
+        assert_eq!(
+            longest_pass_per_activity(traces).len(),
+            1,
+            "the collapse adapter serves callers that draw a single line"
+        );
+    }
+
+    #[test]
+    fn a_single_pass_track_still_yields_one_trace() {
+        let section = line(46.0, 46.005);
+        let track = line(45.999, 46.006);
+        let tree = build_rtree(&section);
+        assert_eq!(extract_activity_passes(&track, &section, &tree).len(), 1);
+    }
 }
