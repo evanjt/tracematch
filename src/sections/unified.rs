@@ -2018,7 +2018,12 @@ fn portions_for(
     // The anchor and every tie-break downstream inherit this order, so
     // the catalogue stays a pure function of the activity set.
     let mut t_indices: Vec<u32> = node.tracks.iter().copied().collect();
-    t_indices.sort_unstable_by(|&a, &b| sport_tracks[a as usize].0.cmp(sport_tracks[b as usize].0));
+    t_indices.sort_unstable_by(|&a, &b| {
+        sport_tracks[a as usize]
+            .0
+            .cmp(sport_tracks[b as usize].0)
+            .then(a.cmp(&b))
+    });
 
     let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
@@ -2269,7 +2274,12 @@ fn portions_for_memo(
     let cells_id = *leaves.cell_sets.entry(cells_sorted).or_insert(next_id);
 
     let mut t_indices: Vec<u32> = node.tracks.iter().copied().collect();
-    t_indices.sort_unstable_by(|&a, &b| sport_tracks[a as usize].0.cmp(sport_tracks[b as usize].0));
+    t_indices.sort_unstable_by(|&a, &b| {
+        sport_tracks[a as usize]
+            .0
+            .cmp(sport_tracks[b as usize].0)
+            .then(a.cmp(&b))
+    });
 
     let mut portions: Vec<Portion> = Vec::new();
     for &t_idx in &t_indices {
@@ -2897,7 +2907,12 @@ fn geo_clusters(tracks: &[(&str, &[GpsPoint])], gap_m: f64) -> Vec<Vec<usize>> {
             (sw, members)
         })
         .collect();
-    keyed.sort_by(|a, b| a.0.0.total_cmp(&b.0.0).then(a.0.1.total_cmp(&b.0.1)));
+    keyed.sort_by(|a, b| {
+        a.0.0
+            .total_cmp(&b.0.0)
+            .then(a.0.1.total_cmp(&b.0.1))
+            .then_with(|| a.1.first().cmp(&b.1.first()))
+    });
     keyed.into_iter().map(|(_, members)| members).collect()
 }
 
@@ -3227,9 +3242,9 @@ fn unify_chain_references(
                     .map(|&m| {
                         portions[m]
                             .iter()
-                            .find(|p| p.0 == t)
+                            .filter(|p| p.0 == t)
                             .map(|p| p.3)
-                            .unwrap_or(0.0)
+                            .sum::<f64>()
                     })
                     .sum();
                 let better = match pick {
@@ -7092,5 +7107,45 @@ mod seam_tests {
         reconcile_seam_overruns(&mut sections, 46.0, 150.0);
         assert_eq!(sections[0].polyline.len(), a.len());
         assert_eq!(sections[1].polyline.len(), b.len());
+    }
+}
+
+#[cfg(test)]
+mod cluster_order_tests {
+    use super::*;
+
+    fn track(lat: f64, lng: f64) -> Vec<GpsPoint> {
+        (0..10)
+            .map(|i| GpsPoint {
+                latitude: lat + f64::from(i) * 0.00001,
+                longitude: lng,
+                elevation: None,
+            })
+            .collect()
+    }
+
+    /// Two clusters sharing a south-west corner must order by their lowest
+    /// member index, not by whatever order the union-find map drained in.
+    #[test]
+    fn clusters_tied_on_a_corner_order_by_lowest_member() {
+        let a = track(46.0, 7.0);
+        let b = track(46.0, 7.5);
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("a", &a), ("b", &b)];
+
+        let first = geo_clusters(&tracks, 50.0);
+        for _ in 0..20 {
+            assert_eq!(
+                geo_clusters(&tracks, 50.0),
+                first,
+                "the cluster order changed between runs on the same input"
+            );
+        }
+        let lowest: Vec<Option<&usize>> = first.iter().map(|members| members.first()).collect();
+        let mut sorted = lowest.clone();
+        sorted.sort();
+        assert_eq!(
+            lowest, sorted,
+            "clusters must come out in lowest-member order"
+        );
     }
 }
