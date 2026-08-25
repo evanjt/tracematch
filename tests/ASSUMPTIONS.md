@@ -141,3 +141,18 @@ registry defects before any fix was designed.
    drops candidates, so a custom claim on a tombstoned corridor pins the
    grave and tombstone across every later apply. The grave-side sibling
    of the corpus replay's pinned stale sections.
+
+## The default render tie, reachability (2026-08-25)
+
+`detect_for_cluster_with_grid` picks the default render by run length,
+then by representative AMD, then by portion index (`unified.rs`, the
+tie-break added in `724c5f4`). The index term makes the ordering total,
+so a HashMap's iteration order can no longer decide a tied pick.
+
+Whether two portions ever tie on both run length and AMD is unproven.
+No synthetic fixture in this repo constructs it: the generators jitter
+every track, so two candidates reaching identical f64 run length and
+identical AMD is a measure-zero event the corpora do not hit. The
+tie-break is therefore a guard against a case observed only in ordering
+audits, kept because the cost is one comparison and the failure it
+prevents is a catalogue that differs between runs on the same input.
