@@ -8,7 +8,8 @@
 //!
 //! Unlike the personal GPX corpora this data is public and fetchable on any
 //! machine, so this target is the durable real-GPS gate: it survives losing
-//! every local file and it runs on a CI runner.
+//! every local file. It sits behind `public-corpus` rather than `real-corpus`
+//! for that reason. No workflow enables it today.
 //!
 //! Dataset: Microsoft GeoLife GPS Trajectories 1.3. Research use only, no
 //! redistribution, so `geolife/` is gitignored and fetched per machine by
@@ -20,7 +21,7 @@
 //! synthetic corpus, and which of those two numbers is right for this data is
 //! an open question rather than a settled expectation.
 //!
-//! Run: `scripts/fetch_geolife.sh && cargo test --features real-corpus \
+//! Run: `scripts/fetch_geolife.sh && cargo test --features public-corpus \
 //!       --test geolife_public_corpus`
 
 #[path = "../examples/common/geolife.rs"]
