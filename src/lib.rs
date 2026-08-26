@@ -63,7 +63,8 @@ pub use grouping::{
 };
 #[cfg(feature = "parallel")]
 pub use grouping::{
-    group_incremental, group_signatures_parallel, group_signatures_parallel_with_matches,
+    group_incremental, group_incremental_with_matches, group_signatures_parallel,
+    group_signatures_parallel_with_matches,
 };
 
 // Geographic utilities (distance, bounds, center calculations)

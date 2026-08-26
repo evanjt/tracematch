@@ -11,7 +11,7 @@ use crate::grouping_filter::{
 };
 use crate::matching::{
     PreparedRoute, calculate_checkpoint_match, compare_prepared_routes, compare_routes,
-    prepare_route,
+    cumulative_distances, point_at_distance, prepare_route,
 };
 use crate::union_find::UnionFind;
 use crate::{
@@ -121,9 +121,10 @@ pub fn should_group_routes(
 
 /// Check that the middle portions of two routes also match.
 ///
-/// Uses 7 checkpoint positions (was 3) to catch divergences that occur
-/// between the sparse 25/50/75% checkpoints. This catches routes that
-/// share start/end but diverge in the middle.
+/// Checkpoints sit at seven fractions of each route's travelled distance,
+/// so a pause adds points without moving the checkpoints. Indexing into the
+/// point array instead would slide every checkpoint down the route of
+/// whichever ride waited longer at a light.
 pub fn check_middle_points_match(
     points1: &[GpsPoint],
     points2: &[GpsPoint],
@@ -133,18 +134,22 @@ pub fn check_middle_points_match(
         return true; // Not enough points to check middle
     }
 
-    // Check 7 positions along each route (was [0.25, 0.5, 0.75])
-    // More checkpoints catch divergences that slip through sparse sampling
+    let cumulative1 = cumulative_distances(points1);
+    let cumulative2 = cumulative_distances(points2);
+    let total1 = *cumulative1.last().unwrap_or(&0.0);
+    let total2 = *cumulative2.last().unwrap_or(&0.0);
+
+    if total1 < 1.0 || total2 < 1.0 {
+        return true; // Stationary track, nothing to compare along
+    }
+
     let check_positions = [0.15, 0.25, 0.35, 0.5, 0.65, 0.75, 0.85];
 
     for pos in check_positions {
-        let idx1 = ((points1.len() - 1) as f64 * pos) as usize;
-        let idx2 = ((points2.len() - 1) as f64 * pos) as usize;
+        let p1 = point_at_distance(points1, &cumulative1, total1 * pos);
+        let p2 = point_at_distance(points2, &cumulative2, total2 * pos);
 
-        let p1 = &points1[idx1];
-        let p2 = &points2[idx2];
-
-        let dist = haversine_distance(p1, p2);
+        let dist = haversine_distance(&p1, &p2);
         if dist > threshold {
             return false;
         }
@@ -402,16 +407,35 @@ pub fn group_incremental(
     existing_signatures: &[RouteSignature],
     config: &MatchConfig,
 ) -> Vec<RouteGroup> {
+    group_incremental_with_matches(new_signatures, existing_groups, existing_signatures, config)
+        .groups
+}
+
+/// Incremental grouping that also reports per-member match info and splits
+/// a group whose new member turned out to run different ground.
+///
+/// A group that took no new member was settled by the run that built it, so
+/// only groups that gained one are re-checked against their representative.
+#[cfg(feature = "parallel")]
+pub fn group_incremental_with_matches(
+    new_signatures: &[RouteSignature],
+    existing_groups: &[RouteGroup],
+    existing_signatures: &[RouteSignature],
+    config: &MatchConfig,
+) -> GroupingResult {
     use rayon::prelude::*;
     use std::collections::HashSet;
 
     if new_signatures.is_empty() {
-        return existing_groups.to_vec();
+        return GroupingResult {
+            groups: existing_groups.to_vec(),
+            activity_matches: HashMap::new(),
+        };
     }
 
     if existing_groups.is_empty() {
         // No existing groups - just group the new signatures
-        return group_signatures_parallel(new_signatures, config);
+        return group_signatures_parallel_with_matches(new_signatures, config);
     }
 
     // Combine all signatures (existing first, new second). The endpoint
@@ -504,7 +528,19 @@ pub fn group_incremental(
         .collect();
 
     let groups_map = uf.groups();
-    build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps)
+    let groups = build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps);
+
+    let (touched, settled): (Vec<RouteGroup>, Vec<RouteGroup>) =
+        groups.into_iter().partition(|g| {
+            g.activity_ids
+                .iter()
+                .any(|id| new_ids.contains(id.as_str()))
+        });
+
+    let mut result = compute_matches_and_split(&touched, &sig_map, config);
+    result.groups.extend(settled);
+    result.groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+    result
 }
 
 /// Calculate match info for each activity in each group and split divergent groups.
@@ -882,4 +918,82 @@ fn find_best_representative(
     }
 
     best_id.to_string()
+}
+
+#[cfg(test)]
+mod middle_checkpoint_tests {
+    use super::*;
+
+    /// A straight run east along latitude 45, `n` points over roughly 1.6 km.
+    fn straight_line(n: usize) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                GpsPoint::new(45.0, t * 0.02)
+            })
+            .collect()
+    }
+
+    /// The same run with `held` extra samples recorded standing still a
+    /// quarter of the way along, the shape a traffic light leaves.
+    fn straight_line_with_a_stop(n: usize, held: usize) -> Vec<GpsPoint> {
+        let base = straight_line(n);
+        let at = n / 4;
+        let mut points = base[..=at].to_vec();
+        points.extend(std::iter::repeat_n(base[at], held));
+        points.extend_from_slice(&base[at + 1..]);
+        points
+    }
+
+    #[test]
+    fn a_stop_does_not_move_the_checkpoints() {
+        let clean = straight_line(200);
+        let paused = straight_line_with_a_stop(200, 200);
+
+        assert!(check_middle_points_match(&clean, &paused, 50.0));
+    }
+
+    #[test]
+    fn indexing_by_array_position_would_have_failed_the_same_pair() {
+        let clean = straight_line(200);
+        let paused = straight_line_with_a_stop(200, 200);
+
+        let worst = [0.15, 0.25, 0.35, 0.5, 0.65, 0.75, 0.85]
+            .iter()
+            .map(|pos| {
+                let i1 = ((clean.len() - 1) as f64 * pos) as usize;
+                let i2 = ((paused.len() - 1) as f64 * pos) as usize;
+                haversine_distance(&clean[i1], &paused[i2])
+            })
+            .fold(0.0f64, f64::max);
+
+        assert!(
+            worst > 50.0,
+            "the pair must be one array indexing rejects, else the test proves nothing: {worst} m"
+        );
+    }
+
+    #[test]
+    fn a_genuine_middle_divergence_is_still_rejected() {
+        let clean = straight_line(200);
+        let detour: Vec<GpsPoint> = clean
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let t = i as f64 / (clean.len() - 1) as f64;
+                let bulge = if (0.3..=0.7).contains(&t) { 0.005 } else { 0.0 };
+                GpsPoint::new(p.latitude + bulge, p.longitude)
+            })
+            .collect();
+
+        assert!(!check_middle_points_match(&clean, &detour, 50.0));
+    }
+
+    #[test]
+    fn a_stationary_track_has_nothing_to_compare() {
+        let parked = vec![GpsPoint::new(45.0, 0.0); 40];
+        let moving = straight_line(200);
+
+        assert!(check_middle_points_match(&parked, &moving, 50.0));
+    }
 }

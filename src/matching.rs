@@ -451,7 +451,7 @@ pub fn calculate_checkpoint_match(
 
 /// Calculate cumulative distances along a route.
 /// Returns a vector where dist[i] is the distance from start to point i.
-fn cumulative_distances(points: &[GpsPoint]) -> Vec<f64> {
+pub(crate) fn cumulative_distances(points: &[GpsPoint]) -> Vec<f64> {
     let mut distances = Vec::with_capacity(points.len());
     distances.push(0.0);
 
@@ -466,7 +466,11 @@ fn cumulative_distances(points: &[GpsPoint]) -> Vec<f64> {
 
 /// Find the point at a specific distance along the route.
 /// Interpolates between points if the exact distance falls between two points.
-fn point_at_distance(points: &[GpsPoint], cumulative: &[f64], target_dist: f64) -> GpsPoint {
+pub(crate) fn point_at_distance(
+    points: &[GpsPoint],
+    cumulative: &[f64],
+    target_dist: f64,
+) -> GpsPoint {
     if points.is_empty() {
         return GpsPoint::new(0.0, 0.0);
     }
