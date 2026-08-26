@@ -874,3 +874,78 @@ pub fn small_oval_stem_deviant() -> Vec<(String, Vec<GpsPoint>)> {
     }
     out
 }
+
+/// A plain corridor walked by `outings` riders, plus one who traverses
+/// it `laps` times in a single outing, turning at each end. Every pass
+/// covers the same ground; only the pass count separates the lapper.
+pub fn corridor_with_a_lapper(outings: usize, laps: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out = plain_corridor(outings);
+    let mut path: Vec<(f64, f64)> = Vec::new();
+    for lap in 0..laps {
+        let leg = densify(&[(-100.0, 0.0), (900.0, 0.0)]);
+        if lap % 2 == 1 {
+            path.extend(leg.into_iter().rev());
+        } else {
+            path.extend(leg);
+        }
+    }
+    out.push((
+        "lapper".to_string(),
+        track(&wobble(&path, HUMAN_WOBBLE_M, phase(outings))),
+    ));
+    out
+}
+
+/// One athlete's interval session: a stem in, `reps` there-and-back
+/// repeats over a 300 m stretch, a stem home. No one else uses the
+/// stretch, so the only thing standing behind it is one outing.
+pub fn lone_interval_session(reps: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut path: Vec<(f64, f64)> = densify(&[(-600.0, 0.0), (0.0, 0.0)]);
+    for _ in 0..reps {
+        path.extend(densify(&[(0.0, 0.0), (300.0, 0.0)]));
+        path.extend(densify(&[(300.0, 0.0), (0.0, 0.0)]));
+    }
+    path.extend(densify(&[(0.0, 0.0), (-600.0, 0.0)]));
+    let mut out = vec![(
+        "session".to_string(),
+        track(&wobble(&path, HUMAN_WOBBLE_M, phase(0))),
+    )];
+    // Unrelated background traffic a long way off, so detection has a
+    // pool to work in and the session is not the only thing in it.
+    for i in 0..10 {
+        let road = densify(&[
+            (-2_000.0, 3_000.0 + 8.0 * i as f64),
+            (-1_000.0, 3_000.0 + 8.0 * i as f64),
+        ]);
+        out.push((
+            format!("road_{i}"),
+            track(&wobble(&road, HUMAN_WOBBLE_M, phase(20 + i))),
+        ));
+    }
+    out
+}
+
+/// Six sessions lapping the small oval, one of which breaks off the
+/// circuit between laps to fetch water and rejoins where it left. The
+/// excursion is one pass over ground nobody else touches, taken at the
+/// seam where laps join.
+pub fn small_oval_seam_excursion() -> Vec<(String, Vec<GpsPoint>)> {
+    use std::f64::consts::PI;
+    let mut out = small_oval_stem(5);
+    let mut path: Vec<(f64, f64)> = Vec::new();
+    path.extend(densify(&[(-40.0, 0.0), (150.0, 0.0)]));
+    for lap in 0..10 {
+        path.extend(arc(220.0, 0.0, 70.0, PI, -PI));
+        if lap == 4 {
+            // Off the circuit at the seam and straight back again.
+            path.extend(densify(&[(150.0, 0.0), (150.0, 260.0)]));
+            path.extend(densify(&[(150.0, 260.0), (150.0, 0.0)]));
+        }
+    }
+    path.extend(densify(&[(150.0, 0.0), (-40.0, 0.0)]));
+    out.push((
+        "oval_seam".to_string(),
+        track(&wobble(&path, HUMAN_WOBBLE_M, phase(11))),
+    ));
+    out
+}

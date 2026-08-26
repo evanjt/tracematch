@@ -1828,3 +1828,126 @@ fn a_pooled_fold_labels_sport_the_way_the_batch_does() {
         );
     }
 }
+
+#[test]
+fn lap_seam_excursion_loses_to_a_clean_revolution() {
+    // Scenario: six interval sessions on the small oval. One of them
+    // breaks off the circuit at a lap seam to fetch water and rejoins
+    // where it left.
+    // Expected behaviour: the excursion is one pass over ground nobody
+    // else touches, so it stays out of the circuit's line. Letting a
+    // seam detour into the render would hand every lapped session a
+    // circuit that wanders off to whatever the athlete did between reps.
+    let tracks = shapes::small_oval_seam_excursion();
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    let centre = shapes::to_gps(220.0, 0.0);
+    let oval = sections
+        .iter()
+        .find(|s| {
+            let mean = s
+                .polyline
+                .iter()
+                .map(|p| haversine_distance(p, &centre))
+                .sum::<f64>()
+                / s.polyline.len() as f64;
+            mean < 120.0
+        })
+        .expect("oval section");
+
+    assert!(
+        (350.0..520.0).contains(&oval.distance_meters),
+        "circuit render {:.0} m is not one revolution (~440 m)",
+        oval.distance_meters
+    );
+    let excursion_mid = shapes::to_gps(150.0, 130.0);
+    assert!(
+        min_dist(&excursion_mid, &oval.polyline) > 60.0,
+        "the circuit render reaches up the water detour"
+    );
+    let seam_passes = oval
+        .activity_portions
+        .iter()
+        .filter(|p| p.activity_id == "oval_seam")
+        .count();
+    assert!(
+        seam_passes >= 8,
+        "the detouring session kept only {seam_passes} of its ten laps"
+    );
+}
+
+#[test]
+fn interval_session_does_not_manufacture_support() {
+    // Scenario: one athlete, one outing, twelve there-and-back reps
+    // over the same 300 m stretch. Nobody else has ever used it.
+    // Expected behaviour: passes count visits, they do not stand in for
+    // athletes. A section owes support from separate outings, or a
+    // single hard session mints a section the athlete will never see
+    // again and every track day becomes permanent furniture.
+    let tracks = shapes::lone_interval_session(12);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    assert!(
+        !sections.is_empty(),
+        "the background traffic minted nothing, so this proves nothing"
+    );
+    let rep_mid = shapes::to_gps(150.0, 0.0);
+    let on_the_reps: Vec<&FrequentSection> = sections
+        .iter()
+        .filter(|s| min_dist(&rep_mid, &s.polyline) < 60.0)
+        .collect();
+    assert!(
+        on_the_reps.is_empty(),
+        "one outing's reps minted {} section(s) on ground no second \
+         outing has ever covered",
+        on_the_reps.len()
+    );
+}
+
+#[test]
+fn an_existing_member_gains_newly_found_laps() {
+    // Scenario: eight riders each cross a corridor once; a ninth rides
+    // it out, back and out again in one outing.
+    // Expected behaviour: the lapper owns a junction row per pass, and
+    // every pass counts toward the section. Keeping only the longest
+    // pass tells the athlete they rode the corridor once on a day they
+    // rode it three times, and starves the consensus of two thirds of
+    // what it saw.
+    let plain = shapes::plain_corridor(8);
+    let baseline = detect(&plain);
+    let baseline_visits = baseline
+        .iter()
+        .map(|s| s.visit_count)
+        .max()
+        .expect("the plain corridor is a section");
+    assert_eq!(
+        baseline_visits, 8,
+        "eight single crossings are eight visits"
+    );
+
+    let tracks = shapes::corridor_with_a_lapper(8, 3);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+
+    let corridor = sections
+        .iter()
+        .find(|s| s.activity_ids.iter().any(|id| id == "lapper"))
+        .expect("the lapper joined the corridor");
+    let passes = corridor
+        .activity_portions
+        .iter()
+        .filter(|p| p.activity_id == "lapper")
+        .count();
+
+    assert_eq!(passes, 3, "the lapper's three passes are not all attached");
+    assert_eq!(
+        corridor.visit_count, 11,
+        "eight crossings plus three laps is eleven visits, not {}",
+        corridor.visit_count
+    );
+}

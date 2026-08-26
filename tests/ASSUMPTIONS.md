@@ -156,3 +156,26 @@ identical AMD is a measure-zero event the corpora do not hit. The
 tie-break is therefore a guard against a case observed only in ordering
 audits, kept because the cost is one comparison and the failure it
 prevents is a catalogue that differs between runs on the same input.
+
+## Laps inside one activity (2026-08-26)
+
+Three rules about repeated passes in a single outing, each pinned by a
+contract in `unified_contracts.rs`.
+
+1. **A pass is a visit; an outing is support.** `visit_count` counts
+   every pass over the ground, so a lapped session reports what the
+   athlete actually rode. Whether a section exists at all is a separate
+   question answered in outings, so one hard interval session cannot
+   mint a section on ground no second outing has covered. Pinned by
+   `an_existing_member_gains_newly_found_laps` and
+   `interval_session_does_not_manufacture_support`.
+2. **What an athlete does between laps is not part of the circuit.** A
+   detour taken at a lap seam is one pass over ground nobody else
+   touches and stays out of the render, the same judgement
+   `a_deviating_lap_does_not_render_the_circuit` applies to a deviant
+   lap. Pinned by `lap_seam_excursion_loses_to_a_clean_revolution`.
+3. **The corpus generator emits no laps by default.**
+   `LifecycleConfig::lapped_fraction` is 0.0, so every settled catalogue
+   measured to date is a lap-free measurement and stays comparable. A
+   test that wants laps opts in. Raising the default is a change to
+   every recorded catalogue count, not a test detail.
