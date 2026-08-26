@@ -56,6 +56,23 @@ pub struct LifecycleActivity {
     pub gps_points: Vec<GpsPoint>,
 }
 
+impl LifecycleActivity {
+    /// This activity's own track walked `passes` times, each pass reversing
+    /// the last, the shape an out-and-back repeat leaves on one outing.
+    /// `passes` below two returns the track unchanged.
+    pub fn lapped(&self, passes: usize) -> Vec<GpsPoint> {
+        let mut points = self.gps_points.clone();
+        for pass in 1..passes.max(1) {
+            let mut next = self.gps_points.clone();
+            if pass % 2 == 1 {
+                next.reverse();
+            }
+            points.extend(next);
+        }
+        points
+    }
+}
+
 /// Metadata describing a corridor that activities may share.
 #[derive(Debug, Clone)]
 pub struct CorridorTruth {
@@ -99,6 +116,13 @@ pub struct LifecycleConfig {
     pub parallel_street_offset_meters: f64,
     /// Fraction of activities that are pure one-offs (no corridor overlap).
     pub one_off_fraction: f64,
+    /// Fraction of corridor activities that traverse their corridor several
+    /// times in one outing, the shape an interval session leaves. Zero by
+    /// default: a corpus that emits laps is a different corpus, and the
+    /// settled catalogues are all measured without them.
+    pub lapped_fraction: f64,
+    /// Passes a lapped activity makes over its corridor.
+    pub laps_per_lapped_activity: usize,
 }
 
 impl Default for LifecycleConfig {
@@ -117,6 +141,8 @@ impl Default for LifecycleConfig {
             parallel_street_count: 8,
             parallel_street_offset_meters: 60.0,
             one_off_fraction: 0.15,
+            lapped_fraction: 0.0,
+            laps_per_lapped_activity: 3,
         }
     }
 }
@@ -132,6 +158,9 @@ pub struct LifecycleCorpus {
     /// Ground-truth corridors. Useful for assertions in scenario harnesses
     /// (e.g. "the section detected here should correspond to corridor X").
     pub corridors: Vec<CorridorTruth>,
+    /// Passes over the corridor, for activities that made more than one.
+    /// Empty unless `lapped_fraction` is set.
+    pub laps_by_activity: HashMap<String, usize>,
 }
 
 impl LifecycleCorpus {
@@ -211,6 +240,8 @@ struct CorpusGenerator<'a> {
     /// Per-corridor ground truth, populated as activities are emitted.
     corridor_truth: Vec<CorridorTruth>,
     next_activity_index: usize,
+    /// Passes made, for the activities that lapped their corridor.
+    laps_by_activity: HashMap<String, usize>,
 }
 
 impl<'a> CorpusGenerator<'a> {
@@ -270,6 +301,7 @@ impl<'a> CorpusGenerator<'a> {
             cross_sport_corridor,
             corridor_truth,
             next_activity_index: 0,
+            laps_by_activity: HashMap::new(),
         }
     }
 
@@ -331,6 +363,7 @@ impl<'a> CorpusGenerator<'a> {
             bucket_d_delta,
             bucket_e_delta,
             corridors: self.corridor_truth,
+            laps_by_activity: self.laps_by_activity,
         }
     }
 
@@ -457,9 +490,30 @@ impl<'a> CorpusGenerator<'a> {
                 approach_heading + PI,
                 &mut self.rng,
             ));
-            full.extend(canonical.iter().copied());
-            // Departure
-            let end = *canonical.last().unwrap();
+            let laps = if self.config.lapped_fraction > 0.0
+                && self.rng.r#gen::<f64>() < self.config.lapped_fraction
+            {
+                self.config.laps_per_lapped_activity.max(1)
+            } else {
+                1
+            };
+            for pass in 0..laps {
+                if pass % 2 == 1 {
+                    full.extend(canonical.iter().rev().copied());
+                } else {
+                    full.extend(canonical.iter().copied());
+                }
+            }
+            if laps > 1 {
+                self.laps_by_activity.insert(id.clone(), laps);
+            }
+            // Departure. An even lap count finishes back at the corridor
+            // start, so the departure leaves from wherever the last pass ended.
+            let end = if laps % 2 == 1 {
+                *canonical.last().unwrap()
+            } else {
+                canonical[0]
+            };
             let depart_heading: f64 = self.rng.gen_range(0.0..(2.0 * PI));
             full.extend(generate_random_segment(
                 &end,
@@ -808,6 +862,73 @@ mod tests {
             "expected cross-sport corridor to attract both sports, got {:?}",
             sports
         );
+    }
+
+    #[test]
+    fn the_default_corpus_emits_no_laps() {
+        let corpus = small_corpus();
+        assert!(corpus.laps_by_activity.is_empty());
+    }
+
+    #[test]
+    fn opting_in_emits_lapped_corridor_activities() {
+        let corpus = LifecycleCorpus::generate(&LifecycleConfig {
+            bucket_a_count: 40,
+            bucket_b_delta_count: 0,
+            bucket_d_delta_count: 0,
+            bucket_e_delta_count: 0,
+            parallel_street_count: 0,
+            lapped_fraction: 0.5,
+            laps_per_lapped_activity: 3,
+            ..LifecycleConfig::default()
+        });
+
+        assert!(
+            !corpus.laps_by_activity.is_empty(),
+            "half the corridor activities were asked to lap"
+        );
+        assert!(corpus.laps_by_activity.values().all(|&n| n == 3));
+
+        let single = LifecycleCorpus::generate(&LifecycleConfig {
+            bucket_a_count: 40,
+            bucket_b_delta_count: 0,
+            bucket_d_delta_count: 0,
+            bucket_e_delta_count: 0,
+            parallel_street_count: 0,
+            ..LifecycleConfig::default()
+        });
+        let id = corpus.laps_by_activity.keys().next().unwrap();
+        let lapped_len = corpus
+            .through_e()
+            .iter()
+            .find(|a| &a.id == id)
+            .unwrap()
+            .gps_points
+            .len();
+        let plain_len = single
+            .through_e()
+            .iter()
+            .find(|a| &a.id == id)
+            .unwrap()
+            .gps_points
+            .len();
+        assert!(
+            lapped_len > plain_len,
+            "the lapped track is not longer: {lapped_len} vs {plain_len}"
+        );
+    }
+
+    #[test]
+    fn lapped_alternates_direction_so_the_track_stays_continuous() {
+        let corpus = small_corpus();
+        let base = &corpus.bucket_a[0];
+        let three = base.lapped(3);
+
+        assert_eq!(three.len(), base.gps_points.len() * 3);
+        assert_eq!(three[0], base.gps_points[0]);
+        let seam = base.gps_points.len();
+        assert_eq!(three[seam], *base.gps_points.last().unwrap());
+        assert_eq!(base.lapped(1), base.gps_points);
     }
 
     #[test]
