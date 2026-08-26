@@ -20,8 +20,12 @@ crate-type = ["rlib"]
 default = ["parallel"]
 parallel = ["rayon"]
 synthetic = ["rand"]
-# Tests that read the local personal GPX corpora. Never enabled in CI.
+# Tests that read the local personal GPX corpora. Those files exist on one
+# machine and are never committed, so this is never enabled in CI.
 real-corpus = []
+# Tests that read a public dataset any machine can fetch. Enabling this in CI
+# is a scheduling question, not a data-availability one.
+public-corpus = []
 
 [dependencies]
 geo = "0.29"
@@ -126,7 +130,7 @@ required-features = ["real-corpus"]
 
 [[test]]
 name = "geolife_public_corpus"
-required-features = ["real-corpus"]
+required-features = ["public-corpus"]
 
 [[test]]
 name = "full_corpus_bitwise"
