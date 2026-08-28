@@ -912,3 +912,35 @@ fn shares_ground_canary() {
     assert!(shares_ground(&a, &inside));
     assert!(!shares_ground(&a, &outside));
 }
+
+// ----------------------------------------------------------- ground anchors
+
+/// The heart of a line sits half way along it by arc length, and the cell it
+/// falls in is the same for every point of the same cell and different one
+/// cell over, so an id anchored on it is stable to jitter and unique to ground.
+#[test]
+fn a_heart_anchors_to_a_global_cell() {
+    use tracematch::sections::ANCHOR_CELL_M;
+    use tracematch::{GpsPoint, earth_cell, section_heart};
+    let line: Vec<GpsPoint> = (0..=20)
+        .map(|i| GpsPoint::new(46.0, 7.0 + i as f64 * 0.001))
+        .collect();
+    let heart = section_heart(&line).expect("a heart");
+    assert!(
+        (heart.longitude - 7.01).abs() < 1e-6,
+        "half way along: {heart:?}"
+    );
+    assert!(section_heart(&[]).is_none());
+
+    let cell = earth_cell(&heart);
+    let jitter = GpsPoint::new(heart.latitude + 0.00005, heart.longitude);
+    let far = GpsPoint::new(
+        heart.latitude + 2.0 * ANCHOR_CELL_M / 111_132.0,
+        heart.longitude,
+    );
+    assert!(
+        earth_cell(&jitter) == cell || (earth_cell(&jitter).0 - cell.0).abs() <= 1,
+        "a 5 m jitter stays within one cell of the heart"
+    );
+    assert_ne!(earth_cell(&far), cell, "two cells north is another cell");
+}

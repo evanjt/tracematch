@@ -68,11 +68,11 @@ pub use traces::{
 // batch catalogue. tracematch decides which candidate inherits which prior id;
 // the engine owns the id strings and the persistence.
 pub use identity::{
-    CARRY_COVERAGE, CandidateFate, CandidateResolution, CandidateSection, DEFAULT_K,
+    ANCHOR_CELL_M, CARRY_COVERAGE, CandidateFate, CandidateResolution, CandidateSection, DEFAULT_K,
     DISSOLVE_PRESSURE_HI, Decision, GROUND_TOL_M, HysteresisParams, HysteresisState,
     IdentityParams, IdentityPlan, PriorSection, RECUT_AGREEMENT, RetireReason, Retirement,
-    StepOutcome, dissolve_pressure, mutual_overlap, plan_identity, plan_identity_tuned,
-    shares_ground,
+    StepOutcome, dissolve_pressure, earth_cell, mutual_overlap, plan_identity, plan_identity_tuned,
+    section_heart, shares_ground,
 };
 // Named-corridor resolution scoring (D3 ride-along): the pure layer decides
 // which visible section carries a name; the engine owns intent storage and

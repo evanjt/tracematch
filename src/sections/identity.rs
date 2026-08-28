@@ -132,6 +132,47 @@ pub fn shares_ground(a: &[GpsPoint], b: &[GpsPoint]) -> bool {
     coverage(a, b, GROUND_TOL_M) >= CARRY_COVERAGE || coverage(b, a, GROUND_TOL_M) >= CARRY_COVERAGE
 }
 
+/// Side of the global cell a section's heart is quantised to for its id:
+/// twice [`GROUND_TOL_M`], independent of every setting, so two libraries
+/// that cut the same ground mint the same id.
+pub const ANCHOR_CELL_M: f64 = 100.0;
+
+/// The point half way along a line by arc length: where a section is, in
+/// one point, for anchoring its id.
+pub fn section_heart(polyline: &[GpsPoint]) -> Option<GpsPoint> {
+    if polyline.is_empty() {
+        return None;
+    }
+    let total = crate::matching::calculate_route_distance(polyline);
+    let half = total / 2.0;
+    let mut run = 0.0;
+    for w in polyline.windows(2) {
+        let d = crate::geo_utils::haversine_distance(&w[0], &w[1]);
+        if run + d >= half {
+            let t = if d > 0.0 { (half - run) / d } else { 0.0 };
+            return Some(GpsPoint::new(
+                w[0].latitude + (w[1].latitude - w[0].latitude) * t,
+                w[0].longitude + (w[1].longitude - w[0].longitude) * t,
+            ));
+        }
+        run += d;
+    }
+    polyline.last().copied()
+}
+
+/// Banded metric quantisation of a point: the latitude band is
+/// [`ANCHOR_CELL_M`] tall, and within a band longitude is measured in
+/// metres at the band's own latitude, so cells stay square-ish everywhere
+/// and never depend on a corpus or a config.
+pub fn earth_cell(p: &GpsPoint) -> (i64, i64) {
+    const M_PER_DEG_LAT: f64 = 111_132.0;
+    let lat_cell = (p.latitude * M_PER_DEG_LAT / ANCHOR_CELL_M).floor();
+    let band_lat = lat_cell * ANCHOR_CELL_M / M_PER_DEG_LAT;
+    let m_per_deg_lng = (111_320.0 * band_lat.to_radians().cos()).max(1.0);
+    let lng_cell = (p.longitude * m_per_deg_lng / ANCHOR_CELL_M).floor();
+    (lat_cell as i64, lng_cell as i64)
+}
+
 /// The mutual overlap of two grounds: `min(cov(a->b), cov(b->a))`. High only
 /// when the two cover each other, so it separates a clean 1:1 (near 1.0) from a
 /// subset piece of a split/merge (well below 1.0). Drives the split winner and
