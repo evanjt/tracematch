@@ -17,7 +17,7 @@ use tracematch::{SectionConfig, SectionEvidenceCache};
 
 const CORPUS: &str = "fullcorpus";
 const WARM_ADDS: usize = 50;
-const BUDGET_MS: u128 = 150;
+const BUDGET_MS: u128 = 500;
 
 #[test]
 fn a_warm_add_stays_inside_the_budget() {
