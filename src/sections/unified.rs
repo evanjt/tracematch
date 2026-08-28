@@ -6492,6 +6492,47 @@ impl SectionEvidenceCache {
         self.version == EVIDENCE_CACHE_VERSION
     }
 
+    /// Clusters whose membership changed since they were last cut: the
+    /// work a fold over this cache still owes, zero after a completed fold.
+    pub fn dirty_clusters(&self) -> usize {
+        self.sports
+            .values()
+            .map(|cs| cs.iter().filter(|c| c.dirty).count())
+            .sum()
+    }
+
+    /// The cache without its memos or grids: what a checkpoint persists
+    /// mid-fold, small enough to write after every cluster. A fold resumed
+    /// from it cuts exactly the clusters still marked dirty and rebuilds the
+    /// memos as it goes.
+    pub fn checkpoint(&self) -> SectionEvidenceCache {
+        SectionEvidenceCache {
+            version: self.version,
+            sports: self
+                .sports
+                .iter()
+                .map(|(sport, clusters)| {
+                    (
+                        sport.clone(),
+                        clusters
+                            .iter()
+                            .map(|c| ClusterEvidence {
+                                member_ids: c.member_ids.clone(),
+                                member_bboxes: c.member_bboxes.clone(),
+                                union_bbox: c.union_bbox,
+                                ref_lat: c.ref_lat,
+                                sections: c.sections.clone(),
+                                grid: None,
+                                dirty: c.dirty,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            leaves: LeafMemos::default(),
+        }
+    }
+
     /// Per-cluster `(sport, members, ref_lat, sections)` snapshot, for tests
     /// and diagnostics.
     #[doc(hidden)]
@@ -6535,7 +6576,7 @@ struct ClusterEvidence {
     /// so the recompute pass rebuilds this cluster exactly ONCE over its FINAL
     /// membership, not once per new activity. Transient (never persisted): the
     /// recompute pass clears it before the call returns.
-    #[serde(skip)]
+    #[serde(default)]
     dirty: bool,
 }
 
@@ -6663,6 +6704,38 @@ pub fn detect_sections_unified_incremental_dated(
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
 ) -> UnifiedIncrementalResult {
+    detect_sections_unified_incremental_observed(
+        cache,
+        existing,
+        pool,
+        new_activity_ids,
+        seconds,
+        sport_types,
+        start_epochs,
+        config,
+        policy,
+        &mut |_, _, _| {},
+    )
+}
+
+/// [`detect_sections_unified_incremental_dated`] that reports after each
+/// cluster it cuts: `(done, total, cache)`, the cache as it stands with
+/// that cluster clean. A caller persisting [`SectionEvidenceCache::checkpoint`]
+/// there can resume a killed fold with no new activities and cut only
+/// what is left. The report changes nothing about the fold.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_sections_unified_incremental_observed(
+    cache: &mut SectionEvidenceCache,
+    existing: &[FrequentSection],
+    pool: &[(String, Vec<GpsPoint>)],
+    new_activity_ids: &[&str],
+    seconds: &[&[f64]],
+    sport_types: &HashMap<String, String>,
+    start_epochs: &HashMap<String, i64>,
+    config: &SectionConfig,
+    policy: &SectionUpdatePolicy,
+    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache),
+) -> UnifiedIncrementalResult {
     if config.pool_sports {
         let pooled = pooled_sports(pool);
         let mut out = fold_by_sport(
@@ -6675,6 +6748,7 @@ pub fn detect_sections_unified_incremental_dated(
             start_epochs,
             config,
             policy,
+            observe,
         );
         relabel_sports(&mut out.catalogue, sport_types);
         relabel_sports(&mut out.added, sport_types);
@@ -6695,6 +6769,7 @@ pub fn detect_sections_unified_incremental_dated(
         start_epochs,
         config,
         policy,
+        observe,
     )
 }
 
@@ -6709,6 +6784,7 @@ fn fold_by_sport(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
+    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache),
 ) -> UnifiedIncrementalResult {
     let tun = Tunables::DEFAULT;
     let cell_size = cluster_cell_size(config);
@@ -6787,22 +6863,28 @@ fn fold_by_sport(
     let mut boundaries: Vec<BoundaryRecord> = Vec::new();
     let mut sport_names: Vec<String> = cache.sports.keys().cloned().collect();
     sport_names.sort_unstable();
+    let total = cache.dirty_clusters();
+    let mut done = 0usize;
     for sport in &sport_names {
-        let clusters = cache.sports.get_mut(sport).expect("sport just listed");
-        for c in clusters.iter_mut() {
-            if c.dirty {
-                boundaries.extend(recompute_cluster(
-                    c,
-                    sport,
-                    &lookup,
-                    config,
-                    cell_size,
-                    &tun,
-                    leaves,
-                    start_epochs,
-                ));
-                c.dirty = false;
+        let n = cache.sports[sport].len();
+        for ci in 0..n {
+            if !cache.sports[sport][ci].dirty {
+                continue;
             }
+            let records = recompute_cluster(
+                &mut cache.sports.get_mut(sport).expect("sport just listed")[ci],
+                sport,
+                &lookup,
+                config,
+                cell_size,
+                &tun,
+                &mut cache.leaves,
+                start_epochs,
+            );
+            boundaries.extend(records);
+            cache.sports.get_mut(sport).expect("sport just listed")[ci].dirty = false;
+            done += 1;
+            observe(done, total, &*cache);
         }
     }
 

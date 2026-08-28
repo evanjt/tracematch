@@ -76,7 +76,7 @@ impl Fnv {
     }
 }
 
-fn catalogue_digest(sections: &[FrequentSection]) -> u64 {
+pub fn catalogue_digest(sections: &[FrequentSection]) -> u64 {
     let mut h = Fnv::new();
     h.u64(sections.len() as u64);
     for s in sections {

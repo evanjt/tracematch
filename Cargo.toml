@@ -112,5 +112,9 @@ name = "drip_budget"
 required-features = ["real-corpus"]
 
 [[test]]
+name = "fold_resume"
+required-features = ["synthetic"]
+
+[[test]]
 name = "geolife_bitwise"
 required-features = ["public-corpus"]
