@@ -31,6 +31,79 @@ pub fn compute_activity_portions(
 /// Track ids whose extent reaches the polyline's padded bounds, sorted. The
 /// complete input population of [`compute_portions_over`]: a track outside
 /// the padded bounds can contribute no portion.
+/// Raw bounding box of a track, `(lat0, lat1, lng0, lng1)`.
+pub(crate) fn track_bounds(track: &[GpsPoint]) -> (f64, f64, f64, f64) {
+    let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in track {
+        b.0 = b.0.min(p.latitude);
+        b.1 = b.1.max(p.latitude);
+        b.2 = b.2.min(p.longitude);
+        b.3 = b.3.max(p.longitude);
+    }
+    b
+}
+
+/// [`portion_candidates`] with each track's box known up front: a track
+/// whose box misses the padded line box has no point inside it, so only
+/// the tracks that might qualify pay the point scan. Same set, same order.
+pub(crate) fn portion_candidates_bounded<'a>(
+    representative_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&'a str, &[GpsPoint]>,
+    bounds_of: &std::collections::HashMap<&'a str, (f64, f64, f64, f64)>,
+    config: &SectionConfig,
+) -> Vec<&'a str> {
+    let bounds = polyline_bounds(representative_polyline, config.proximity_threshold);
+    let mut candidates: Vec<&str> = all_tracks
+        .iter()
+        .filter(|(id, t)| {
+            let overlaps = bounds_of.get(*id).is_none_or(|b| {
+                b.1 >= bounds.0 && b.0 <= bounds.1 && b.3 >= bounds.2 && b.2 <= bounds.3
+            });
+            overlaps && intersects_bounds(t, &bounds)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    candidates.sort_unstable();
+    candidates
+}
+
+/// The passes each named track makes over a line, one vector per id in
+/// the order given, so a caller can keep them per track and assemble the
+/// same list [`compute_portions_over`] would return.
+pub(crate) fn portions_per_track(
+    representative_polyline: &[GpsPoint],
+    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
+    ids: &[&str],
+    config: &SectionConfig,
+) -> Vec<Vec<SectionPortion>> {
+    let matcher = LineMatcher::new(representative_polyline, config);
+    let ref_tree = build_rtree(representative_polyline);
+    let compute_for_activity = |activity_id: &&str| -> Vec<SectionPortion> {
+        all_tracks
+            .get(*activity_id)
+            .map(|track| {
+                passes_of(
+                    &matcher,
+                    &ref_tree,
+                    representative_polyline,
+                    activity_id,
+                    track,
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        ids.par_iter().map(compute_for_activity).collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        ids.iter().map(compute_for_activity).collect()
+    }
+}
+
 pub(crate) fn portion_candidates<'a>(
     representative_polyline: &[GpsPoint],
     all_tracks: &std::collections::HashMap<&'a str, &[GpsPoint]>,
