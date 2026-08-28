@@ -117,6 +117,9 @@ pub enum BoundaryReason {
         through: u32,
         needed: f64,
         branch_leavers: u32,
+        /// The departing activities the branch collected, so a change at
+        /// this join can name what was around it.
+        branch_activity_ids: Vec<String>,
     },
     /// The candidate's own geometry already runs within a cell of the
     /// accepted catalogue: represented by the better line, not emitted.
@@ -876,6 +879,11 @@ fn rescue_confirmed(
 /// How far, in cells, a covering trace may sit from the cut it replaces.
 const COVER_TOLERANCE_CELLS: f64 = 0.5;
 
+/// How far, in cells, a carried section's ends or length must move before
+/// the fold reports a geometry change: one evidence cell, so sub-cell
+/// jitter in the reference trace never reads as a re-cut.
+pub const CHANGED_CELLS: f64 = 1.0;
+
 pub(super) fn cluster_cell_size(config: &SectionConfig) -> f64 {
     (config.proximity_threshold * 0.5).clamp(50.0, 150.0)
 }
@@ -1485,7 +1493,7 @@ fn branch_collecting_leavers(
     section_worthy: &[bool],
     leavers: &HashSet<u32>,
     needed: f64,
-) -> Option<usize> {
+) -> Option<Vec<u32>> {
     let mut third: HashSet<usize> = HashSet::new();
     for &(ca, cb) in pairs {
         for c in [ca, cb] {
@@ -1502,11 +1510,21 @@ fn branch_collecting_leavers(
             }
         }
     }
+    // The branch that collects the most leavers, its members sorted; ties
+    // break on the smaller member list so the answer is order-free.
     third
         .iter()
-        .map(|&o| supernodes[o].tracks.intersection(leavers).count())
-        .filter(|&n| n as f64 >= needed)
-        .max()
+        .map(|&o| {
+            let mut ids: Vec<u32> = supernodes[o]
+                .tracks
+                .intersection(leavers)
+                .copied()
+                .collect();
+            ids.sort_unstable();
+            ids
+        })
+        .filter(|ids| ids.len() as f64 >= needed)
+        .max_by(|x, y| x.len().cmp(&y.len()).then_with(|| y.cmp(x)))
 }
 
 /// Explain the boundaries that survived the merge fixed point: re-run
@@ -1515,6 +1533,7 @@ fn branch_collecting_leavers(
 /// [`merge_non_fork_boundaries`]; this pass only reports them.
 fn explain_boundaries(
     supernodes: &[Supernode],
+    tracks: &[(&str, &[GpsPoint])],
     coverage: &CoverageGrid,
     divergence: f64,
     min_activities: u32,
@@ -1581,7 +1600,11 @@ fn explain_boundaries(
                 reason: BoundaryReason::Fork {
                     through: through.len() as u32,
                     needed,
-                    branch_leavers: collected as u32,
+                    branch_leavers: collected.len() as u32,
+                    branch_activity_ids: collected
+                        .iter()
+                        .map(|&t| tracks[t as usize].0.to_string())
+                        .collect(),
                 },
             });
         }
@@ -3744,6 +3767,7 @@ fn detect_for_cluster_with_grid(
     // Every boundary that survived explains itself, as data.
     explain_boundaries(
         &supernodes,
+        sport_tracks,
         coverage,
         divergence,
         config.min_activities,
@@ -5151,6 +5175,11 @@ pub struct UnifiedIncrementalResult {
     /// with debounce is the identity layer's job
     /// ([`super::identity::HysteresisState`]).
     pub carried: Vec<(String, String)>,
+    /// The boundary records of every cluster this fold recomputed. A fork
+    /// record names the activities its branch collected, which is what a
+    /// change at that join can say was around it. Clusters the fold left
+    /// alone contribute nothing: no change, nothing to attribute.
+    pub boundaries: Vec<BoundaryRecord>,
 }
 
 /// A prior section whose ground merged into another surviving section.
@@ -5258,7 +5287,10 @@ pub fn detect_sections_unified_incremental(
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> UnifiedIncrementalResult {
-    let fresh = detect_sections_unified(pool, seconds, sport_types, config);
+    let UnifiedDetection {
+        sections: fresh,
+        boundaries,
+    } = detect_sections_unified_explained(pool, seconds, sport_types, config, &Tunables::DEFAULT);
     let lookup: HashMap<&str, (&[GpsPoint], &[f64])> = pool
         .iter()
         .enumerate()
@@ -5269,6 +5301,7 @@ pub fn detect_sections_unified_incremental(
         .collect();
     resolve_fold(
         fresh,
+        boundaries,
         existing,
         &SectionUpdatePolicy::default(),
         config,
@@ -5373,6 +5406,7 @@ fn pair_leftovers(
 /// layer, never a detour around it.
 fn resolve_fold(
     fresh: Vec<FrequentSection>,
+    boundaries: Vec<BoundaryRecord>,
     existing: &[FrequentSection],
     policy: &SectionUpdatePolicy,
     config: &SectionConfig,
@@ -5404,9 +5438,7 @@ fn resolve_fold(
     let explicit_pin: HashSet<&str> = policy.pinned_ids.iter().map(|s| s.as_str()).collect();
     let frozen_prior = |id: &str| policy.freeze_all_geometry || explicit_pin.contains(id);
 
-    // A visible re-cut has to clear one evidence cell, so sub-cell jitter in
-    // the reference trace never reports as a geometry change.
-    let move_threshold = cluster_cell_size(config);
+    let move_threshold = CHANGED_CELLS * cluster_cell_size(config);
     let change = |prev: &FrequentSection, cur: &FrequentSection| SectionGeometryChange {
         previous: prev.clone(),
         current: cur.clone(),
@@ -5546,6 +5578,7 @@ fn resolve_fold(
         changed,
         held,
         carried,
+        boundaries,
     }
 }
 
@@ -6034,12 +6067,16 @@ fn fold_by_sport(
     if leaves.drawn.len() > MEMO_DRAWN_CAP {
         leaves.drawn.clear();
     }
-    // Each cluster is recomputed on its own.
-    #[allow(clippy::iter_over_hash_type)]
-    for (sport, clusters) in cache.sports.iter_mut() {
+    // Each cluster is recomputed on its own. Boundary records are gathered
+    // per sport in name order so the fold's report is order-free.
+    let mut boundaries: Vec<BoundaryRecord> = Vec::new();
+    let mut sport_names: Vec<String> = cache.sports.keys().cloned().collect();
+    sport_names.sort_unstable();
+    for sport in &sport_names {
+        let clusters = cache.sports.get_mut(sport).expect("sport just listed");
         for c in clusters.iter_mut() {
             if c.dirty {
-                recompute_cluster(
+                boundaries.extend(recompute_cluster(
                     c,
                     sport,
                     &lookup,
@@ -6048,7 +6085,7 @@ fn fold_by_sport(
                     &tun,
                     leaves,
                     start_epochs,
-                );
+                ));
                 c.dirty = false;
             }
         }
@@ -6059,7 +6096,14 @@ fn fold_by_sport(
     // then resolve it against what the caller holds. The pairing inside
     // `resolve_fold` is bbox-gated, so the delta cost tracks the CHANGED
     // ground rather than the whole (growing) catalogue.
-    resolve_fold(assemble_catalogue(cache), existing, policy, config, &lookup)
+    resolve_fold(
+        assemble_catalogue(cache),
+        boundaries,
+        existing,
+        policy,
+        config,
+        &lookup,
+    )
 }
 
 /// Raw lat/lng bounding box of a track: `(lat0, lat1, lng0, lng1)`.
@@ -6179,10 +6223,10 @@ fn recompute_cluster(
     tun: &Tunables,
     leaves: &mut LeafMemos,
     starts: &HashMap<String, i64>,
-) {
+) -> Vec<BoundaryRecord> {
     if cluster.member_ids.len() < config.min_activities as usize {
         cluster.sections.clear();
-        return;
+        return Vec::new();
     }
 
     let members = std::mem::take(&mut cluster.member_ids);
@@ -6218,6 +6262,7 @@ fn recompute_cluster(
     cluster.member_ids = members;
     cluster.ref_lat = ref_lat;
     cluster.sections = sections;
+    records
 }
 
 /// Concatenate every cluster's sections into the full catalogue, renumbering

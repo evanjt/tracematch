@@ -1109,6 +1109,14 @@ impl HysteresisState {
         self.visible.keys().cloned().collect()
     }
 
+    /// Visible ids carrying an active debounce after the last step, sorted.
+    /// A caller accumulating what arrived while a change was pending reads
+    /// this after every step; an id that leaves the list has either fired
+    /// or continued decisively, and its accumulation is over.
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending.keys().cloned().collect()
+    }
+
     /// The visible catalogue as `(id, ground)` pairs, sorted by id.
     pub fn visible_grounds(&self) -> Vec<(String, Vec<GpsPoint>)> {
         self.visible
