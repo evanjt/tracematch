@@ -14,7 +14,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
-use tracematch::{RouteGroup, SectionConfig, detect_sections_multiscale};
+use tracematch::{RouteGroup, SectionConfig, detect_sections_unified};
 
 /// Build the same corpus the integration test uses, then expose tracks +
 /// sport map for a given scenario checkpoint.
@@ -98,7 +98,7 @@ fn bench_lifecycle_full_detection(c: &mut Criterion) {
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
-            b.iter(|| detect_sections_multiscale(&tracks, &sport_types, &groups, &config));
+            b.iter(|| detect_sections_unified(&tracks, &[], &sport_types, &config));
         });
     }
 

@@ -70,10 +70,9 @@
 //!    candidate records why, as a [`BoundaryRecord`] rather than a log
 //!    line, so the decision is inspectable after the fact.
 
-use super::density_grid::{CellGrid, bresenham_cells, runs_in_cells};
+use super::grid::{CellGrid, bresenham_cells, runs_in_cells};
 use super::identity::{IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground};
 use super::overlap::{FullTrackOverlap, OverlapCluster};
-use super::postprocess::required_visits_for_length;
 use super::{FrequentSection, SectionConfig, SectionPortion, process_cluster};
 use crate::GpsPoint;
 use crate::union_find::UnionFind;
@@ -6262,6 +6261,30 @@ fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
         }
     }
     out
+}
+
+/// Minimum visits required based on section length and dataset size.
+/// Shorter sections need more visits. Larger datasets use slightly higher
+/// thresholds to avoid drowning in noise — but the bonus is intentionally
+/// modest so a user with 500 activities doesn't have all their valid
+/// sections filtered away.
+fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+    // Softened from the 43a39da bonus of (0 / +1 / +2): the +2 tier was
+    // filtering out genuine sections for users with many activities. The
+    // base thresholds (2-6) already encode noise rejection per length tier.
+    let bonus: u32 = match total_activities {
+        0..=200 => 0,
+        _ => 1,
+    };
+
+    let base = match distance_meters {
+        d if d < 200.0 => 6,
+        d if d < 400.0 => 4,
+        d if d < 800.0 => 3,
+        _ => 2,
+    };
+
+    base + bonus
 }
 
 #[cfg(test)]

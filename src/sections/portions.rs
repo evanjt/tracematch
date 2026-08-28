@@ -117,63 +117,6 @@ fn intersects_bounds(track: &[GpsPoint], bounds: &(f64, f64, f64, f64)) -> bool 
     })
 }
 
-/// Compute portions for a flat list of activity_ids against a reference polyline.
-///
-/// Used by corridor and flow_graph detection paths, which already know
-/// cluster membership from their own pipelines and don't need an
-/// `OverlapCluster`. Populates `activity_portions` so the section detail
-/// screen can show per-activity start/end indices and distances.
-pub fn compute_portions_for_activities(
-    activity_ids: &[String],
-    reference_polyline: &[GpsPoint],
-    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
-    threshold: f64,
-) -> Vec<SectionPortion> {
-    let mut sorted_ids: Vec<&String> = activity_ids.iter().collect();
-    sorted_ids.sort();
-    portions_for_sorted_ids(&sorted_ids, reference_polyline, all_tracks, threshold)
-}
-
-fn portions_for_sorted_ids(
-    sorted_ids: &[&String],
-    reference_polyline: &[GpsPoint],
-    all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
-    threshold: f64,
-) -> Vec<SectionPortion> {
-    let compute_for_activity = |activity_id: &&String| -> Vec<SectionPortion> {
-        let mut portions = Vec::new();
-        if let Some(track) = all_tracks.get(activity_id.as_str()) {
-            let all_traversals = find_all_track_portions(track, reference_polyline, threshold);
-
-            for (start_idx, end_idx, direction) in all_traversals {
-                let distance = calculate_route_distance(&track[start_idx..end_idx]);
-
-                portions.push(SectionPortion {
-                    activity_id: (*activity_id).clone(),
-                    start_index: start_idx as u32,
-                    end_index: end_idx as u32,
-                    distance_meters: distance,
-                    direction,
-                });
-            }
-        }
-        portions
-    };
-
-    #[cfg(feature = "parallel")]
-    {
-        sorted_ids
-            .par_iter()
-            .flat_map(compute_for_activity)
-            .collect()
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        sorted_ids.iter().flat_map(compute_for_activity).collect()
-    }
-}
-
 /// A contiguous segment of a track that overlaps with the reference
 struct OverlapSegment {
     start_idx: usize,

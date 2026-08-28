@@ -1,6 +1,6 @@
 [package]
 name = "tracematch"
-version = "0.2.3"
+version = "2.0.0"
 edition = "2024"
 authors = ["Evan Thomas <evan@evanjt.com>"]
 license = "Apache-2.0"
@@ -23,8 +23,8 @@ synthetic = ["rand"]
 # Tests that read the local personal GPX corpora. Those files exist on one
 # machine and are never committed, so this is never enabled in CI.
 real-corpus = []
-# Tests that read a public dataset any machine can fetch. Enabling this in CI
-# is a scheduling question, not a data-availability one.
+# Tests that read a public dataset any machine can fetch. CI fetches it into
+# the gitignored geolife/ directory and runs them on every push.
 public-corpus = []
 
 [dependencies]
@@ -74,30 +74,12 @@ harness = false
 required-features = ["synthetic"]
 
 [[test]]
-name = "optimization_efficiency"
-required-features = ["synthetic"]
-
-[[test]]
 name = "b1_foundation"
 required-features = ["synthetic"]
 
 [[test]]
 name = "b2_identity_measure"
 required-features = ["synthetic"]
-
-[[test]]
-name = "pool_incremental_parity"
-required-features = ["synthetic"]
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = "s"
-strip = false
-
-[profile.release-mobile]
-inherits = "release"
-panic = "abort"
 
 [[example]]
 name = "route_matching"
@@ -106,19 +88,6 @@ path = "examples/route_matching.rs"
 [[example]]
 name = "route_grouping"
 path = "examples/route_grouping.rs"
-
-[[example]]
-name = "scaling_report"
-path = "examples/scaling_report.rs"
-required-features = ["synthetic"]
-
-[[example]]
-name = "corpus_report"
-path = "examples/corpus_report.rs"
-
-[[example]]
-name = "density_grid_report"
-path = "examples/density_grid_report.rs"
 
 [[test]]
 name = "grouping_sion_corpus"
@@ -135,3 +104,7 @@ required-features = ["public-corpus"]
 [[test]]
 name = "full_corpus_bitwise"
 required-features = ["real-corpus"]
+
+[[test]]
+name = "geolife_bitwise"
+required-features = ["public-corpus"]

@@ -456,8 +456,3 @@ pub fn recalculate_section_polyline(
         ..section.clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

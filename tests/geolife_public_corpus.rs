@@ -9,7 +9,7 @@
 //! Unlike the personal GPX corpora this data is public and fetchable on any
 //! machine, so this target is the durable real-GPS gate: it survives losing
 //! every local file. It sits behind `public-corpus` rather than `real-corpus`
-//! for that reason. No workflow enables it today.
+//! for that reason, and CI fetches the archive and runs it on every push.
 //!
 //! Dataset: Microsoft GeoLife GPS Trajectories 1.3. Research use only, no
 //! redistribution, so `geolife/` is gitignored and fetched per machine by
@@ -32,8 +32,8 @@ use std::path::PathBuf;
 
 use geolife::load_geolife;
 use tracematch::{
-    FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig,
-    detect_sections_from_tracks, group_signatures_parallel,
+    FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, detect_sections_unified,
+    group_signatures_parallel,
 };
 
 const ENV: &str = "LAB_GEOLIFE_DIR";
@@ -135,10 +135,11 @@ fn detect(corpus: &Corpus) -> Vec<FrequentSection> {
         .collect();
     let groups = group_signatures_parallel(&signatures, &match_config);
 
-    detect_sections_from_tracks(
+    let _ = groups;
+    detect_sections_unified(
         &corpus.tracks,
+        &[],
         &corpus.sports,
-        &groups,
         &SectionConfig::default(),
     )
 }

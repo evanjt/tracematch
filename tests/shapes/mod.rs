@@ -9,6 +9,8 @@
 //! Geometry is authored in a local metre frame (x east, y north) around
 //! 46°N 7°E and converted to degrees at the end.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use tracematch::GpsPoint;
 

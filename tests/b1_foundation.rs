@@ -1,10 +1,8 @@
 //! B1's foundation: what is SALVAGEABLE from tracematch for an order-free,
 //! Unified-aware incremental, and what CONVERGENCE TARGET it must hit.
 //!
-//! Companion to `pool_incremental_parity.rs` (which proved the shipped
-//! `detect_sections_incremental` is welded to the legacy multiscale detector
-//! and cannot produce Unified sections). This file does two things, both pure
-//! tracematch, both on the seeded synthetic corpus, no veloqrs, no SQLite:
+//! This file does two things, both pure tracematch, both on the seeded
+//! synthetic corpus, no veloqrs, no SQLite:
 //!
 //! PART A characterises the reusable MATCHING half. `find_sections_in_route`
 //! projects an existing section onto a new activity. We seed it with real

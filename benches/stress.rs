@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::synthetic::SyntheticScenario;
-use tracematch::{SectionConfig, detect_sections_multiscale};
+use tracematch::{SectionConfig, detect_sections_unified};
 
 // ============================================================================
 // 1. Scaling Curve (Multiscale) — Find the N^2 cliff
@@ -31,13 +31,10 @@ fn bench_scaling_curve(c: &mut Criterion) {
 
         let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
         let dataset = scenario.generate();
-        let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
-            b.iter(|| {
-                detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config)
-            });
+            b.iter(|| detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config));
         });
     }
 
@@ -59,7 +56,6 @@ fn bench_route_length_impact(c: &mut Criterion) {
         let length_m = length_km as f64 * 1000.0;
         let scenario = SyntheticScenario::with_activity_count(50, length_m, 0.6);
         let dataset = scenario.generate();
-        let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
         group.bench_with_input(
@@ -67,12 +63,7 @@ fn bench_route_length_impact(c: &mut Criterion) {
             &length_km,
             |b, _| {
                 b.iter(|| {
-                    detect_sections_multiscale(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &groups,
-                        &config,
-                    )
+                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
                 });
             },
         );
@@ -96,7 +87,6 @@ fn bench_overlap_density(c: &mut Criterion) {
         let overlap_frac = overlap_pct as f64 / 100.0;
         let scenario = SyntheticScenario::with_activity_count(100, 10_000.0, overlap_frac);
         let dataset = scenario.generate();
-        let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
         group.bench_with_input(
@@ -104,12 +94,7 @@ fn bench_overlap_density(c: &mut Criterion) {
             &overlap_pct,
             |b, _| {
                 b.iter(|| {
-                    detect_sections_multiscale(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &groups,
-                        &config,
-                    )
+                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
                 });
             },
         );
@@ -141,13 +126,10 @@ fn bench_no_overlap_worst_case(c: &mut Criterion) {
 
         let scenario = SyntheticScenario::with_no_overlap(count);
         let dataset = scenario.generate();
-        let groups = dataset.route_groups();
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
-            b.iter(|| {
-                detect_sections_multiscale(&dataset.tracks, &dataset.sport_types, &groups, &config)
-            });
+            b.iter(|| detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config));
         });
     }
 
@@ -168,7 +150,6 @@ fn bench_component_breakdown(c: &mut Criterion) {
     for count in [100, 500] {
         let scenario = SyntheticScenario::with_activity_count(count, 10_000.0, 0.8);
         let dataset = scenario.generate();
-        let groups = dataset.route_groups();
 
         // Benchmark R-tree construction
         {
@@ -193,12 +174,7 @@ fn bench_component_breakdown(c: &mut Criterion) {
             let config = SectionConfig::default();
             group.bench_with_input(BenchmarkId::new("full_pipeline", count), &count, |b, _| {
                 b.iter(|| {
-                    detect_sections_multiscale(
-                        &dataset.tracks,
-                        &dataset.sport_types,
-                        &groups,
-                        &config,
-                    )
+                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
                 });
             });
         }

@@ -9,7 +9,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::synthetic::SyntheticScenario;
-use tracematch::{SectionConfig, detect_sections_multiscale};
+use tracematch::{SectionConfig, detect_sections_unified};
 
 /// Build a deterministic dataset of the given size with a single shared corridor.
 ///
@@ -44,12 +44,10 @@ fn bench_section_detection(c: &mut Criterion) {
         let config = SectionConfig::default();
 
         group.bench_with_input(
-            BenchmarkId::new("multiscale", activity_count),
+            BenchmarkId::new("unified", activity_count),
             &activity_count,
             |b, _| {
-                b.iter(|| {
-                    detect_sections_multiscale(&activities, &sport_types, &route_groups, &config)
-                });
+                b.iter(|| detect_sections_unified(&activities, &[], &sport_types, &config));
             },
         );
     }
@@ -70,7 +68,7 @@ fn bench_postprocessing_heavy(c: &mut Criterion) {
     let config = SectionConfig::default();
 
     group.bench_function("50_activities_full_pipeline", |b| {
-        b.iter(|| detect_sections_multiscale(&activities, &sport_types, &route_groups, &config));
+        b.iter(|| detect_sections_unified(&activities, &[], &sport_types, &config));
     });
 
     group.finish();
