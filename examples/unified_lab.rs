@@ -15,19 +15,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 use tracematch::{
-    CandidateSection, Decision, DetectionProgressCallback, Direction, FrequentSection, GpsPoint,
-    HysteresisParams, HysteresisState, IdentityParams, MatchConfig, PriorSection, RouteSignature,
-    SectionConfig, Tunables, geo_utils::haversine_distance, matching::resample_route,
-    plan_identity_tuned,
+    CandidateSection, Decision, Direction, FrequentSection, GpsPoint, HysteresisParams,
+    HysteresisState, IdentityParams, MatchConfig, PriorSection, RouteSignature, SectionConfig,
+    Tunables, geo_utils::haversine_distance, matching::resample_route, plan_identity_tuned,
 };
 
 #[path = "common/corpus.rs"]
 mod corpus;
-use corpus::{PhaseTimer, fmt_ms};
+use corpus::fmt_ms;
 
 #[path = "common/geolife.rs"]
 mod geolife;
@@ -399,11 +397,9 @@ fn self_overlap_frac(polyline: &[GpsPoint]) -> f64 {
 
 struct MethodReport {
     method: String,
-    sport: String,
     n_sections: usize,
     len_median: f64,
     len_p90: f64,
-    len_max: f64,
     visits_median: f64,
     low_visit_share: f64,
     per_activity_avg: f64,
@@ -416,7 +412,6 @@ struct MethodReport {
 
 fn analyse(
     method: &str,
-    sport: &str,
     sections: &[FrequentSection],
     n_activities: usize,
     runtime_ms: u128,
@@ -482,11 +477,9 @@ fn analyse(
 
     MethodReport {
         method: method.to_string(),
-        sport: sport.to_string(),
         n_sections: sections.len(),
         len_median: percentile(&lens, 0.5),
         len_p90: percentile(&lens, 0.9),
-        len_max: lens.last().copied().unwrap_or(0.0),
         visits_median: percentile(&visits, 0.5),
         low_visit_share: if sections.is_empty() {
             0.0
@@ -1354,7 +1347,7 @@ fn main() {
 
         for method in ["unified"] {
             if let Some((sections, ms)) = run_method(method) {
-                let report = analyse(method, sport, &sections, tracks.len(), ms);
+                let report = analyse(method, &sections, tracks.len(), ms);
                 println!(
                     "  {:<9} {:>4} sections  median {:>6.0}m  p90 {:>7.0}m  visits med {:>3.0}  \
                      ≤2-visit {:>3.0}%  per-act avg {:>4.1} max {:>3}  overlap pairs {:>4}  \
