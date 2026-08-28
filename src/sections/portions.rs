@@ -49,6 +49,54 @@ pub(crate) fn portion_candidates<'a>(
     candidates
 }
 
+/// Every qualifying pass one track makes over a section line, as the
+/// detector counts them. The engine's attach, rematch and reference paths
+/// count with this, so a lap counts once, a brush never, and a stored row
+/// agrees with what a fresh detect over the same pool would write.
+pub fn track_portions(
+    activity_id: &str,
+    track: &[GpsPoint],
+    line: &[GpsPoint],
+    config: &SectionConfig,
+) -> Vec<SectionPortion> {
+    if line.len() < 2 || track.len() < 2 {
+        return Vec::new();
+    }
+    if !intersects_bounds(track, &polyline_bounds(line, config.proximity_threshold)) {
+        return Vec::new();
+    }
+    let matcher = LineMatcher::new(line, config);
+    let ref_tree = build_rtree(line);
+    passes_of(&matcher, &ref_tree, line, activity_id, track)
+}
+
+/// The cell a pass is scored in: a track counts on a line when its points
+/// share the line's cells, so this is the attach bar the proximity
+/// setting scales.
+pub fn line_match_cell_m(config: &SectionConfig) -> f64 {
+    super::unified::cluster_cell_size(config)
+}
+
+fn passes_of(
+    matcher: &LineMatcher,
+    ref_tree: &RTree<IndexedPoint>,
+    line: &[GpsPoint],
+    activity_id: &str,
+    track: &[GpsPoint],
+) -> Vec<SectionPortion> {
+    matcher
+        .passes(track)
+        .into_iter()
+        .map(|(s, e)| SectionPortion {
+            activity_id: activity_id.to_string(),
+            start_index: s as u32,
+            end_index: e as u32,
+            distance_meters: calculate_route_distance(&track[s..e]),
+            direction: detect_direction_robust(&track[s..e], line, ref_tree),
+        })
+        .collect()
+}
+
 /// Qualifying passes of the candidate tracks over the polyline.
 pub(crate) fn compute_portions_over(
     representative_polyline: &[GpsPoint],
@@ -59,23 +107,18 @@ pub(crate) fn compute_portions_over(
     let matcher = LineMatcher::new(representative_polyline, config);
     let ref_tree = build_rtree(representative_polyline);
     let compute_for_activity = |activity_id: &&str| -> Vec<SectionPortion> {
-        let mut portions = Vec::new();
-        if let Some(track) = all_tracks.get(*activity_id) {
-            for (s, e) in matcher.passes(track) {
-                portions.push(SectionPortion {
-                    activity_id: (*activity_id).to_string(),
-                    start_index: s as u32,
-                    end_index: e as u32,
-                    distance_meters: calculate_route_distance(&track[s..e]),
-                    direction: detect_direction_robust(
-                        &track[s..e],
-                        representative_polyline,
-                        &ref_tree,
-                    ),
-                });
-            }
-        }
-        portions
+        all_tracks
+            .get(*activity_id)
+            .map(|track| {
+                passes_of(
+                    &matcher,
+                    &ref_tree,
+                    representative_polyline,
+                    activity_id,
+                    track,
+                )
+            })
+            .unwrap_or_default()
     };
 
     #[cfg(feature = "parallel")]

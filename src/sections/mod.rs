@@ -56,7 +56,9 @@ pub use consensus::{
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
 pub(crate) use portions::compute_activity_portions;
-pub use portions::{find_all_track_portions, find_all_track_portions_with_gap};
+pub use portions::{
+    find_all_track_portions, find_all_track_portions_with_gap, line_match_cell_m, track_portions,
+};
 pub use rtree::{IndexedPoint, build_rtree};
 pub use traces::{
     extract_activity_passes, extract_activity_trace, extract_all_activity_traces,

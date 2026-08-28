@@ -873,7 +873,7 @@ fn rescue_confirmed(
 /// The coverage-grid cell size for a cluster, derived from the config's
 /// proximity threshold. The batch [`detect_for_cluster`] and the cached
 /// fold must agree on this exactly, so it lives in one place.
-fn cluster_cell_size(config: &SectionConfig) -> f64 {
+pub(super) fn cluster_cell_size(config: &SectionConfig) -> f64 {
     (config.proximity_threshold * 0.5).clamp(50.0, 150.0)
 }
 
@@ -5441,12 +5441,7 @@ fn resolve_fold(
             if moved(prior, cand) {
                 held.push(change(prior, cand));
             }
-            frozen_out.push(graft_frozen(
-                prior,
-                cand,
-                tracks,
-                config.proximity_threshold,
-            ));
+            frozen_out.push(graft_frozen(prior, cand, tracks, config));
             carried.push((prior.id.clone(), prior.id.clone()));
         }
     }
@@ -5563,7 +5558,7 @@ fn graft_frozen(
     prior: &FrequentSection,
     partner: &FrequentSection,
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
-    proximity_m: f64,
+    config: &SectionConfig,
 ) -> FrequentSection {
     let mut out = prior.clone();
     for aid in &partner.activity_ids {
@@ -5573,26 +5568,13 @@ fn graft_frozen(
         let Some(&(pts, _)) = tracks.get(aid.as_str()) else {
             continue;
         };
-        let portions = crate::find_all_track_portions(pts, &out.polyline, proximity_m);
+        let portions = super::portions::track_portions(aid, pts, &out.polyline, config);
         if portions.is_empty() {
             continue;
         }
         out.activity_ids.push(aid.clone());
-        for (s, e, direction) in portions {
-            // Exclusive end, exactly as compute_activity_portions stores it.
-            let e = e.min(pts.len());
-            if s >= e {
-                continue;
-            }
-            out.visit_count += 1;
-            out.activity_portions.push(SectionPortion {
-                activity_id: aid.clone(),
-                start_index: s as u32,
-                end_index: e as u32,
-                distance_meters: crate::matching::calculate_route_distance(&pts[s..e]),
-                direction,
-            });
-        }
+        out.visit_count += portions.len() as u32;
+        out.activity_portions.extend(portions);
     }
     out
 }
