@@ -1,12 +1,8 @@
 //! Wire format for section detection.
 //!
 //! Defines the `FullTrackOverlap` and `OverlapCluster` types that flow
-//! between the cluster-detection layer (`density_grid`) and the
-//! consensus layer (`process_cluster` → `select_medoid`,
-//! `compute_consensus_polyline`). The legacy pairwise overlap
-//! detection (`find_full_track_overlap`, `cluster_overlaps`,
-//! `has_any_overlap`) lived here previously; it was replaced by the
-//! density-grid pass and removed.
+//! between the unified cut and the consensus layer (`process_cluster` to
+//! `select_medoid` and `compute_consensus_polyline`).
 
 use crate::GpsPoint;
 use std::collections::HashSet;

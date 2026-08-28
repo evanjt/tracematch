@@ -1,10 +1,10 @@
 //! Unified-detector validation lab.
 //!
-//! Runs every detection method over a real GPX corpus, per sport, and
+//! Runs the detector over a real GPX corpus, per sport and pooled, and
 //! reports the metrics that matter for the unified-detector work:
 //! section counts, length distribution, per-activity load, low-visit
 //! share, overlapping-pair count, runtime, and peak memory. Writes one
-//! GeoJSON per method+sport for visual inspection.
+//! GeoJSON per sport for visual inspection.
 //!
 //!     cargo run --release --example unified_lab -- \
 //!         ~/projects/personal/intervals/tracematch/sionrunning \
@@ -12,7 +12,6 @@
 //!
 //! Optional flags:
 //!     --sport Run          only this sport (default: all sports found)
-//!     --method density     only this method (density|corridor|flow)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1308,11 +1307,9 @@ fn main() {
         println!();
         println!("=== {} ({} activities) ===", sport, tracks.len());
 
-        // Route grouping (needed by the density path; also a baseline
-        // stat). Meaningless pooled — routes stay within a sport.
-        let groups = if *sport == "All" {
-            Vec::new()
-        } else {
+        // Route grouping as a baseline stat. Meaningless pooled: routes stay
+        // within a sport.
+        if *sport != "All" {
             let t_group = Instant::now();
             let signatures: Vec<RouteSignature> = tracks
                 .iter()
@@ -1326,8 +1323,7 @@ fn main() {
                 singleton,
                 fmt_ms(t_group.elapsed().as_millis())
             );
-            groups
-        };
+        }
 
         let unified_boundaries: std::cell::RefCell<Vec<tracematch::BoundaryRecord>> =
             std::cell::RefCell::new(Vec::new());
@@ -1339,23 +1335,6 @@ fn main() {
             }
             let t = Instant::now();
             let sections = match name {
-                "density" => {
-                    let timer = Arc::new(PhaseTimer::new());
-                    tracematch::detect_sections_multiscale_with_progress(
-                        &tracks,
-                        &sport_types,
-                        &groups,
-                        &section_config,
-                        timer as Arc<dyn DetectionProgressCallback>,
-                    )
-                    .sections
-                }
-                "corridor" => {
-                    tracematch::detect_sections_corridor(&tracks, &sport_types, &section_config)
-                }
-                "flow" => {
-                    tracematch::detect_sections_flow_graph(&tracks, &sport_types, &section_config)
-                }
                 "unified" => {
                     let out = tracematch::detect_sections_unified_dated(
                         &tracks,
@@ -1373,10 +1352,7 @@ fn main() {
             Some((sections, t.elapsed().as_millis()))
         };
 
-        for method in ["density", "corridor", "flow", "unified"] {
-            if *sport == "All" && method != "unified" {
-                continue;
-            }
+        for method in ["unified"] {
             if let Some((sections, ms)) = run_method(method) {
                 let report = analyse(method, sport, &sections, tracks.len(), ms);
                 println!(

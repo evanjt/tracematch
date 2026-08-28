@@ -401,8 +401,7 @@ fn test_find_sections_real_data() {
     // Use the public batch detector. We only need a non-empty section set to
     // exercise find_sections_in_route below — the choice of detector is
     // incidental to what this test is checking.
-    let sections =
-        tracematch::sections::detect_sections_from_tracks(&tracks, &sport_types, &[], &config);
+    let sections = tracematch::detect_sections_unified(&tracks, &[], &sport_types, &config);
 
     println!("Detected {} sections", sections.len());
 
