@@ -3,7 +3,7 @@
 //! One rule defines a section: **a maximal corridor stretch of
 //! near-constant traffic composition.**
 //!
-//! 1. **Evidence — coverage grid.** Rasterise every track of a sport
+//! 1. **Evidence, coverage grid.** Rasterise every track of a sport
 //!    into ~100 m cells, recording the unique track set per cell and how
 //!    many times each track passes through it (pass class 1 / 2 / 3+,
 //!    elevation-aware so switchback legs never inflate the count).
@@ -11,7 +11,7 @@
 //!    are mutually near-identical (both containments ≥ `1 − divergence`,
 //!    with one-track slack for GPS wobble) AND whose shared tracks agree
 //!    on pass class. Lateral cell braiding on one road collapses into
-//!    one component; a fork splits it; so does a change in usage — a
+//!    one component; a fork splits it; so does a change in usage, a
 //!    lollipop mouth (stem covered twice, loop once), an oval entrance
 //!    (stem twice, oval many), the point where an out-and-back's shared
 //!    ground meets a one-way variant. Composition is *who* passes and
@@ -20,15 +20,15 @@
 //!    components survives only where the diverging branch is itself a
 //!    section: it must take a significant share of the through traffic
 //!    AND carry enough activities to stand alone. A cut whose branch
-//!    never surfaces is invisible on the map — the corridor would stop
+//!    never surfaces is invisible on the map, the corridor would stop
 //!    for no reason the athlete can see. Merging can promote a branch,
 //!    so this runs to a fixed point. Pass-class boundaries are exempt:
 //!    a turnaround or loop mouth is a visible reason to end a section
 //!    even with no third corridor there. Sections are disjoint by
-//!    construction — no post-hoc overlap removal or splitting needed.
+//!    construction, no post-hoc overlap removal or splitting needed.
 //! 4. **Support rule.** Adaptive visit floor by length and corpus size
 //!    (`required_visits_for_length`), plus min-length.
-//! 5. **Geometry — one real trace.** Each contributing activity's
+//! 5. **Geometry, one real trace.** Each contributing activity's
 //!    portion is reduced to a single pass (see [`simple_pass_range`]);
 //!    `process_cluster` picks the medoid and computes consensus for its
 //!    metadata (confidence, spread, point density), but the polyline
@@ -42,11 +42,11 @@
 //!    represented one is trimmed to its longest unrepresented run,
 //!    standing only if that remnant still qualifies on its own
 //!    ([`probe_mask`], [`unrepresented_runs`]). Nothing is merged and
-//!    nothing synthetic is created — braid-lane twins simply lose to
+//!    nothing synthetic is created, braid-lane twins simply lose to
 //!    the better line, and their traversals still match it.
 //!    Under-representing beats scattering near-duplicates. "Too close"
 //!    needs no new constant: it is one cell (braid width, proximity/2),
-//!    and deliberately planimetric — plan cells are atomic in the
+//!    and deliberately planimetric, plan cells are atomic in the
 //!    partition, so stacked ground never surfaces as a separate
 //!    candidate here, and cross-day absolute elevation comparison is
 //!    barometric drift, not signal. Geometry against polylines, not
@@ -57,7 +57,7 @@
 //!    covering activity ([`unify_chain_references`]): a fork-cut chain
 //!    renders as consecutive ranges of a single real trace, joints
 //!    meeting on a shared trace point instead of splices from
-//!    different days. Boundaries, visits, and evidence are untouched —
+//!    different days. Boundaries, visits, and evidence are untouched -
 //!    only the reference pick is coordinated, and never across ground
 //!    no single pass actually connected.
 //! 8. **Lift exclusion.** Spans a track was carried rather than
@@ -69,6 +69,21 @@
 //! 9. **Reasons as data.** Every surviving boundary and every backed-off
 //!    candidate records why, as a [`BoundaryRecord`] rather than a log
 //!    line, so the decision is inspectable after the fact.
+//!
+//! Rule to function, in the order the pipeline runs them:
+//!
+//! | Rule | Function |
+//! |------|----------|
+//! | 1 evidence grid | [`build_coverage_grid`], with lift ground removed by [`confirmed_lift_spans`] |
+//! | 2 traffic partition | [`partition_supernodes`] (per sport or pooled via [`partition_pooled`]) |
+//! | 3 visible boundaries | [`merge_non_fork_boundaries`], explained by [`explain_boundaries`] |
+//! | 4 support | [`has_support`] and [`required_visits_for_length`] |
+//! | 5 one real trace | [`simple_pass_range`] per member, [`render_leaf`] for the line |
+//! | 6 selection backoff | the candidate loop in [`detect_for_cluster_with_grid`] |
+//! | passes and membership | [`LineMatcher`] through [`super::portions::track_portions`] |
+//!
+//! The source keeps the older physical order (lift functions first, the
+//! grid after); the table is the map.
 
 use super::grid::{CellGrid, bresenham_cells, runs_in_cells};
 use super::identity::{IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground};
@@ -87,7 +102,7 @@ type Cell = (i32, i32);
 type Portion = (usize, usize, usize, f64);
 
 /// Pass class: how many times one track passes through one cell.
-/// Saturates at 3 — an oval lapped 4 or 12 times reads the same.
+/// Saturates at 3, an oval lapped 4 or 12 times reads the same.
 const PASS_CLASS_MAX: u8 = 3;
 
 /// One explained decision: why a cut between two adjacent components
@@ -147,7 +162,7 @@ pub enum BoundaryReason {
     LowSupport { floor: u32, dropped_cells: u32 },
     /// The join-local traffic halves: most of the thick side's users
     /// never reach the thin side, and their departure is the visible
-    /// reason the section ends — a braid mouth rejoining wide, a
+    /// reason the section ends, a braid mouth rejoining wide, a
     /// popular stopping point, a corridor shedding most of its traffic
     /// at once. Rule 9's majority usage change measured as volume,
     /// where [`BoundaryReason::UsageChange`] measures it as pass class.
@@ -209,6 +224,8 @@ pub struct Tunables {
     /// corpora.
     pub dwell_events: usize,
     /// Single-pass cut: how many recent cell events are inspected...
+    /// Swept with `pass_needed`: 2-of-4 through 4-of-6 is byte-flat on
+    /// both corpora.
     pub pass_window: usize,
     /// ...and how many of them must be re-entries before the portion
     /// is cut where the re-covering began. A majority-of-recent rule;
@@ -320,13 +337,15 @@ pub struct Tunables {
     pub self_pass_max: f64,
     /// Clean-render bar: the default render (longest portion, or the
     /// medoid) keeps its stability privilege only while essentially
-    /// fold-free — under this share of revisiting points. Between here
+    /// fold-free, under this share of revisiting points. Between here
     /// and [`Tunables::self_pass_max`] a legal but visibly folded
     /// default is displaced by the cleanest contributing pass (the
     /// penalty's blind band: a knot 100-200 m along-trace is charged
     /// by [`self_pass_penalty`] but too tight for the dwell cut).
     /// Sits above the clean-line noise floor (straight passes measure
-    /// < 0.02). Swept beside `self_pass_max`.
+    /// < 0.02). Measured at the clean plateau edge: 0.08 readmits a
+    /// dirty 64 % grade render, 0.05 takes Buller's default from 24 %
+    /// self-overlap to 5 %.
     pub self_pass_clean: f64,
     /// Majority-render bar: the longest contiguous stretch of a
     /// rendered line allowed on minority ground (supported by fewer
@@ -338,19 +357,26 @@ pub struct Tunables {
     /// sustained run marks a variant walk; scattered single samples (a
     /// staircase jog, an end taper) never trip it. Three samples at
     /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
-    /// floor. Swept beside `self_pass_max`.
+    /// floor. Calibrated on the Sion braid (a 1939 m section drawn by
+    /// a diverter): share bars cannot tell a braid walk from a
+    /// staircase jog, both 6-11 % of the line, a contiguous 60 m run
+    /// can.
     pub minority_run_m: f64,
     /// Occasion span floor, in hours. Support counts distinct calendar
-    /// DAYS, and — when every visit is dated — additionally requires
+    /// DAYS, and, when every visit is dated, additionally requires
     /// the days to stretch beyond one stay: ground visited only within
     /// this window was one trip to a place, not repetition, however
     /// many recordings the trip produced ([`occasion_support`]). A gap
     /// threshold cannot draw this line (a two-day trip and two commute
     /// days are both ~24 h apart; pairwise separation halves a daily
-    /// commuter's support); the span can — a stay is compact, routine
+    /// commuter's support); the span can, a stay is compact, routine
     /// stretches over weeks. One week; sweep 72-336 beside the other
     /// floors. Tracks with no known start count as their own day and
     /// waive the span, so dateless corpora keep activity counting.
+    /// Calibrated on both corpora against the two designs it replaced:
+    /// a 48 h chain folded a daily walker's 19 months into one
+    /// occasion, pairwise separation halved a commuter's support; the
+    /// span keeps every commuter and retires only one-stay ground.
     pub occasion_span_h: f64,
     /// Projection latitude quantisation, in degrees. A cluster's
     /// `ref_lat` snaps to the nearest multiple, so the metre projection
@@ -358,7 +384,7 @@ pub struct Tunables {
     /// every cell boundary in place, which is what makes per-track and
     /// per-cluster leaves cacheable at all. Derivation-anchored, like
     /// `cluster_gap_m`: the snap moves the projection latitude at most
-    /// half a band, an east-west scale error of tan(lat) x half-band —
+    /// half a band, an east-west scale error of tan(lat) x half-band -
     /// about 0.15% at 60 degrees, an order under the 1% budget that
     /// sized `cluster_gap_m`. When a mean does cross a band edge the
     /// cluster re-projects once and the hysteresis layer absorbs the
@@ -1102,7 +1128,7 @@ fn same_traffic_sets(a: &HashSet<u32>, b: &HashSet<u32>, same_traffic: f64) -> b
 /// Shared tracks must pass through both cells equally often. Each track
 /// is compared against itself across the two cells, so a corpus mixing
 /// through-runners (1 pass) with out-and-backers (2) stays one corridor
-/// — a boundary appears only where many tracks' own count changes at
+///, a boundary appears only where many tracks' own count changes at
 /// the same place: a common turnaround, a lollipop mouth, an oval
 /// entrance. Tolerates a divergence share of disagreeing tracks with
 /// one-track slack, mirroring [`same_traffic_sets`].
@@ -1133,7 +1159,7 @@ fn pass_classes_agree(coverage: &CoverageGrid, a: Cell, b: Cell, divergence: f64
 /// one neighbouring cell of ground I covered more than a few events
 /// ago, at my elevation level? When such re-entries dominate the recent
 /// events (3 of the last 5), the portion is cut where the re-covering
-/// began. The neighbourhood reach — not cell coarseness — supplies the
+/// began. The neighbourhood reach, not cell coarseness, supplies the
 /// lateral tolerance for GPS braiding, so small features (a village
 /// loop spans only a couple of coarse cells) still produce enough
 /// events to be seen.
@@ -1274,15 +1300,15 @@ fn partition_supernodes(
 /// adjacent cells union when the thinner side's traffic is carried by
 /// the thicker side (containment ≥ the same-traffic anchor). The
 /// strict MUTUAL containment of [`partition_supernodes`] is right for
-/// first-pass supernodes — it keeps a 3-track street out of a 5-track
-/// street's node — but it re-shreds salvaged junction ground on the
+/// first-pass supernodes, it keeps a 3-track street out of a 5-track
+/// street's node, but it re-shreds salvaged junction ground on the
 /// same junction cells that killed it: crossing paths inflate one
 /// cell's set and mutuality fails there forever, while the through
 /// traffic runs contained through the junction. One-sided containment
 /// follows the through traffic; a dishonest glue (a quiet stub riding
-/// a busy corridor's containment) cannot RENDER — rule B displaces any
+/// a busy corridor's containment) cannot RENDER, rule B displaces any
 /// pass walking sustained minority ground and the remainder re-queue
-/// re-separates what the render disowns — so honesty is policed where
+/// re-separates what the render disowns, so honesty is policed where
 /// it binds, at the line.
 fn partition_pooled(
     hot_cells: &[Cell],
@@ -1432,7 +1458,7 @@ fn join_usage_mismatch(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> (usiz
 }
 
 /// A pass-class boundary counts only when the change is the experience
-/// of MOST of the traffic at the join — a turnaround or loop mouth for
+/// of MOST of the traffic at the join, a turnaround or loop mouth for
 /// its users. A minority's turnaround (walkers turning back on a
 /// corridor runners continue along) must not cut the majority's through
 /// corridor.
@@ -1442,7 +1468,7 @@ fn is_usage_boundary(shared: usize, mismatch: usize) -> bool {
 
 /// Join-local traffic on each side: the union of tracks over the
 /// boundary-touching cells. The join is a cliff when the thin side
-/// carries less than half the thick side's traffic — the majority's
+/// carries less than half the thick side's traffic, the majority's
 /// experience of the ground ends there (rule 9's majority usage
 /// change, measured as volume), even when the leavers' alternative is
 /// not visible at the join: a braid mouth rejoining wide, unique
@@ -1450,7 +1476,7 @@ fn is_usage_boundary(shared: usize, mismatch: usize) -> bool {
 /// [`is_usage_boundary`]; the one-track absolute slack mirrors
 /// [`same_traffic_sets`] so tiny corridors never fragment. Gradual
 /// attrition (traffic shed one track at a time along the corridor)
-/// never trips it — each join's local sets stay within the slack.
+/// never trips it, each join's local sets stay within the slack.
 fn traffic_cliff(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> Option<(u32, u32)> {
     let mut la: HashSet<u32> = HashSet::new();
     let mut lb: HashSet<u32> = HashSet::new();
@@ -1476,12 +1502,12 @@ fn traffic_cliff(pairs: &[(Cell, Cell)], coverage: &CoverageGrid) -> Option<(u32
 ///
 /// The test is on the LEAVERS: testing the through traffic instead
 /// would let a collinear continuation of the same corridor justify the
-/// cut — it shares the through traffic by definition — and chain
+/// cut, it shares the through traffic by definition, and chain
 /// fragments would hold each other apart forever. The branch must
 /// physically meet the join (direct adjacency only: a corridor two
 /// cells away, reached by a stub too short to be a section, must not
 /// arbitrate a cut it never visibly touches) and must carry enough
-/// activities to be a section in its own right — on a corridor used by
+/// activities to be a section in its own right, on a corridor used by
 /// three activities, one turning off is noise.
 #[allow(clippy::too_many_arguments)]
 fn branch_collecting_leavers(
@@ -1617,7 +1643,7 @@ fn explain_boundaries(
 /// can see why it ends there. Two reasons qualify: the departing
 /// traffic had somewhere else to go (a fork with a section-worthy third
 /// corridor), or the way the ground is used changes (a pass-class
-/// boundary — a turnaround, a lollipop mouth, an oval entrance). Where
+/// boundary, a turnaround, a lollipop mouth, an oval entrance). Where
 /// two components simply meet end-to-end with neither, the cut is
 /// attrition (activities starting, stopping, or drifting in and out)
 /// and the two are one continuous stretch.
@@ -1666,7 +1692,7 @@ fn merge_non_fork_boundaries(
         }
         // Fork arbitration is only meaningful between two components
         // that will both be sections. A fragment that cannot be one is
-        // handled by directed absorption below — its under-sampled
+        // handled by directed absorption below, its under-sampled
         // composition must not fake a fork (a one-cell sliver shares
         // few tracks with its own corridor, so every through runner
         // looks like a leaver).
@@ -1702,7 +1728,7 @@ fn merge_non_fork_boundaries(
     }
 
     // Directed absorption: each fragment joins the ONE section-worthy
-    // neighbour sharing most of its traffic. One neighbour only — a
+    // neighbour sharing most of its traffic. One neighbour only, a
     // junction apron touches every arm, and absorbing it into all of
     // them would fuse the junction itself. Pass-class-separated
     // neighbours never appear here (gated above), so a lollipop stem
@@ -1815,7 +1841,7 @@ fn self_pass_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
 /// ground is travelled once, same sense). Antiparallel pairs must also
 /// sit at least `gap` apart ALONG the line: a hairpin-tight corner's
 /// two legs are antiparallel within `near` but only a corner's arc
-/// apart — the corner's own shape, not a retrace — while an
+/// apart, the corner's own shape, not a retrace, while an
 /// out-and-back's pairs sit a full out-leg apart. Complements
 /// [`self_pass_penalty`], which needs an arc gap and so misses the
 /// short spurs of an out-and-back that returns to its start.
@@ -1828,7 +1854,7 @@ fn out_and_back_penalty(pts: &[GpsPoint], near: f64, gap: f64) -> f64 {
 }
 
 /// Per-point retrace marks behind [`out_and_back_penalty`]. Both
-/// directions of a retraced stretch are marked — the ground genuinely
+/// directions of a retraced stretch are marked, the ground genuinely
 /// has no single clean pass through it.
 fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     const CLOSE_FRAC: f64 = 0.2;
@@ -1854,7 +1880,7 @@ fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     // band, so this test is their only fold judge: a hill-sprint
     // hairpin drifts at the turn and its endpoints sit a quarter of
     // its length apart, over the base gate. Longer lines keep the
-    // strict gate — a winding through-corridor may coil past itself
+    // strict gate, a winding through-corridor may coil past itself
     // without being a retrace.
     let close_frac = if total < 2.0 * gap {
         1.5 * CLOSE_FRAC
@@ -1970,7 +1996,7 @@ fn closing_loop_range(
             return None;
         }
     }
-    // No end closure: a loop first, then a departure stem — the start
+    // No end closure: a loop first, then a departure stem, the start
     // is revisited later, and the loop before the stem is the face.
     let total = cum[n - 1];
     for j in (1..n).rev() {
@@ -2345,7 +2371,7 @@ fn portions_for_memo(
 
 /// Tracks passing within ~2 cells of the component: the population
 /// that had the opportunity to traverse it. Support floors scale with
-/// opportunity, not global corpus size — a trail only reachable by the
+/// opportunity, not global corpus size, a trail only reachable by the
 /// few who go there is not held to the whole corpus's bar, while busy
 /// town ground is.
 fn opportunity(node: &Supernode, coverage: &CoverageGrid) -> usize {
@@ -2370,7 +2396,7 @@ fn opportunity(node: &Supernode, coverage: &CoverageGrid) -> usize {
 /// Together they answer the support question: ground is repeated when
 /// it is visited on enough separate days AND those days stretch beyond
 /// one stay ([`Tunables::occasion_span_h`]). Day counting alone cannot
-/// tell a two-day trip from two commute days; the span can — a trip is
+/// tell a two-day trip from two commute days; the span can, a trip is
 /// compact, routine stretches over weeks.
 fn occasion_support(
     portions: &[Portion],
@@ -2442,7 +2468,7 @@ fn has_support(
 /// points, keyed on a `cell_m` grid and carrying the track index and
 /// coordinates. Built once per candidate so the representative choice
 /// can ask, at metre resolution, how many distinct contributors run
-/// near any point of a rendered line — a question the coarse coverage
+/// near any point of a rendered line, a question the coarse coverage
 /// grid (cell = proximity/2) cannot answer, because its one-ring
 /// tolerance leaks a junction's through-traffic onto a branch that
 /// diverges from it.
@@ -2474,7 +2500,7 @@ fn portion_point_index(
 /// variant captured by the coverage ring's lane width, or a private
 /// tail, reads as a sustained run; a staircase jog or an end taper
 /// reads as scattered single samples. The render choice prefers lines
-/// without a sustained minority run — the drawn line is the section's
+/// without a sustained minority run, the drawn line is the section's
 /// public face and must be where the majority went (rule 9's majority
 /// principle applied to the DISPLAY).
 fn minority_run_m(
@@ -2545,12 +2571,12 @@ fn minority_run_m(
 /// coverage grid's one-ring tolerance would). An end run is clipped
 /// only when it is a genuine BRANCH, not a taper or a low-traffic
 /// continuation:
-///   * short — under [`BRANCH_MAX_M`] and a third of the line, so a
+///   * short, under [`BRANCH_MAX_M`] and a third of the line, so a
 ///     section with a genuinely lower-traffic half or a long tapering
 ///     end (uneven but legitimate support) is left whole;
 ///   * under half the line's median support, sustained past a lone
 ///     staggered-ending sample; and
-///   * behind a cliff — the body sample adjoining the run carries at
+///   * behind a cliff, the body sample adjoining the run carries at
 ///     least double it, so a gradual taper (which never doubles across
 ///     one step) is not read as a branch.
 ///
@@ -2653,14 +2679,14 @@ fn minority_end_clip(
 
 /// Clip a render's ends back to supported ground: a SUSTAINED end run
 /// whose metre-resolution support among the section's own contributors
-/// is below `min_tracks` extends over ground that can never be hot — a
+/// is below `min_tracks` extends over ground that can never be hot, a
 /// one-walker overshoot past the usage change, kept only because the
 /// node's boundary cell is coarser than the change. End of support is
 /// a visible boundary (rule 9). The run must be sustained (`MIN_RUN`
 /// samples, as in [`minority_end_clip`]): a sample or two of thin end
 /// taper is receiver-noise staggering of where contributors start and
 /// stop, and clipping it would make each sport bucket's render end
-/// drift by its own stagger — enough to push the identity carry off a
+/// drift by its own stagger, enough to push the identity carry off a
 /// row another bucket minted on the same ground. Display-only,
 /// ends-only: mid-line support is rule B's business.
 fn support_end_clip(
@@ -2749,7 +2775,7 @@ fn support_end_clip(
 /// row over still lends the lane support. A pass is a maximal stretch
 /// of a contributor's track inside the candidate's cell set at least
 /// `pass_min_m` long in arc: a corner clip or a crossing lends no support,
-/// while every lap and fragment of a genuine traversal does — a
+/// while every lap and fragment of a genuine traversal does, a
 /// contributor whose selected single pass is a fragment of its outing
 /// must not read as absent from the rest of its loop. Ground a
 /// contributor covers elsewhere in its outing, outside this candidate,
@@ -3086,8 +3112,8 @@ fn qualify_candidate(
 /// Whether an accepted section's traffic carries the candidate's:
 /// containment of the candidate's set at the same-traffic bar. A braid
 /// twin or chain neighbour shares the users whose ground it claims; a
-/// distinct population's parallel path — the other bank of a river a
-/// lane's width away in plan — does not, and a line its users never
+/// distinct population's parallel path, the other bank of a river a
+/// lane's width away in plan, does not, and a line its users never
 /// run cannot represent their corridor.
 fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
     if cand.is_empty() {
@@ -3100,7 +3126,7 @@ fn shares_traffic(cand: &HashSet<u32>, acc: &HashSet<u32>, bar: f64) -> bool {
 /// Ground the candidate's own tracks LAP (a class-3 pass) is
 /// revolutions: an accepted through-line a braid width away may carry
 /// the same users' approaches, but it cannot represent their laps.
-/// Lapped ground is represented only by lapped ground — an accepted
+/// Lapped ground is represented only by lapped ground, an accepted
 /// ring on the same revolutions still dedups a second ring.
 #[allow(clippy::too_many_arguments)]
 fn probe_mask(
@@ -3170,7 +3196,7 @@ fn unrepresented_runs(mask: &[bool], cum: &[f64], bridge_m: f64) -> Vec<(usize, 
 /// geometry cut from ONE covering activity, so a chain renders as
 /// consecutive ranges of a single real trace and its joints meet on a
 /// shared trace point instead of splices from different days.
-/// Boundaries, visits, evidence, and — critically — each member's SPAN
+/// Boundaries, visits, evidence, and, critically, each member's SPAN
 /// are untouched: the covering trace is cut where the member's own
 /// medoid extent projects onto it, so only the source of the pixels
 /// changes and jackknife extent stability is preserved (re-deriving
@@ -3389,7 +3415,7 @@ fn unify_chain_references(
     // Joint snap: linked pairs now cut from the same trace meet at a
     // shared trace point. A gap wider than the link tolerance is real
     // unrepresented ground and stays open. A CLOSED member meets
-    // nobody — its joint is its own closure, and snapping a ring to a
+    // nobody, its joint is its own closure, and snapping a ring to a
     // neighbour's midpoint unrolls the revolution every adoption
     // guard preserved.
     let closed = |m: usize| {
@@ -3465,8 +3491,8 @@ fn unify_chain_references(
 ///
 /// Tracks split into geographic clusters first and the pipeline runs
 /// per cluster on the cluster's own reference latitude. One global
-/// plane sizes east-west cells by cos(reference)/cos(local) — ~14%
-/// wrong for a corpus spanning Valais and Melbourne — and lets ground
+/// plane sizes east-west cells by cos(reference)/cos(local), ~14%
+/// wrong for a corpus spanning Valais and Melbourne, and lets ground
 /// on another continent shift every cell boundary at home; local
 /// projection removes both, and makes each region's catalogue
 /// independent of the rest of the corpus.
@@ -3723,7 +3749,7 @@ fn detect_for_cluster_with_grid(
     let mut supernodes = partition_supernodes(&hot_cells, coverage, same_traffic);
 
     // Two rules applied to a fixed point:
-    //  * a component that cannot be a section is not a barrier — absorb it
+    //  * a component that cannot be a section is not a barrier, absorb it
     //  * a boundary only survives where the diverging branch is itself a
     //    section. A cut whose branch never surfaces is invisible on the
     //    map: the corridor stops for no reason the athlete can see.
@@ -3784,8 +3810,8 @@ fn detect_for_cluster_with_grid(
     // Candidates that could stand as sections, scored by the real usage
     // they represent (total portion metres).
     //
-    // Ground whose candidate dies — under the length floor, at
-    // qualification, or backed off during selection — is not discarded:
+    // Ground whose candidate dies, under the length floor, at
+    // qualification, or backed off during selection, is not discarded:
     // its cells pool in `orphaned` and re-enter the queue once the
     // first pass drains. The strict same-traffic partition shreds a
     // corridor at every junction cell whose track set a crossing path
@@ -3793,7 +3819,7 @@ fn detect_for_cluster_with_grid(
     // traffic they carry is real. The pool re-partitions at
     // through-traffic granularity so junction shreds reassemble, then
     // every pooled candidate faces the same floors, probes, and
-    // backoff as any other — one retry per cell, so the salvage
+    // backoff as any other, one retry per cell, so the salvage
     // terminates.
     let mut orphaned: std::collections::BTreeSet<Cell> = std::collections::BTreeSet::new();
     let mut candidates: Vec<(usize, Supernode, Vec<Portion>, f64)> = Vec::new();
@@ -3836,7 +3862,7 @@ fn detect_for_cluster_with_grid(
     });
 
     // The selection loop below is inherently serial (occupation order), but
-    // its expensive leaves — consensus and the render penalties/runs — are
+    // its expensive leaves, consensus and the render penalties/runs, are
     // pure per candidate. Warm the memos for the whole initial list
     // concurrently, inserting in candidate order; the loop then mostly
     // hits, and trimmed or salvaged variants still compute inline on their
@@ -3947,7 +3973,7 @@ fn detect_for_cluster_with_grid(
         // accepted polyline is never re-emitted. The probe walks the
         // candidate's best portion; representation means accepted
         // geometry within a cell's width (braid width, proximity/2) in
-        // plan at the same elevation level — a balcony path above an
+        // plan at the same elevation level, a balcony path above an
         // accepted road is distinct ground, not a duplicate. A wholly
         // represented candidate backs off; a partly represented one is
         // trimmed to its longest unrepresented run and stands only if
@@ -3984,7 +4010,7 @@ fn detect_for_cluster_with_grid(
         // step away along the SAME pass: a masked point within one
         // cell's arc of the candidate's own lapped ground is the way
         // in and out of its revolutions, not represented corridor.
-        // Arc reach, never plan reach — a separate stem candidate a
+        // Arc reach, never plan reach, a separate stem candidate a
         // ring away gains nothing.
         if mask.iter().any(|&m| m) {
             let strict: Vec<bool> = probe.iter().map(own_lapped).collect();
@@ -4167,7 +4193,7 @@ fn detect_for_cluster_with_grid(
             // single traversal at all. The default render (longest
             // portion when trimmed, else the medoid: remnant portions
             // mix full coverers with corner clips, and the medoid's
-            // average-minimum-distance has a subset bias — a short
+            // average-minimum-distance has a subset bias, a short
             // central fragment is near every longer trace) stands when
             // it is a single pass; above the floor the cleanest
             // contributing pass is rendered instead, and a candidate
@@ -4215,7 +4241,7 @@ fn detect_for_cluster_with_grid(
                 // stability privilege must sit on the pass that
                 // represents the ground. Faithful then cleanest as in
                 // the displacement chain; the tie-break is nearness to
-                // the consensus, not length — a lap session's entry and
+                // the consensus, not length, a lap session's entry and
                 // exit passes carry approach ground and are always its
                 // longest.
                 let rep_amd: HashMap<usize, f64> = (0..portions.len())
@@ -4269,7 +4295,7 @@ fn detect_for_cluster_with_grid(
             // privilege only while essentially clean AND on majority
             // ground. Otherwise the render falls to the best legal
             // pass: majority-faithful first, then cleanest, then
-            // longest — a visibly folded or minority-walking default
+            // longest, a visibly folded or minority-walking default
             // must not be the section's public face. A candidate whose
             // every pass is over the fold floor backs off as a blob.
             let faithful = |i: usize| runs[i] < tun.minority_run_m;
@@ -4329,8 +4355,8 @@ fn detect_for_cluster_with_grid(
             // one end that most of the section's own traffic skips (a
             // wrong-way turn at a junction) reads thin at metre
             // resolution while the body stays busy. The drawn line is
-            // still one real single pass — a sub-range of the same
-            // trace — and the extent, counts, and occupied footprint
+            // still one real single pass, a sub-range of the same
+            // trace, and the extent, counts, and occupied footprint
             // below keep the full portion, so nothing downstream shifts.
             let (cs, ce) = minority_end_clip(
                 &sport_tracks[t_idx].1[s..e],
@@ -4352,7 +4378,7 @@ fn detect_for_cluster_with_grid(
             // A RE-QUEUED candidate's drawn ends must sit on supported
             // ground: its node was assembled from freed cells and
             // salvage pools, so its portions carry ring bleed past the
-            // real usage change — a one-walker overshoot that survives
+            // real usage change, a one-walker overshoot that survives
             // the clips above only because the node's boundary cell is
             // coarser than the change. First-pass candidates keep
             // their renders untouched: their extents came through the
@@ -4395,7 +4421,7 @@ fn detect_for_cluster_with_grid(
             // renders the LOOP: lapped ground's honest face is the
             // revolution, and the stem it was reached by re-enters the
             // queue with the rest of the undrawn ground below. Only
-            // LAPPED ground reads this way — the loop's cells must
+            // LAPPED ground reads this way, the loop's cells must
             // carry a class-3 pass from somebody's revolutions
             // (class 2 is any out-and-back; a corridor travelled
             // there-and-home must not read as a circuit). A winding
@@ -4492,9 +4518,9 @@ fn detect_for_cluster_with_grid(
                     {
                         // The chosen pass's revolution keeps its
                         // privilege while it agrees with the other
-                        // laps at metre resolution. An outlier lap —
+                        // laps at metre resolution. An outlier lap -
                         // one that weaves off the circuit in bursts
-                        // too short for the sustained-minority bar —
+                        // too short for the sustained-minority bar -
                         // is displaced by the legal pass whose
                         // revolution agrees best.
                         let mut pick = (t_idx, rs, re, ls, le, loop_agreement(t_idx, ls, le));
@@ -4552,7 +4578,7 @@ fn detect_for_cluster_with_grid(
             // the whole candidate), the DISPLAY keeps its longest
             // fold-free stretch rather than drawing the knot: interval
             // reps over a corridor render as the corridor, not the
-            // reps. Judged on the final clipped line's OWN score — the
+            // reps. Judged on the final clipped line's OWN score, the
             // clips above change the denominator, and a long portion
             // under the clean bar can hide a knot that dominates its
             // clipped sub-range. Display-only, like the clips above:
@@ -4728,7 +4754,7 @@ fn detect_for_cluster_with_grid(
                     .push((*p, ai));
             }
             // Rule 6 draws ONE real pass, so a corridor no one crosses
-            // end to end can never be drawn by a single section — and
+            // end to end can never be drawn by a single section, and
             // this node may own far more ground than its line reaches
             // (a displaced default, or a valley whose longest pass
             // spans a third of it). That ground re-enters the queue on
@@ -4773,7 +4799,7 @@ fn detect_for_cluster_with_grid(
             free.sort_unstable();
             if (free.len() as f64) * cell_size >= config.min_section_length {
                 // The freed ground is re-partitioned the same way all
-                // ground is — same-traffic supernodes — never by bare
+                // ground is, same-traffic supernodes, never by bare
                 // adjacency: a corner gluing a 3-track street to a
                 // 5-track street would otherwise pool their traffic
                 // into one node and borrow a longer piece's softer
@@ -4860,9 +4886,9 @@ fn detect_for_cluster_with_grid(
 }
 
 /// Chain neighbours must MEET, not double-draw: when one line's end
-/// runs sustained alongside another accepted line — two renderings of
+/// runs sustained alongside another accepted line, two renderings of
 /// the same trail from different real activities, a GPS-drift lane
-/// apart — the quieter line's overrunning end clips back to the meet
+/// apart, the quieter line's overrunning end clips back to the meet
 /// point and the busier line keeps the shared stretch. Ends only,
 /// display only, and only within the drift scale: genuinely parallel
 /// streets sit wider than [`SEAM_TOL_M`] and are never touched.
@@ -5116,7 +5142,7 @@ fn detect_by_sport(
 /// The outcome of folding one activity into an existing catalogue: the
 /// full converged catalogue plus the delta a persistence layer applies.
 ///
-/// The batch catalogue is legitimately NON-MONOTONE — sections dissolve
+/// The batch catalogue is legitimately NON-MONOTONE, sections dissolve
 /// and reform as evidence accumulates (measured: section count walks a
 /// path like `.. 3, 3, 2, 2, 3 ..` over a growing pool, never a
 /// superset of an earlier step). So an incremental that only ever ADDED
@@ -5137,7 +5163,7 @@ pub struct UnifiedIncrementalResult {
     /// Catalogue sections whose ground no prior section carried: the
     /// sections this fold surfaced. A split loser (new cut on ground a
     /// prior partly covered, where a sibling inherited the prior) counts
-    /// as added — from the caller's side it is a new list entry.
+    /// as added, from the caller's side it is a new list entry.
     pub added: Vec<FrequentSection>,
     /// Parallel to [`added`](Self::added): the prior id each added section was
     /// carved from when it is a split loser (it shares a prior's corridor but a
@@ -5162,7 +5188,7 @@ pub struct UnifiedIncrementalResult {
     pub changed: Vec<SectionGeometryChange>,
     /// Re-cuts the policy held back: the evidence preferred `current`,
     /// but `previous` is pinned or frozen so the catalogue keeps it. The
-    /// delta stays observable while the geometry stays still — a frozen
+    /// delta stays observable while the geometry stays still, a frozen
     /// caller can see drift accumulating instead of discovering it as one
     /// burst at unfreeze.
     pub held: Vec<SectionGeometryChange>,
@@ -5220,8 +5246,8 @@ pub struct SectionGeometryChange {
 /// What a fold is allowed to do to geometry the caller already holds.
 ///
 /// Pure input. The DECISION to pin a section is durable user intent and
-/// belongs to the caller; the CONSEQUENCE of a pin — which ground a
-/// fresh cut may still claim once a pinned corridor is spoken for — is
+/// belongs to the caller; the CONSEQUENCE of a pin, which ground a
+/// fresh cut may still claim once a pinned corridor is spoken for, is
 /// detection maths and belongs here, beside the selection backoff it
 /// mirrors. Policy never alters discovery or the evidence cache, only
 /// emission: the raw evidence stays a pure function of the activity set.
@@ -5233,16 +5259,16 @@ pub struct SectionUpdatePolicy {
     /// corridor: a fresh cut sharing ground with it is withheld (reported
     /// in `held`) rather than emitted beside it, per the
     /// never-merge-near-duplicates rule. Its traversal evidence keeps
-    /// growing — new members are grafted append-only with portions
-    /// recomputed against the FROZEN polyline — while the consensus
+    /// growing, new members are grafted append-only with portions
+    /// recomputed against the FROZEN polyline, while the consensus
     /// fields stay frozen with the geometry they describe. Note the
     /// corridor consequence: a pinned trunk owns its full corridor, so
     /// junction re-cuts along it stay withheld until unpinned.
     pub pinned_ids: Vec<String>,
     /// Freeze every surviving section's geometry, not just the pinned
     /// ones: the catalogue's drawn lines hold still. Unlike a pin this
-    /// does NOT freeze existence — ground that decisively lost support
-    /// still dissolves (a dissolve removes, it does not redraw) — and
+    /// does NOT freeze existence, ground that decisively lost support
+    /// still dissolves (a dissolve removes, it does not redraw), and
     /// genuinely new ground still lands in `added`. Withheld re-cuts are
     /// reported in `held`, so drift stays observable. Default false:
     /// geometry follows the evidence.
@@ -5262,7 +5288,7 @@ pub struct SectionUpdatePolicy {
 /// Detection is already per-(sport, geo-cluster): the batch is a union
 /// over geographically disjoint clusters of [`detect_for_cluster`], and
 /// each cluster's catalogue is a pure function of that cluster's activity
-/// SET (proven order-free — canonical portion order, sorted grid
+/// SET (proven order-free, canonical portion order, sorted grid
 /// accumulation). So the correct incremental only needs to re-run
 /// discovery for the cluster(s) the new activity touches, reuse untouched
 /// clusters verbatim, and it converges to the batch by construction. The
@@ -5275,8 +5301,8 @@ pub struct SectionUpdatePolicy {
 /// construction (the batch IS the convergence target) but O(N) per add,
 /// O(N^2) over a drip. It exists to green the convergence contract
 /// (`gate_unified_incremental_converges_to_batch`) and to hand the engine
-/// layer a passing baseline to optimise UNDER. The optimisation — a
-/// persisted per-cluster evidence grid folded in O(cluster) per add —
+/// layer a passing baseline to optimise UNDER. The optimisation, a
+/// persisted per-cluster evidence grid folded in O(cluster) per add -
 /// keeps this delta contract ([`UnifiedIncrementalResult`]) unchanged;
 /// only the body and an added evidence-cache handle change. Design:
 /// `~/.claude/plans/b1-incremental-design.md`.
@@ -5393,7 +5419,7 @@ fn pair_leftovers(
 /// Policy applies AFTER pairing, on emission only. A frozen prior
 /// (pinned, or everything under `freeze_all_geometry`) keeps its
 /// geometry: its fresh partner is withheld into `held` and its evidence
-/// grafted append-only. A withheld corridor is spoken for — any other
+/// grafted append-only. A withheld corridor is spoken for, any other
 /// candidate sharing ground with a frozen emission backs off: a minted
 /// one is dropped into `held`; a carried one hands back its prior
 /// verbatim (frozen by adjacency, one pass, no cascade). Only an
@@ -5506,7 +5532,7 @@ fn resolve_fold(
 
     // Frozen corridors are spoken for: any candidate sharing ground with a
     // frozen emission backs off. A carried candidate hands back its prior
-    // verbatim (frozen by adjacency); a minted one is dropped. One pass —
+    // verbatim (frozen by adjacency); a minted one is dropped. One pass -
     // adjacency freezes do not themselves claim further ground.
     let claims: Vec<&FrequentSection> = frozen_out.iter().collect();
     let mut adjacency_out: Vec<FrequentSection> = Vec::new();
@@ -5587,7 +5613,7 @@ fn resolve_fold(
 /// portions recomputed against the FROZEN polyline (the partner's
 /// portions index a different extent), `visit_count` rises with each
 /// qualifying pass, and nothing is ever removed. Geometry, id, name, and
-/// the consensus fields stay exactly as held — they describe the frozen
+/// the consensus fields stay exactly as held, they describe the frozen
 /// polyline. A partner member whose track shows no qualifying portion
 /// against the frozen line is skipped: evidence must be attributable to
 /// the extent it is counted against.
@@ -5640,13 +5666,13 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 // reusing every untouched cluster verbatim. Detection is already partitioned
 // per geo-cluster and each cluster is an order-free pure function of its set
 // ([`detect_for_cluster`]), so the touched cluster is recomputed from its
-// current tracks and the catalogue equals the batch by construction — the same
+// current tracks and the catalogue equals the batch by construction, the same
 // per-cluster decomposition, minus the clusters the add did not reach.
 //
 // The touched cluster is recomputed with a FRESH reference latitude (a plain
 // [`build_coverage_grid`] over its members), so it is byte-identical to what the
 // batch computes for that cluster. An earlier design froze the reference
-// latitude and folded the grid in place; measurement retired it — the grid build
+// latitude and folded the grid in place; measurement retired it, the grid build
 // is ~3% of a cluster's detect cost (discovery dominates), so the fold saved
 // almost nothing, while a frozen projection drifts against the batch's and, far
 // from the meridian, the longitude scale amplifies that drift enough to flip
@@ -5711,8 +5737,8 @@ struct LeafMemos {
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.
     consensus: HashMap<ConsensusKey, Option<FrequentSection>>,
-    /// The render stage's expensive pure leaves — pass penalties and
-    /// minority runs — keyed by the candidate's portion set, one
+    /// The render stage's expensive pure leaves, pass penalties and
+    /// minority runs, keyed by the candidate's portion set, one
     /// `(activity, start, end, penalty, run)` row per portion.
     #[allow(clippy::type_complexity)]
     render: HashMap<RenderKey, Vec<(String, usize, usize, f64, f64)>>,
@@ -5740,7 +5766,7 @@ struct TrackPortionKey {
 /// Memory bounds for the leaf memos, in entries. Blunt and exact: tripping
 /// a cap clears the affected maps whole (one cold rebuild re-warms them),
 /// never evicts selectively. `cell_sets` and `track_portions` clear
-/// together — intern ids must not outlive their table.
+/// together, intern ids must not outlive their table.
 const MEMO_CELL_SETS_CAP: usize = 20_000;
 const MEMO_TRACK_PORTIONS_CAP: usize = 200_000;
 const MEMO_CONSENSUS_CAP: usize = 10_000;
@@ -5924,8 +5950,8 @@ pub fn detect_sections_unified_incremental_cached(
 /// [`detect_sections_unified_incremental_cached`] with control over what
 /// the fold may do to geometry the caller already holds.
 ///
-/// Discovery is unchanged — pins never alter which ground the evidence
-/// supports, only which cut is emitted for ground already spoken for — so
+/// Discovery is unchanged, pins never alter which ground the evidence
+/// supports, only which cut is emitted for ground already spoken for, so
 /// the catalogue under the default policy is identical to the plain
 /// entry point, and the batch-parity gates hold for both.
 #[allow(clippy::too_many_arguments)]
@@ -6029,7 +6055,7 @@ fn fold_by_sport(
         })
         .collect();
 
-    // Phase 1 — ROUTE every new activity into its sport's clusters, marking each
+    // Phase 1, ROUTE every new activity into its sport's clusters, marking each
     // touched cluster dirty. Routing stays per-id and ordered because routing a
     // later activity can bridge clusters an earlier one just formed. NO detection
     // runs here: only membership + bridges are updated.
@@ -6044,7 +6070,7 @@ fn fold_by_sport(
         route_only(cache, sport, new_id, new_pts, &tun);
     }
 
-    // Phase 2 — RECOMPUTE each touched cluster exactly ONCE, over its FINAL
+    // Phase 2, RECOMPUTE each touched cluster exactly ONCE, over its FINAL
     // membership. This is what makes a cold cache or a bulk window-expand O(sum
     // of touched clusters) = O(N), not the O(N²) of recomputing per new activity.
     // Recompute-once over the final membership equals the batch's per-cluster
@@ -6140,7 +6166,7 @@ fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
 /// Route a new activity into the cache's clusters (Phase 1): append it to the
 /// single cluster it touches, seed a new singleton if it touches none, or bridge
 /// (merge) the clusters it connects. Marks every touched cluster dirty and does
-/// NOT recompute — the recompute pass does that once, after all routing.
+/// NOT recompute, the recompute pass does that once, after all routing.
 fn route_only(
     cache: &mut SectionEvidenceCache,
     sport: &str,
@@ -6296,7 +6322,7 @@ fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
 
 /// Minimum visits required based on section length and dataset size.
 /// Shorter sections need more visits. Larger datasets use slightly higher
-/// thresholds to avoid drowning in noise — but the bonus is intentionally
+/// thresholds to avoid drowning in noise, but the bonus is intentionally
 /// modest so a user with 500 activities doesn't have all their valid
 /// sections filtered away.
 fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
@@ -6873,7 +6899,7 @@ mod tests {
             })
             .collect();
         // The crossing is deliberately NOT a contributor; c's fragment
-        // status is irrelevant here — every qualifying pass counts.
+        // status is irrelevant here, every qualifying pass counts.
         let portions: Vec<Portion> =
             vec![(0, 0, 60, 600.0), (1, 0, 60, 600.0), (2, 0, 120, 1200.0)];
         let support = candidate_support(
@@ -6928,7 +6954,7 @@ mod tests {
         );
 
         // Gradual taper: twenty bodies, each 20 m shorter than the last,
-        // so support falls one track per step. No cliff — kept whole.
+        // so support falls one track per step. No cliff, kept whole.
         let taper: Vec<Vec<GpsPoint>> = (0..20).map(|i| east(600.0 - i as f64 * 20.0)).collect();
         let tviews: Vec<(&str, &[GpsPoint])> = taper.iter().map(|t| ("", t.as_slice())).collect();
         let tportions: Vec<Portion> = taper
@@ -6963,7 +6989,7 @@ mod tests {
     fn tight_corner_on_a_closed_loop_is_not_an_out_and_back() {
         // A closed lap whose entry corner is hairpin-tight: the legs
         // into and out of the corner run antiparallel within `near`,
-        // but only a corner's arc apart along the line — the corner's
+        // but only a corner's arc apart along the line, the corner's
         // own shape, not a retrace. An out-and-back's antiparallel
         // pairs sit a full out-leg apart. Regression: the Sion
         // athletics oval charged its own entry corner 0.064, failed
