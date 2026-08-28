@@ -26,6 +26,8 @@ real-corpus = []
 # Tests that read a public dataset any machine can fetch. CI fetches it into
 # the gitignored geolife/ directory and runs them on every push.
 public-corpus = []
+# Phase timers on stderr for the lab and the drip gate. Never on by default.
+profile = []
 
 [dependencies]
 geo = "0.29"
@@ -103,6 +105,10 @@ required-features = ["public-corpus"]
 
 [[test]]
 name = "full_corpus_bitwise"
+required-features = ["real-corpus"]
+
+[[test]]
+name = "drip_budget"
 required-features = ["real-corpus"]
 
 [[test]]

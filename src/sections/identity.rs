@@ -396,6 +396,33 @@ pub fn plan_identity_tuned(
     next: &[CandidateSection],
     params: &IdentityParams,
 ) -> IdentityPlan {
+    plan_identity_memo(prior, next, params, &mut HashMap::new())
+}
+
+/// Deterministic digest of a line's exact coordinates: the key a pairwise
+/// coverage memo carries between plans.
+fn line_digest(line: &[GpsPoint]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    line.len().hash(&mut h);
+    for p in line {
+        p.latitude.to_bits().hash(&mut h);
+        p.longitude.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// [`plan_identity_tuned`] with a memo of pairwise ground coverage keyed
+/// by line digests, `(prior, candidate) -> (prior over candidate,
+/// candidate over prior)`. Coverage is a pure function of the two lines,
+/// so a fold that leaves most lines as they were pays only for the pairs
+/// it changed.
+pub fn plan_identity_memo(
+    prior: &[PriorSection],
+    next: &[CandidateSection],
+    params: &IdentityParams,
+    memo: &mut HashMap<(u64, u64), (f64, f64)>,
+) -> IdentityPlan {
     let np = prior.len();
     let nc = next.len();
 
@@ -413,6 +440,8 @@ pub fn plan_identity_tuned(
         .iter()
         .map(|c| ground_bbox_padded(&c.polyline))
         .collect();
+    let p_digest: Vec<u64> = prior.iter().map(|p| line_digest(&p.polyline)).collect();
+    let c_digest: Vec<u64> = next.iter().map(|c| line_digest(&c.polyline)).collect();
     let mut edge = vec![vec![false; nc]; np];
     let mut mo = vec![vec![0.0_f64; nc]; np];
     let mut contained = vec![vec![false; nc]; np];
@@ -433,8 +462,20 @@ pub fn plan_identity_tuned(
             if a.0 > b.1 || b.0 > a.1 || a.2 > b.3 || b.2 > a.3 {
                 continue;
             }
-            let cov_pc = coverage(&p.polyline, &c.polyline, GROUND_TOL_M);
-            let cov_cp = coverage(&c.polyline, &p.polyline, GROUND_TOL_M);
+            // The same line covers itself completely; most candidates are
+            // their own prior, so this is the common pair.
+            if p.polyline == c.polyline {
+                edge[i][j] = true;
+                mo[i][j] = 1.0;
+                contained[i][j] = true;
+                continue;
+            }
+            let (cov_pc, cov_cp) = *memo.entry((p_digest[i], c_digest[j])).or_insert_with(|| {
+                (
+                    coverage(&p.polyline, &c.polyline, GROUND_TOL_M),
+                    coverage(&c.polyline, &p.polyline, GROUND_TOL_M),
+                )
+            });
             edge[i][j] = cov_pc.max(cov_cp) >= CARRY_COVERAGE;
             mo[i][j] = cov_pc.min(cov_cp);
             contained[i][j] = cov_pc >= CARRY_COVERAGE;

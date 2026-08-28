@@ -28,13 +28,13 @@ fn load_gpx(path: &Path) -> Vec<GpsPoint> {
                 let lat_str = &line[lat_start + 5..];
                 let lon_str = &line[lon_start + 5..];
 
-                if let (Some(lat_end), Some(lon_end)) = (lat_str.find('"'), lon_str.find('"')) {
-                    if let (Ok(lat), Ok(lon)) = (
+                if let (Some(lat_end), Some(lon_end)) = (lat_str.find('"'), lon_str.find('"'))
+                    && let (Ok(lat), Ok(lon)) = (
                         lat_str[..lat_end].parse::<f64>(),
                         lon_str[..lon_end].parse::<f64>(),
-                    ) {
-                        points.push(GpsPoint::new(lat, lon));
-                    }
+                    )
+                {
+                    points.push(GpsPoint::new(lat, lon));
                 }
             }
         }
@@ -112,7 +112,7 @@ fn test_find_sections_in_route() {
     let config = SectionConfig::default();
 
     // Test: Find the section in the original track (should match)
-    let matches = find_sections_in_route(ref_track, &[section.clone()], &config);
+    let matches = find_sections_in_route(ref_track, std::slice::from_ref(&section), &config);
 
     println!(
         "Finding section in original track: {} matches",
@@ -135,7 +135,7 @@ fn test_find_sections_in_route() {
     // Test: Find section in other tracks
     let mut found_in_others = 0;
     for (name, track) in tracks.iter().skip(1) {
-        let matches = find_sections_in_route(track, &[section.clone()], &config);
+        let matches = find_sections_in_route(track, std::slice::from_ref(&section), &config);
         if !matches.is_empty() {
             found_in_others += 1;
             println!(
