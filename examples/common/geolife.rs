@@ -153,7 +153,7 @@ fn parse_labels(path: &Path) -> Vec<(i64, i64, String)> {
             continue;
         };
         let parse_span = |s: &str| -> Option<i64> {
-            let mut parts = s.trim().split_whitespace();
+            let mut parts = s.split_whitespace();
             parse_datetime(parts.next()?, parts.next()?)
         };
         if let (Some(s), Some(e)) = (parse_span(start), parse_span(end)) {
@@ -166,25 +166,22 @@ fn parse_labels(path: &Path) -> Vec<(i64, i64, String)> {
 /// The GeoLife mode that overlaps a trajectory's `[start, end]` span for the
 /// most seconds, or None when no label overlaps it at all. Ties break on the
 /// smaller mode name so loading is reproducible regardless of map order.
-fn dominant_mode<'a>(start: i64, end: i64, spans: &'a [(i64, i64, String)]) -> Option<&'a str> {
-    let mut totals: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+fn dominant_mode(start: i64, end: i64, spans: &[(i64, i64, String)]) -> Option<&str> {
+    let mut totals: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
     for (s, e, mode) in spans {
         let overlap = end.min(*e) - start.max(*s);
         if overlap > 0 {
             *totals.entry(mode.as_str()).or_default() += overlap;
         }
     }
-    let mut best: Option<(&str, i64)> = None;
-    for (mode, secs) in &totals {
-        let better = match best {
-            None => true,
-            Some((bm, b)) => *secs > b || (*secs == b && *mode < bm),
-        };
-        if better {
-            best = Some((mode, *secs));
-        }
-    }
-    best.map(|(m, _)| m)
+    // Ascending name order, so the first maximum is the smaller name.
+    totals
+        .iter()
+        .fold(None, |best: Option<(&str, i64)>, (mode, secs)| match best {
+            Some((_, b)) if *secs <= b => best,
+            _ => Some((mode, *secs)),
+        })
+        .map(|(m, _)| m)
 }
 
 /// Map a GeoLife transport mode to a Veloq sport bucket. Only the self-powered

@@ -16,17 +16,15 @@ use tracematch::{SectionConfig, detect_sections_unified};
 /// Matches the shape used by the legacy fixture-based benches: ~10km corridor,
 /// 80% overlap, so that roughly four out of five activities share the same route
 /// and produce meaningful section detection work.
-fn make_dataset(
-    activity_count: usize,
-) -> (
+type Dataset = (
     Vec<(String, Vec<tracematch::GpsPoint>)>,
     std::collections::HashMap<String, String>,
-    Vec<tracematch::RouteGroup>,
-) {
+);
+
+fn make_dataset(activity_count: usize) -> Dataset {
     let scenario = SyntheticScenario::with_activity_count(activity_count, 10_000.0, 0.8);
     let dataset = scenario.generate();
-    let groups = dataset.route_groups();
-    (dataset.tracks, dataset.sport_types, groups)
+    (dataset.tracks, dataset.sport_types)
 }
 
 fn bench_section_detection(c: &mut Criterion) {
@@ -40,7 +38,7 @@ fn bench_section_detection(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(3));
 
     for activity_count in [5usize, 20, 50] {
-        let (activities, sport_types, route_groups) = make_dataset(activity_count);
+        let (activities, sport_types) = make_dataset(activity_count);
         let config = SectionConfig::default();
 
         group.bench_with_input(
@@ -64,7 +62,7 @@ fn bench_postprocessing_heavy(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(60));
     group.warm_up_time(Duration::from_secs(3));
 
-    let (activities, sport_types, route_groups) = make_dataset(50);
+    let (activities, sport_types) = make_dataset(50);
     let config = SectionConfig::default();
 
     group.bench_function("50_activities_full_pipeline", |b| {

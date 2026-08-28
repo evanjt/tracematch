@@ -14,7 +14,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
-use tracematch::{RouteGroup, SectionConfig, detect_sections_unified};
+use tracematch::{SectionConfig, detect_sections_unified};
 
 /// Build the same corpus the integration test uses, then expose tracks +
 /// sport map for a given scenario checkpoint.
@@ -22,38 +22,12 @@ fn corpus_for_default() -> LifecycleCorpus {
     LifecycleCorpus::generate(&LifecycleConfig::default())
 }
 
-fn one_group_per_activity(
-    tracks: &[(String, Vec<tracematch::GpsPoint>)],
-    sport_types: &std::collections::HashMap<String, String>,
-) -> Vec<RouteGroup> {
-    tracks
-        .iter()
-        .enumerate()
-        .map(|(i, (id, _))| RouteGroup {
-            group_id: format!("group_{i}"),
-            representative_id: id.clone(),
-            activity_ids: vec![id.clone()],
-            sport_type: sport_types
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| "Ride".to_string()),
-            bounds: None,
-            custom_name: None,
-            best_time: None,
-            avg_time: None,
-            best_pace: None,
-            best_activity_id: None,
-        })
-        .collect()
-}
-
-fn checkpoint_tracks(
-    corpus: &LifecycleCorpus,
-    label: &str,
-) -> (
+type Tracks = (
     Vec<(String, Vec<tracematch::GpsPoint>)>,
     std::collections::HashMap<String, String>,
-) {
+);
+
+fn checkpoint_tracks(corpus: &LifecycleCorpus, label: &str) -> Tracks {
     let activities: Vec<_> = match label {
         "A_cold_60" => corpus.through_a(),
         "B_expand_150" => corpus.through_b(),
@@ -94,7 +68,6 @@ fn bench_lifecycle_full_detection(c: &mut Criterion) {
         group.measurement_time(Duration::from_secs(measurement_secs));
 
         let (tracks, sport_types) = checkpoint_tracks(&corpus, label);
-        let groups = one_group_per_activity(&tracks, &sport_types);
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
