@@ -301,7 +301,7 @@ pub struct SectionConfig {
     pub min_routes: u32,
     /// Allow `split_high_variance_sections` postprocess step to fire.
     /// This step extracts dense "core" portions of sections as
-    /// separate sections — useful for activity-based density input,
+    /// separate sections, useful for activity-based density input,
     /// noisy/over-fragmenting for route-intersection input. Off by
     /// default to avoid the 1.5× section-count multiplier.
     #[serde(default)]
@@ -529,7 +529,7 @@ pub struct FrequentSection {
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
 
-    /// Incremental-consensus running sums. None means "not yet built" —
+    /// Incremental-consensus running sums. None means "not yet built" -
     /// the next merge will build it from current traces. Populated after
     /// the first merge through `merge_traces_into_consensus`. Skipped
     /// during JSON serialisation when None to keep blob size flat for
@@ -635,7 +635,7 @@ pub fn process_cluster(
     };
 
     // Extract traces for consensus computation only (not stored in section).
-    // Sort for stable iteration order — HashSet iteration is randomized
+    // Sort for stable iteration order, HashSet iteration is randomized
     // and the consensus computation is order-sensitive.
     let activity_id_vec: Vec<String> = {
         let mut v: Vec<String> = cluster.activity_ids.iter().cloned().collect();

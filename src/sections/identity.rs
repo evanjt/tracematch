@@ -87,7 +87,7 @@ fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
     // Exact accelerator: bucket the line's points into a degree grid whose
     // cells span at least `tol_m` in both axes, so any line point within
     // tolerance of a sample must sit in the sample's 3x3 cell ring. The
-    // haversine predicate is unchanged — the grid only prunes candidates —
+    // haversine predicate is unchanged, the grid only prunes candidates -
     // so the fraction is identical to the plain double scan (the oracle
     // test pins it), at O(A + B) instead of O(A x B).
     let cell_lat = tol_m / 110_574.0;
@@ -338,7 +338,7 @@ pub struct IdentityPlan {
 }
 
 // ============================================================================
-// plan_identity — the bipartite carry/mint/split/merge/dissolve resolution
+// plan_identity, the bipartite carry/mint/split/merge/dissolve resolution
 // ============================================================================
 
 /// Tunables for [`plan_identity_tuned`]. The default reproduces the shipped
@@ -374,8 +374,8 @@ pub fn plan_identity(prior: &[PriorSection], next: &[CandidateSection]) -> Ident
 /// candidate inherits which id.
 ///
 /// The rule is a mutual-best pairing on the same-corridor graph. Each candidate
-/// nominates a prior — an extent-agreeing 1:1 match first, else the SENIOR
-/// contained or same-corridor prior (the merge rule) — among the priors that
+/// nominates a prior, an extent-agreeing 1:1 match first, else the SENIOR
+/// contained or same-corridor prior (the merge rule), among the priors that
 /// clear `params.merge_mutual_floor`; each prior nominates the candidate it
 /// overlaps MOST (the split rule). A carry is confirmed only where the two
 /// nominations agree, which yields every case the design names with the
@@ -403,7 +403,7 @@ pub fn plan_identity_tuned(
     // bounding boxes gate the O(polyline²) coverage test: two grounds can only
     // share a corridor within GROUND_TOL_M if their padded boxes overlap, so a
     // geographically distant pair costs O(1) instead of a full scan. Behaviour
-    // is unchanged — a distant pair scored 0 coverage before — but the plan's
+    // is unchanged, a distant pair scored 0 coverage before, but the plan's
     // cost now tracks the co-located ground, not the whole catalogue.
     let p_bb: Vec<(f64, f64, f64, f64)> = prior
         .iter()
@@ -444,13 +444,13 @@ pub fn plan_identity_tuned(
     // Each candidate nominates a prior in three tiers. First a prior whose
     // extent AGREES with the candidate (mutual overlap at or above
     // RECUT_AGREEMENT): a 1:1 match, ranked by overlap then seniority. This
-    // tier makes the pairing idempotent — a catalogue paired against itself
-    // is all carries — where containment-plus-seniority let a short senior
+    // tier makes the pairing idempotent, a catalogue paired against itself
+    // is all carries, where containment-plus-seniority let a short senior
     // prior inside a long candidate's corridor out-nominate the candidate's
     // own exact match, minting a duplicate on every converged detect. Then
     // the senior among priors CONTAINED in the candidate's corridor (the
-    // genuine merge shape — a retiring prior lies inside its successor).
-    // Then the senior among all same-corridor priors (the split shape — a
+    // genuine merge shape, a retiring prior lies inside its successor).
+    // Then the senior among all same-corridor priors (the split shape, a
     // piece nominates the prior it came from). Containment before the rest
     // stops a mere one-way overlap from a senior neighbour out-nominating
     // the candidate's mutual-best prior (marginal capture). Seniority is
@@ -642,7 +642,7 @@ fn better_candidate(
 }
 
 // ============================================================================
-// Hysteresis — the low-pass filter over the plan
+// Hysteresis, the low-pass filter over the plan
 // ============================================================================
 
 /// Tunable thresholds for [`HysteresisState`]. Defaults are the design's
@@ -735,7 +735,7 @@ pub struct StepOutcome {
     pub debouncing: usize,
     /// The fired retirements, each with the reason the plan gave at fire time
     /// (gone ground, or merged into a named survivor). The emitter's per-id
-    /// record; `dissolved` is its length. Mints and restores need no list —
+    /// record; `dissolved` is its length. Mints and restores need no list -
     /// the parallel [`CandidateResolution`]s already name them.
     pub retired: Vec<Retirement>,
     /// The ids whose sustained re-cut fired this step, in visible-id order.
@@ -849,7 +849,7 @@ impl HysteresisState {
     /// candidate maps to exactly one visible id (a carry/split/merge target
     /// inherits its prior's id, a mint or a tombstone-restore takes the
     /// fresh/restored id), so a stateful caller like the veloqrs registry can
-    /// join its own per-id payload — real DB id, members, name — onto the plan
+    /// join its own per-id payload, real DB id, members, name, onto the plan
     /// without re-deriving the graph. The fate carries the geometry contract:
     /// unless it is `CarriedFrozen`, the visible ground under that id is the
     /// candidate's polyline, and the caller's payload must follow it. The pure
@@ -1020,7 +1020,7 @@ impl HysteresisState {
     /// Drop an id from the visible view, its debounce, and any tombstone. The
     /// veloqrs registry calls this when a section's ground passes to a durable
     /// intent row (accept/trim/merge): identity ownership transfers to the DB
-    /// row, so the registry must stop carrying — and stop debounce-dissolving —
+    /// row, so the registry must stop carrying, and stop debounce-dissolving -
     /// the ground it no longer owns. Idempotent: forgetting an absent id is a
     /// no-op.
     pub fn forget(&mut self, id: &str) {

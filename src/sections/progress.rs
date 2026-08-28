@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub enum DetectionPhase {
     /// Building R-tree spatial indices per track per scale
     BuildingRtrees,
-    /// Finding pairwise overlaps — O(N^2), dominates ~70% of detection time
+    /// Finding pairwise overlaps, O(N^2), dominates ~70% of detection time
     FindingOverlaps,
     /// Post-processing: fold splitting, heading/gradient splitting, merging, dedup
     Postprocessing,

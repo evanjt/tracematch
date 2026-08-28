@@ -199,7 +199,7 @@ pub fn group_signatures_with_progress(
         .collect();
 
     // Precompute resample + R-tree per signature once. Without this the
-    // hot loop rebuilds the same R-trees on every pair comparison — at
+    // hot loop rebuilds the same R-trees on every pair comparison, at
     // 91k pairs that's 182k R-tree builds and Vec allocations, which is
     // catastrophic in WASM.
     let prepared: Vec<PreparedRoute> = signatures
@@ -336,7 +336,7 @@ pub fn group_signatures_parallel(
                 return None;
             }
 
-            // Order pair lexicographically — Union-Find doesn't care
+            // Order pair lexicographically, Union-Find doesn't care
             // but consistent ordering keeps the matches list canonical.
             if sig1.activity_id < sig2.activity_id {
                 Some((sig1.activity_id.clone(), sig2.activity_id.clone()))
@@ -494,7 +494,7 @@ pub fn group_incremental_with_matches(
             let sig1 = all_signatures[i];
             let sig2 = all_signatures[j];
 
-            // Skip if BOTH are existing (already grouped) — already
+            // Skip if BOTH are existing (already grouped), already
             // filtered above, kept as a defence in depth.
             let i_is_new = new_ids.contains(sig1.activity_id.as_str());
             let j_is_new = new_ids.contains(sig2.activity_id.as_str());
@@ -757,7 +757,7 @@ pub fn endpoints_could_group(
     let sig2_is_loop = haversine_distance(start2, end2) < config.endpoint_threshold;
 
     // Loops use a different rule (is_point_near_route) in the strict
-    // gate — let them through unconditionally here.
+    // gate, let them through unconditionally here.
     if sig1_is_loop || sig2_is_loop {
         return true;
     }
