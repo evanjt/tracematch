@@ -321,6 +321,8 @@ pub fn split_section_at_index(
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),
+            enrichment: Default::default(),
+            rank: None,
             consensus_state: None,
         },
         second: FrequentSection {
@@ -348,6 +350,8 @@ pub fn split_section_at_index(
             version: 1,
             updated_at: None,
             created_at: section.created_at.clone(),
+            enrichment: Default::default(),
+            rank: None,
             consensus_state: None,
         },
     })

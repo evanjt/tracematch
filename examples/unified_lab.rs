@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use tracematch::{
-    CandidateSection, Decision, Direction, FrequentSection, GpsPoint, HysteresisParams,
-    HysteresisState, IdentityParams, MatchConfig, PriorSection, RouteSignature, SectionConfig,
-    Tunables, geo_utils::haversine_distance, matching::resample_route, plan_identity_tuned,
+    CandidateSection, Decision, FrequentSection, GpsPoint, HysteresisParams, HysteresisState,
+    IdentityParams, MatchConfig, PriorSection, RouteSignature, SectionConfig, Tunables,
+    geo_utils::haversine_distance, matching::resample_route, plan_identity_tuned,
 };
 
 #[path = "common/corpus.rs"]
@@ -549,46 +549,7 @@ fn geojson_for_sections(
 
 // ---------------------------------------------------------- interestingness
 
-/// Per-section interestingness features, computed purely from the corpus.
-/// The score ranks and labels. It never feeds boundary detection and never
-/// overrides the support floor.
-///
-/// Grounding (full citations in REFERENCES.md): detours reveal value
-/// (Salazar Miranda et al., Comput. Environ. Urban Syst. 2021; Quercia et
-/// al., ACM Hypertext 2014; leisure detour magnitudes, Land 2024 13(5):589),
-/// challenge and accomplishment motives (Transp. Policy 2017; J. Outdoor
-/// Recreat. Tour. 2024), flow needs clear goals and challenge (Psychol.
-/// Sport Exerc. 2018 and 2022), attachment grows with repetition (Front.
-/// Psychol. 2019).
-#[derive(Clone)]
-struct RankFeatures {
-    /// Mean share of the outing's roam at which the section sits. Ground
-    /// near the far point of its outings was the point of going out.
-    apex: f64,
-    /// Max sustained absolute gradient (%) held over at least 300 m, the
-    /// climb-detection convention for "a climb, not a spike".
-    grade: f64,
-    /// Distinct calendar months with a visit. Sustained return, not burst.
-    months: u32,
-    /// 1 minus chord/arc. Loops and winding ground score high.
-    sinuosity: f64,
-    /// Effective number of approach and leave directions (exp of bearing
-    /// entropy over 45 degree sectors). Converged-upon ground is sought out.
-    /// Counts only outings not based beside the section: when a trip
-    /// terminal sits within two matching tolerances of it, every crossing
-    /// that outing makes is leaving or returning to base, and its bearings
-    /// measure where the athlete starts, not which ground they choose.
-    converge: f64,
-    /// |same - reverse| / traversals. Descents and circuits read one-way.
-    oneway: f64,
-    /// Days from the section's newest visit to the corpus's newest
-    /// activity. Stale ground reads as history, not signature, so
-    /// freshness carries score weight like any other feature.
-    recency_days: f64,
-    /// Equal-weight mean of the seven feature percentile ranks within
-    /// the catalogue.
-    score: f64,
-}
+use tracematch::{RankCandidate, RankFeatures, RankMember, RankOuting, RankTraversal};
 
 /// Civil date string ("YYYY-MM-DD...") to a day count (Hinnant's algorithm).
 fn day_of(date: &str) -> Option<i64> {
@@ -623,289 +584,55 @@ fn epoch_of(date: &str) -> Option<i64> {
     Some(days * 86400 + tod)
 }
 
-fn bearing_deg(a: &GpsPoint, b: &GpsPoint) -> f64 {
-    let (la, lb) = (a.latitude.to_radians(), b.latitude.to_radians());
-    let dl = (b.longitude - a.longitude).to_radians();
-    let y = dl.sin() * lb.cos();
-    let x = la.cos() * lb.sin() - la.sin() * lb.cos() * dl.cos();
-    (y.atan2(x).to_degrees() + 360.0) % 360.0
-}
-
-/// Walk back from `from` until `dist` metres of trace have accumulated.
-/// None when the trace ends first (the traversal starts at the edge).
-fn point_at_distance_back(pts: &[GpsPoint], from: usize, dist: f64) -> Option<GpsPoint> {
-    let mut acc = 0.0;
-    let mut i = from;
-    while i > 0 {
-        acc += haversine_distance(&pts[i - 1], &pts[i]);
-        i -= 1;
-        if acc >= dist {
-            return Some(pts[i]);
-        }
-    }
-    None
-}
-
-fn point_at_distance_fwd(pts: &[GpsPoint], from: usize, dist: f64) -> Option<GpsPoint> {
-    let mut acc = 0.0;
-    let mut i = from;
-    while i + 1 < pts.len() {
-        acc += haversine_distance(&pts[i], &pts[i + 1]);
-        i += 1;
-        if acc >= dist {
-            return Some(pts[i]);
-        }
-    }
-    None
-}
-
-fn max_sustained_grade(polyline: &[GpsPoint]) -> f64 {
-    const SUSTAIN_M: f64 = 300.0;
-    let n = polyline.len();
-    if n < 2 {
-        return 0.0;
-    }
-    let mut cum = vec![0.0f64; n];
-    for i in 1..n {
-        cum[i] = cum[i - 1] + haversine_distance(&polyline[i - 1], &polyline[i]);
-    }
-    let ele: Vec<Option<f64>> = polyline.iter().map(|p| p.elevation).collect();
-    if ele.iter().flatten().count() < 2 {
-        return 0.0;
-    }
-    // Light smoothing so single-point elevation spikes cannot fake a grade.
-    let smooth: Vec<Option<f64>> = (0..n)
-        .map(|i| {
-            let (mut s, mut c) = (0.0, 0u32);
-            for e in ele[i.saturating_sub(1)..=(i + 1).min(n - 1)]
-                .iter()
-                .flatten()
-            {
-                s += e;
-                c += 1;
-            }
-            if c > 0 { Some(s / c as f64) } else { None }
-        })
-        .collect();
-    let total = cum[n - 1];
-    let window = SUSTAIN_M.min(total.max(1.0));
-    let mut best = 0.0f64;
-    let mut j = 0usize;
-    for i in 0..n {
-        if cum[i] + window > total + 1e-9 {
-            break;
-        }
-        if j < i {
-            j = i;
-        }
-        while j < n - 1 && cum[j] - cum[i] < window {
-            j += 1;
-        }
-        if let (Some(a), Some(b)) = (smooth[i], smooth[j]) {
-            let d = cum[j] - cum[i];
-            if d > 1.0 {
-                best = best.max((b - a).abs() / d * 100.0);
-            }
-        }
-    }
-    best
-}
-
+/// Rank the catalogue with the library ranker, passes counted by the
+/// detector's own matcher.
 fn rank_sections(
     sections: &[FrequentSection],
     by_id: &HashMap<&str, &Activity>,
-    proximity: f64,
+    config: &SectionConfig,
 ) -> Vec<(String, RankFeatures)> {
-    // "Now" is the corpus head, not the wall clock: a static corpus must
-    // not go stale by being analysed later.
-    let newest = by_id
-        .values()
-        .filter_map(|a| day_of(&a.date))
-        .max()
-        .unwrap_or(0);
-    // Base apron for the home-funnel discount, in matching tolerances.
-    // Default 2; LAB_FUNNEL_MULT overrides for probing the plateau.
-    let funnel_mult: f64 = std::env::var("LAB_FUNNEL_MULT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2.0);
-    let funnel_r = funnel_mult * proximity;
-    let mut feats: Vec<(String, RankFeatures)> = Vec::new();
-    for s in sections {
-        let mut apex_vals: Vec<f64> = Vec::new();
-        let mut sectors = [0usize; 8];
-        let (mut same, mut rev) = (0usize, 0usize);
-        let mut months: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut last_day = i64::MIN;
-        for aid in &s.activity_ids {
-            if !seen.insert(aid.as_str()) {
-                continue;
-            }
-            let Some(act) = by_id.get(aid.as_str()) else {
-                continue;
-            };
-            let pts = &act.points;
-            if pts.len() < 2 {
-                continue;
-            }
-            let traversals = tracematch::find_all_track_portions(pts, &s.polyline, proximity);
-            if traversals.is_empty() {
-                continue;
-            }
-            if act.date.len() >= 7 {
-                months.insert(act.date[..7].to_string());
-            }
-            if let Some(d) = day_of(&act.date) {
-                last_day = last_day.max(d);
-            }
-            // Home-funnel discount: when either trip terminal sits within
-            // two matching tolerances of the section, every crossing this
-            // outing makes is leaving or returning to base, out leg and
-            // return fan-in alike. Those bearings measure where the athlete
-            // starts, so the whole outing stays out of the entropy;
-            // crossings from outings based elsewhere still count.
-            let terminal_carried = {
-                let head = &pts[0];
-                let tail = &pts[pts.len() - 1];
-                s.polyline.iter().any(|p| {
-                    haversine_distance(head, p) < funnel_r || haversine_distance(tail, p) < funnel_r
-                })
-            };
-            let start = &pts[0];
-            let roam = pts
-                .iter()
-                .step_by(10)
-                .map(|p| haversine_distance(start, p))
-                .fold(0.0, f64::max);
-            // One apex sample per activity: laps of the same ground sit in
-            // the same place on the outing.
-            let (st, en, _) = traversals[0];
-            let mid = &pts[(st + en) / 2];
-            if roam > 50.0 {
-                apex_vals.push((haversine_distance(start, mid) / roam).min(1.0));
-            }
-            for &(st, en, dir) in &traversals {
-                match dir {
-                    Direction::Same => same += 1,
-                    Direction::Reverse => rev += 1,
-                    _ => {}
-                }
-                // Approach and leave bearings taken one matching tolerance
-                // out. Traversals at the trace edge contribute none.
-                if !terminal_carried && let Some(p) = point_at_distance_back(pts, st, proximity) {
-                    let b = bearing_deg(&p, &pts[st]);
-                    sectors[(((b + 22.5) % 360.0) / 45.0) as usize % 8] += 1;
-                }
-                if !terminal_carried
-                    && en < pts.len()
-                    && let Some(p) = point_at_distance_fwd(pts, en.min(pts.len() - 1), proximity)
-                {
-                    let b = bearing_deg(&pts[en.min(pts.len() - 1)], &p);
-                    sectors[(((b + 22.5) % 360.0) / 45.0) as usize % 8] += 1;
-                }
-            }
-        }
-        let apex = if apex_vals.is_empty() {
-            0.0
-        } else {
-            apex_vals.iter().sum::<f64>() / apex_vals.len() as f64
-        };
-        let total_b: usize = sectors.iter().sum();
-        let converge = if total_b == 0 {
-            1.0
-        } else {
-            sectors
-                .iter()
-                .filter(|&&c| c > 0)
-                .map(|&c| {
-                    let p = c as f64 / total_b as f64;
-                    -p * p.ln()
-                })
-                .sum::<f64>()
-                .exp()
-        };
-        let trav_total = same + rev;
-        let oneway = if trav_total == 0 {
-            0.0
-        } else {
-            (same as f64 - rev as f64).abs() / trav_total as f64
-        };
-        let chord = match (s.polyline.first(), s.polyline.last()) {
-            (Some(a), Some(b)) => haversine_distance(a, b),
-            _ => 0.0,
-        };
-        let sinuosity = (1.0 - chord / s.distance_meters.max(1.0)).clamp(0.0, 1.0);
-        feats.push((
-            s.id.clone(),
-            RankFeatures {
-                apex,
-                grade: max_sustained_grade(&s.polyline),
-                months: months.len() as u32,
-                sinuosity,
-                converge,
-                oneway,
-                recency_days: if last_day == i64::MIN {
-                    36500.0
-                } else {
-                    (newest - last_day).max(0) as f64
+    let outings: HashMap<String, RankOuting> = by_id
+        .iter()
+        .map(|(id, a)| {
+            (
+                id.to_string(),
+                RankOuting {
+                    date: Some(a.date.as_str()),
+                    points: &a.points,
                 },
-                score: 0.0,
-            },
-        ));
-    }
-
-    // Percentile-normalise each feature within the catalogue, equal weights,
-    // ties get their average rank.
-    let n = feats.len();
-    if n > 1 {
-        let cols: Vec<fn(&RankFeatures) -> f64> = vec![
-            |f| f.apex,
-            |f| f.grade,
-            |f| f.months as f64,
-            |f| f.sinuosity,
-            |f| f.converge,
-            |f| f.oneway,
-            // Fresher ranks higher: percentile of the negated staleness.
-            |f| -f.recency_days,
-        ];
-        let n_cols = cols.len() as f64;
-        let mut pct_sum = vec![0.0f64; n];
-        for col in cols {
-            let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by(|&a, &b| {
-                col(&feats[a].1)
-                    .partial_cmp(&col(&feats[b].1))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut i = 0;
-            while i < n {
-                let mut j = i;
-                while j + 1 < n
-                    && (col(&feats[order[j + 1]].1) - col(&feats[order[i]].1)).abs() < 1e-12
-                {
-                    j += 1;
-                }
-                let avg = (i + j) as f64 / 2.0 / (n - 1) as f64;
-                for k in i..=j {
-                    pct_sum[order[k]] += avg;
-                }
-                i = j + 1;
-            }
-        }
-        for (idx, f) in feats.iter_mut().enumerate() {
-            f.1.score = pct_sum[idx] / n_cols;
-        }
-    } else if n == 1 {
-        feats[0].1.score = 0.5;
-    }
-    feats.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.cmp(&b.0))
-    });
-    feats
+            )
+        })
+        .collect();
+    let candidates: Vec<RankCandidate> = sections
+        .iter()
+        .map(|s| RankCandidate {
+            id: &s.id,
+            polyline: &s.polyline,
+            distance_meters: s.distance_meters,
+            members: s
+                .activity_ids
+                .iter()
+                .filter_map(|aid| {
+                    let act = by_id.get(aid.as_str())?;
+                    let traversals: Vec<RankTraversal> =
+                        tracematch::track_portions(aid, &act.points, &s.polyline, config)
+                            .into_iter()
+                            .map(|p| RankTraversal {
+                                start: p.start_index as usize,
+                                end: p.end_index as usize,
+                                direction: p.direction,
+                                effort: None,
+                            })
+                            .collect();
+                    Some(RankMember {
+                        activity_id: aid.as_str(),
+                        traversals,
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+    tracematch::rank(&candidates, &outings, config.proximity_threshold, None)
 }
 
 fn write_ranking_md(
@@ -1366,11 +1093,7 @@ fn main() {
                     fmt_ms(report.runtime_ms),
                 );
                 let ranks: Option<HashMap<String, RankFeatures>> = if method == "unified" {
-                    let ranked = rank_sections(
-                        &sections,
-                        &activities_by_id,
-                        section_config.proximity_threshold,
-                    );
+                    let ranked = rank_sections(&sections, &activities_by_id, &section_config);
                     for (i, (id, r)) in ranked.iter().take(10).enumerate() {
                         let len_m = sections
                             .iter()
@@ -2238,7 +1961,7 @@ fn main() {
                 let steep: Vec<String> = full
                     .iter()
                     .filter_map(|s| {
-                        let g = max_sustained_grade(&s.polyline);
+                        let g = tracematch::max_sustained_grade(&s.polyline).unwrap_or(0.0);
                         (g >= 40.0).then(|| format!("{} {:.0}%/{}v", s.id, g, s.visit_count))
                     })
                     .collect();
