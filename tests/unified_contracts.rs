@@ -1098,6 +1098,76 @@ fn boundaries_explain_the_cuts() {
     );
 }
 
+#[test]
+fn a_fork_names_the_activities_its_branch_collected() {
+    // The Y's even outings peel west and the odd ones east, so the
+    // leavers a fork record names are exactly one parity class, and the
+    // two records at the junction between them name every outing. A
+    // change at that join can then say which activities were around it.
+    // The fold reports the same sets as the batch: attribution is a
+    // property of the ground, not of arrival order.
+    use tracematch::{
+        BoundaryReason, BoundaryRecord, Tunables, detect_sections_unified_explained,
+        detect_sections_unified_incremental,
+    };
+    let tracks = shapes::fork_y(8);
+    let pooled = shapes::pooled(&tracks);
+    let junction = shapes::to_gps(0.0, 1000.0);
+    let fork_sets = |records: &[BoundaryRecord]| -> Vec<Vec<String>> {
+        let mut sets: Vec<Vec<String>> = records
+            .iter()
+            .filter(|r| {
+                haversine_distance(&GpsPoint::new(r.latitude, r.longitude), &junction) < 250.0
+            })
+            .filter_map(|r| match &r.reason {
+                BoundaryReason::Fork {
+                    branch_leavers,
+                    branch_activity_ids,
+                    ..
+                } => {
+                    assert_eq!(
+                        *branch_leavers as usize,
+                        branch_activity_ids.len(),
+                        "the count and the list must agree"
+                    );
+                    Some(branch_activity_ids.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        sets.sort();
+        sets
+    };
+
+    let batch = detect_sections_unified_explained(
+        &tracks,
+        &[],
+        &pooled,
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    let sets = fork_sets(&batch.boundaries);
+    assert!(!sets.is_empty(), "no fork record at the junction");
+    let parity = |id: &str| id.trim_start_matches("fork_").parse::<usize>().unwrap() % 2;
+    for set in &sets {
+        assert!(!set.is_empty(), "a fork record must name its leavers");
+        let first = parity(&set[0]);
+        assert!(
+            set.iter().all(|id| parity(id) == first),
+            "a branch collects one parity class, got {set:?}"
+        );
+    }
+    let named: std::collections::BTreeSet<&String> = sets.iter().flatten().collect();
+    assert_eq!(named.len(), tracks.len(), "every outing left by one branch or the other");
+
+    let fold = detect_sections_unified_incremental(&[], &tracks, &[], &pooled, &config());
+    assert_eq!(
+        fork_sets(&fold.boundaries),
+        sets,
+        "the fold names the same activities the batch does"
+    );
+}
+
 /// Catalogue rows with the positional section ids stripped: cluster
 /// ordering renumbers ids when far ground joins the corpus, and ids
 /// were never content-stable; everything else must hold exactly.
