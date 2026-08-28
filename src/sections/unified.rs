@@ -873,6 +873,9 @@ fn rescue_confirmed(
 /// The coverage-grid cell size for a cluster, derived from the config's
 /// proximity threshold. The batch [`detect_for_cluster`] and the cached
 /// fold must agree on this exactly, so it lives in one place.
+/// How far, in cells, a covering trace may sit from the cut it replaces.
+const COVER_TOLERANCE_CELLS: f64 = 0.5;
+
 pub(super) fn cluster_cell_size(config: &SectionConfig) -> f64 {
     (config.proximity_threshold * 0.5).clamp(50.0, 150.0)
 }
@@ -3263,9 +3266,10 @@ fn unify_chain_references(
             // Project the current polyline's ends onto t's portion and
             // cut there. The cover must run the member's own line, not
             // a braid twin or a shortcut through the same corridor:
-            // both ends and the whole body must sit within half a cell
-            // of the cut, or the member keeps its own reference.
-            let half = 0.5 * cell_size;
+            // both ends and the whole body must sit within
+            // COVER_TOLERANCE_CELLS of the cut, or the member keeps its
+            // own reference.
+            let half = COVER_TOLERANCE_CELLS * cell_size;
             let mut assigned_any = false;
             for &m in &cand[&t] {
                 if !unassigned.contains(&m) {

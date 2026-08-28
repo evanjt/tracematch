@@ -54,7 +54,7 @@ pub fn extract_activity_passes(
     let mut sequences: Vec<Vec<GpsPoint>> = Vec::new();
     let mut current_sequence: Vec<GpsPoint> = Vec::new();
     let mut gap_count = 0;
-    const MAX_GAP: usize = 3; // Allow small gaps due to GPS noise
+    const MAX_GAP: usize = super::TRACK_GAP_POINTS;
 
     for point in track {
         let query = [point.latitude, point.longitude];
