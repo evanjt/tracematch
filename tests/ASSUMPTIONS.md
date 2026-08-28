@@ -100,6 +100,12 @@ stream. A v1 blob reseeds by version tag, the same outcome it always got.
 Blob version 3 accompanies the streak ledger (the debounce record reshaped),
 reseeding v2 blobs by tag.
 
+Overtaken: the earlier attribution default reset a section's streak on
+every decision-kind flip. The D5 ledger keeps both directions' streaks
+through each other's steps, so there is no flip to reset on; attribution
+accumulates the arrivals of every pending step and clears with the
+ledger, on the decisive continuation or the fired change.
+
 ## Contracts that land with later tranches
 
 | Assumption | Where its contract lands |
