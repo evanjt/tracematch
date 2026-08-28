@@ -579,10 +579,7 @@ pub const TRACK_GAP_POINTS: usize = 3;
 /// traversed by both cyclists and runners). The section's `sport_type`
 /// field carries the dominant one for display; the UI reads
 /// `activity_ids` to render per-sport filter chips.
-pub(super) fn dominant_sport(
-    activity_ids: &[String],
-    sport_types: &HashMap<String, String>,
-) -> String {
+pub fn dominant_sport(activity_ids: &[String], sport_types: &HashMap<String, String>) -> String {
     let mut counts: HashMap<&str, u32> = HashMap::new();
     for id in activity_ids {
         if let Some(s) = sport_types.get(id) {
