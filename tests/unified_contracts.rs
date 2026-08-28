@@ -1139,13 +1139,8 @@ fn a_fork_names_the_activities_its_branch_collected() {
         sets
     };
 
-    let batch = detect_sections_unified_explained(
-        &tracks,
-        &[],
-        &pooled,
-        &config(),
-        &Tunables::DEFAULT,
-    );
+    let batch =
+        detect_sections_unified_explained(&tracks, &[], &pooled, &config(), &Tunables::DEFAULT);
     let sets = fork_sets(&batch.boundaries);
     assert!(!sets.is_empty(), "no fork record at the junction");
     let parity = |id: &str| id.trim_start_matches("fork_").parse::<usize>().unwrap() % 2;
@@ -1158,7 +1153,11 @@ fn a_fork_names_the_activities_its_branch_collected() {
         );
     }
     let named: std::collections::BTreeSet<&String> = sets.iter().flatten().collect();
-    assert_eq!(named.len(), tracks.len(), "every outing left by one branch or the other");
+    assert_eq!(
+        named.len(),
+        tracks.len(),
+        "every outing left by one branch or the other"
+    );
 
     let fold = detect_sections_unified_incremental(&[], &tracks, &[], &pooled, &config());
     assert_eq!(
