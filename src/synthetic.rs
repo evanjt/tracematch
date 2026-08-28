@@ -3,7 +3,7 @@
 //! Generates realistic GPS activity sets with known shared corridors,
 //! providing ground truth for validation of section detection algorithms.
 //!
-//! Feature-gated behind `synthetic` — not included in production builds.
+//! Feature-gated behind `synthetic`, not included in production builds.
 //!
 //! # Example
 //!
@@ -422,7 +422,7 @@ fn compute_polyline_length(points: &[GpsPoint]) -> f64 {
 // Predefined Scenarios
 // ============================================================================
 
-/// Zurich origin — central Europe, representative latitude for GPS calculations.
+/// Zurich origin, central Europe, representative latitude for GPS calculations.
 const ZURICH: GpsPoint = GpsPoint {
     latitude: 47.37,
     longitude: 8.55,
@@ -651,7 +651,7 @@ mod tests {
         // ~80% of 100 activities should use the corridor
         let corridor_users = dataset.expected_sections[0].activity_ids.len();
         assert!(
-            corridor_users >= 60 && corridor_users <= 95,
+            (60..=95).contains(&corridor_users),
             "Expected ~80 corridor users, got {}",
             corridor_users
         );

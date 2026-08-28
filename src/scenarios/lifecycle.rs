@@ -8,18 +8,18 @@
 //! external data dependency.
 //!
 //! Buckets (chronological, disjoint):
-//! - `bucket_a` — first 90 days, cold-start corpus
-//! - `bucket_b_delta` — days 90..365, the "expand to 1 year" delta
-//! - `bucket_c_single` — one new activity dropped on top of B
-//! - `bucket_d_delta` — three more activities (mixed cases)
-//! - `bucket_e_delta` — large delta extending the corpus to ~2 years
+//! - `bucket_a`, first 90 days, cold-start corpus
+//! - `bucket_b_delta`, days 90..365, the "expand to 1 year" delta
+//! - `bucket_c_single`, one new activity dropped on top of B
+//! - `bucket_d_delta`, three more activities (mixed cases)
+//! - `bucket_e_delta`, large delta extending the corpus to ~2 years
 //!
 //! Compared to [`crate::synthetic::SyntheticScenario`] (single-corridor,
 //! single-sport, IID Gaussian noise), this module adds:
 //! - per-activity sport assignment (Ride / Run / cross-sport corridor)
 //! - forward / reverse traversal flagged per activity
 //! - parallel-street near-miss activities (offset corridor, similar
-//!   elevation profile — should NOT match the primary corridor)
+//!   elevation profile, should NOT match the primary corridor)
 //! - first-order Gauss–Markov GPS noise (see [`super::noise`])
 //! - per-activity start-date metadata, suitable for the SQLite ingest path
 
@@ -104,12 +104,12 @@ pub struct LifecycleConfig {
     /// Fraction of activities that include the primary cycling corridor.
     pub ride_corridor_overlap: f64,
     /// Fraction of activities that include the running corridor (independent
-    /// of the cycling corridor — an activity may use both via the cross-sport
+    /// of the cycling corridor, an activity may use both via the cross-sport
     /// shared corridor).
     pub run_corridor_overlap: f64,
     /// Fraction of overlapping traversals that go in the reverse direction.
     pub reverse_fraction: f64,
-    /// Number of "parallel street" activities to seed across all buckets —
+    /// Number of "parallel street" activities to seed across all buckets -
     /// these run a corridor offset by `parallel_street_offset_meters` from a
     /// primary corridor with similar elevation. They MUST NOT match.
     pub parallel_street_count: usize,
@@ -320,7 +320,7 @@ impl<'a> CorpusGenerator<'a> {
         );
 
         // Bucket C: a single activity that overlaps the primary ride
-        // corridor — used to assert "single add doesn't perturb other
+        // corridor, used to assert "single add doesn't perturb other
         // sections" in the harness.
         let bucket_c_single = self.emit_overlap_activity(
             "c",
@@ -524,7 +524,7 @@ impl<'a> CorpusGenerator<'a> {
 
             self.record_truth(corridor, &id);
         } else {
-            // No corridor — random meandering.
+            // No corridor, random meandering.
             full = generate_random_segment(
                 &self.config.origin,
                 self.rng.gen_range(2_500.0..6_000.0),
@@ -653,7 +653,7 @@ enum DirectionPick {
 
 // ============================================================================
 // Polyline generators (kept separate from synthetic.rs so we can evolve them
-// independently — e.g. add elevation profiles or street grids — without
+// independently, e.g. add elevation profiles or street grids, without
 // disturbing the existing benches).
 // ============================================================================
 

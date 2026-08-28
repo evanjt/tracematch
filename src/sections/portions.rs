@@ -180,7 +180,7 @@ pub fn find_all_track_portions(
 }
 
 /// Like `find_all_track_portions`, but with a configurable gap tolerance.
-/// A lower `max_gap` (e.g. 1) produces stricter matching — useful when changing
+/// A lower `max_gap` (e.g. 1) produces stricter matching, useful when changing
 /// a section's reference activity to avoid including parallel roads.
 pub fn find_all_track_portions_with_gap(
     track: &[GpsPoint],
@@ -459,7 +459,7 @@ fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> 
 
     for (i, &val) in smoothed.iter().enumerate().skip(1) {
         if searching_for_peak {
-            // Rising — track the running maximum
+            // Rising, track the running maximum
             if val > best_val {
                 best_val = val;
                 best_pos = i;
@@ -472,7 +472,7 @@ fn find_linear_turning_points(smoothed: &[usize], ref_len: usize) -> Vec<usize> 
                 best_pos = i;
             }
         } else {
-            // Falling — track the running minimum
+            // Falling, track the running minimum
             if val < best_val {
                 best_val = val;
                 best_pos = i;

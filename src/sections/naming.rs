@@ -110,7 +110,7 @@ pub struct NamedScore {
 /// Score one visible section against a named footprint's core, applying the
 /// offset ceiling and the qualification rule: cover most of the core, or be
 /// a contained sub-piece of the named ground carrying at least a quarter of
-/// it — a corridor that re-emerges shorter than what was named keeps its
+/// it, a corridor that re-emerges shorter than what was named keeps its
 /// name. Returns None for a section that cannot carry the name.
 pub fn score_named_candidate(
     core: &[GpsPoint],
@@ -137,7 +137,7 @@ pub struct NamedCandidate<'a> {
 /// The winning candidate: largest core coverage (the split ruling), with
 /// candidates within [`COVERAGE_TIE`] of the maximum treated as a band whose
 /// winner is the smallest lateral offset, then the older section, then id.
-/// Two deterministic total-order passes — a single comparator with a tie
+/// Two deterministic total-order passes, a single comparator with a tie
 /// band is not a strict weak ordering and `sort_by` may panic on one.
 /// Returns the index into `candidates` and the winner's coverage.
 pub fn select_candidate(candidates: &[NamedCandidate]) -> Option<(usize, f64)> {

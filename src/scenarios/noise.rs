@@ -5,14 +5,14 @@
 //! temporal autocorrelation, dominated by multipath, ionospheric delay, and
 //! receiver-clock drift. Standard models in the literature:
 //!
-//! - **White Gaussian** — analytically tractable, used in basic Kalman-filter
+//! - **White Gaussian**, analytically tractable, used in basic Kalman-filter
 //!   derivations. Significantly understates the visual "wandering" seen in
 //!   real tracks because successive samples are independent.
-//! - **First-order Gauss–Markov / AR(1)** — single time constant `τ`,
+//! - **First-order Gauss–Markov / AR(1)**, single time constant `τ`,
 //!   exponentially decaying autocorrelation. Standard model for multipath in
 //!   GNSS literature; captures the "drift" character of real GPS error in
 //!   urban / forested environments.
-//! - **Coloured noise (flicker, random-walk)** — more accurate at long
+//! - **Coloured noise (flicker, random-walk)**, more accurate at long
 //!   horizons but overkill for our purposes (we care about meter-scale noise
 //!   over minutes, not the geodetic-network-scale noise studied in the
 //!   geodesy literature).
@@ -31,14 +31,14 @@
 //! - σ ≈ 3–5 m (open sky), 8–15 m (urban canyon)
 //! - τ ≈ 20–60 s (multipath-dominated)
 //!
-//! References (research informing this model — not cited in code, kept here
+//! References (research informing this model, not cited in code, kept here
 //! for traceability):
-//! - Amiri-Simkooei (2007), *J. Geophys. Res.* — empirical GPS noise spectra,
+//! - Amiri-Simkooei (2007), *J. Geophys. Res.*, empirical GPS noise spectra,
 //!   shows white + flicker dominates real coordinate time series.
-//! - Khider et al. (2013), *IET Radar, Sonar & Navigation* — multipath as a
+//! - Khider et al. (2013), *IET Radar, Sonar & Navigation*, multipath as a
 //!   first-order Gauss–Markov process for pseudorange-based positioning.
 //! - "Overbounding the effect of uncertain Gauss–Markov noise in Kalman
-//!   filtering" (NAVIGATION, 2021) — bounds and time-constant estimation.
+//!   filtering" (NAVIGATION, 2021), bounds and time-constant estimation.
 
 use crate::GpsPoint;
 use rand::rngs::StdRng;
@@ -105,7 +105,7 @@ impl GaussMarkovConfig {
 /// Maintains the AR(1) state across successive `perturb_track` calls only when
 /// you explicitly call `reset_for_new_activity`. Two activities sampled
 /// without reset will share noise correlation across the boundary, which is
-/// not what we want — always reset between activities.
+/// not what we want, always reset between activities.
 pub struct GaussMarkovNoise {
     config: GaussMarkovConfig,
     rng: StdRng,
@@ -138,7 +138,7 @@ impl GaussMarkovNoise {
     }
 
     /// Apply correlated noise to one track. The track's points are perturbed
-    /// in-place coordinate space — the geometry follows the original
+    /// in-place coordinate space, the geometry follows the original
     /// polyline plus the AR(1) wander.
     pub fn perturb_track(&mut self, points: &[GpsPoint]) -> Vec<GpsPoint> {
         if self.config.sigma_meters <= 0.0 {
@@ -262,7 +262,7 @@ mod tests {
             / north_offsets.len() as f64;
         let stdev = var.sqrt();
 
-        // Allow ±15% — AR(1) steady-state stdev should equal sigma exactly,
+        // Allow ±15%, AR(1) steady-state stdev should equal sigma exactly,
         // sample-size noise is the only source of error.
         assert!(
             (stdev - 5.0).abs() / 5.0 < 0.15,

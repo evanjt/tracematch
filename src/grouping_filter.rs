@@ -2,7 +2,7 @@
 //!
 //! Route grouping (Union-Find of "same-route" activities) compares every
 //! pair of route signatures within a dataset. For N routes that's
-//! N(N-1)/2 pairs — at N=1000 that's nearly 500k comparisons, each
+//! N(N-1)/2 pairs, at N=1000 that's nearly 500k comparisons, each
 //! costing ~25ms of AMD work (`compare_routes`). The existing
 //! `RTree<RouteBounds>` pre-filter in `grouping.rs` only prunes pairs
 //! whose bounding boxes are further apart than `SPATIAL_TOLERANCE`
@@ -70,7 +70,7 @@ impl EndpointCell {
 /// The start and end cells of a single route, used to register the
 /// route in the candidate-pair grid.
 ///
-/// Loop routes (start ≈ end) collapse to a single cell — the
+/// Loop routes (start ≈ end) collapse to a single cell, the
 /// filter handles them naturally because both `start` and `end` end up
 /// in the same cell.
 #[derive(Debug, Clone, Copy)]
@@ -104,13 +104,13 @@ pub fn cell_size_for_endpoint_threshold(endpoint_threshold_meters: f64) -> f64 {
 /// Generate the candidate pair list using the endpoint grid filter.
 ///
 /// Returns pairs as `(i, j)` with `i < j`. Pairs are unique. The set
-/// is a strict subset of all N(N-1)/2 pairs — specifically, the subset
+/// is a strict subset of all N(N-1)/2 pairs, specifically, the subset
 /// where at least one endpoint (start or end) of route `i` shares a
 /// cell-or-neighbour with at least one endpoint of route `j`.
 ///
 /// Downstream code (`compare_routes`, `should_group_routes`) still
 /// applies its own AMD + endpoint + middle-point checks on the result,
-/// so the filter doesn't need to be exact — it only needs to never DROP
+/// so the filter doesn't need to be exact, it only needs to never DROP
 /// a pair that the strict grouping gate would accept.
 pub fn endpoint_grid_filtered_pairs(endpoints: &[RouteEndpointCells]) -> Vec<(usize, usize)> {
     // Inverted index: cell -> list of route indices that have an endpoint there.
@@ -295,7 +295,7 @@ mod tests {
             let cell_size_m = cell_size_deg * 111_000.0;
             assert!(
                 threshold_m <= cell_size_m,
-                "threshold {threshold_m} m exceeds cell_size {cell_size_m:.1} m — \
+                "threshold {threshold_m} m exceeds cell_size {cell_size_m:.1} m, \
                  pairs within threshold could fall in non-neighbouring cells \
                  and be dropped"
             );
@@ -354,7 +354,7 @@ mod tests {
         let naive_set: HashSet<_> = naive_pairs.iter().copied().collect();
         assert!(
             filter_set.is_subset(&naive_set),
-            "filter is not a subset of naive — broken invariant"
+            "filter is not a subset of naive, broken invariant"
         );
 
         // Run the strict grouping gate on each pair set, collect the
@@ -413,7 +413,7 @@ mod tests {
         // Sanity: actual groupings must be non-empty.
         assert!(
             !naive_grouped.is_empty(),
-            "test produced zero grouped pairs — test data is wrong, not the filter"
+            "test produced zero grouped pairs, test data is wrong, not the filter"
         );
     }
 }

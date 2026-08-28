@@ -153,9 +153,11 @@ fn test_resample_for_comparison_consistent_spacing() {
 fn test_resample_for_comparison_legacy_mode() {
     // When resample_spacing_meters is 0, use legacy fixed count
     let points = generate_route_with_distance(5000.0);
-    let mut config = MatchConfig::default();
-    config.resample_spacing_meters = 0.0;
-    config.resample_count = 75;
+    let config = MatchConfig {
+        resample_spacing_meters: 0.0,
+        resample_count: 75,
+        ..MatchConfig::default()
+    };
 
     let resampled = resample_for_comparison(&points, 5000.0, &config);
 
@@ -166,8 +168,10 @@ fn test_resample_for_comparison_legacy_mode() {
 fn test_resample_for_comparison_custom_spacing() {
     // Custom 100m spacing
     let points = generate_route_with_distance(5000.0);
-    let mut config = MatchConfig::default();
-    config.resample_spacing_meters = 100.0;
+    let config = MatchConfig {
+        resample_spacing_meters: 100.0,
+        ..MatchConfig::default()
+    };
 
     let resampled = resample_for_comparison(&points, 5000.0, &config);
 
@@ -239,7 +243,7 @@ fn test_deviation_reflected_in_percentage() {
     let with_deviation: Vec<GpsPoint> = (0..50)
         .map(|i| {
             let lat = 51.5074 + i as f64 * 0.0002;
-            let lng = if i >= 20 && i < 30 {
+            let lng = if (20..30).contains(&i) {
                 // ~50m deviation (0.0007 degrees ~ 50m at this latitude)
                 -0.1278 + 0.0007
             } else {

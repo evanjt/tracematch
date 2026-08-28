@@ -30,6 +30,8 @@ use tracematch::{
     detect_sections_unified_incremental,
 };
 
+type Tracks = Vec<(String, Vec<GpsPoint>)>;
+
 // ============================================================================
 // Ground-match maths — inlined so this test binary owns its geometry (Rust
 // integration test files are independent crates; the sibling parity test keeps
@@ -715,10 +717,7 @@ fn gate_cached_incremental_multi_cluster_and_bridge_matches_batch() {
 /// every add lands in a cluster bounded by one corpus's size however large the
 /// whole library grows. `bucket_a` is each corpus's cold-start count (its total
 /// through-E size is a little larger). Returns `(tracks in drip order, sport map)`.
-fn multi_cluster_library(
-    n_clusters: usize,
-    bucket_a: usize,
-) -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
+fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Tracks, HashMap<String, String>) {
     let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
     let mut sports: HashMap<String, String> = HashMap::new();
     for c in 0..n_clusters {

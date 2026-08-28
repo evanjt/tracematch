@@ -16,6 +16,8 @@ use tracematch::{
     detect_sections_unified_incremental_dated, shares_ground,
 };
 
+type Tracks = Vec<(String, Vec<GpsPoint>)>;
+
 fn config() -> SectionConfig {
     SectionConfig::default()
 }
@@ -1518,7 +1520,7 @@ fn a_deviating_lap_does_not_render_the_circuit() {
 /// member of what the section shows.
 #[test]
 fn activity_ids_are_the_drawn_line_population() {
-    let corpora: Vec<(&str, Vec<(String, Vec<GpsPoint>)>)> = vec![
+    let corpora: Vec<(&str, Tracks)> = vec![
         ("oval_stem", shapes::oval_stem(6)),
         ("lollipop", shapes::lollipop(6)),
         ("cliff_tail", shapes::cliff_tail(10, 4)),
@@ -1691,7 +1693,7 @@ fn tied_sports_label_the_same_way_whatever_the_order() {
 /// A long ride corridor with per-outing ends, plus a shorter run corridor
 /// 30 m off its flank. Pooled, the two populations cut sections on
 /// overlapping ground, the shape a per-sport partition never produces.
-fn parallel_sports() -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, String>) {
+fn parallel_sports() -> (Tracks, HashMap<String, String>) {
     let mut tracks = Vec::new();
     let mut sports = HashMap::new();
     for i in 0..4 {

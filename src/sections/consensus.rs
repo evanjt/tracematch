@@ -11,11 +11,11 @@
 //! 4. Track observation density for confidence scoring
 //!
 //! Two paths:
-//! - [`compute_consensus_polyline`] — the original full-recompute path,
+//! - [`compute_consensus_polyline`], the original full-recompute path,
 //!   used at first detection and as a fallback. Walks every trace's R-tree
 //!   for every reference point; cost is O(T × P log P) where T = traces
 //!   and P = reference points.
-//! - [`merge_traces_into_consensus`] — the incremental path. Maintains a
+//! - [`merge_traces_into_consensus`], the incremental path. Maintains a
 //!   per-reference-point [`ConsensusPointAccumulator`] of weighted sums
 //!   and adds new traces' contributions in O(K × P log P) where K = new
 //!   traces only. The reference polyline is held fixed across merges so
@@ -275,7 +275,7 @@ pub fn build_accumulator_from_traces(
 /// `merge_traces_into_consensus_with_cache` calls within one detection
 /// pass. Use [`build_trace_rtree_cache`] to populate. Reusing this cache
 /// across multiple sections in the same incremental run amortises the
-/// R-tree construction cost — important when many sections are touched
+/// R-tree construction cost, important when many sections are touched
 /// by the same handful of new activities.
 /// One traversal: the activity and its zero-based pass over the section.
 pub type TraceKey = (String, u32);
@@ -357,7 +357,7 @@ pub fn merge_traces_into_consensus_with_cache(
 /// `accumulator` in place.
 ///
 /// `new_traces` whose `activity_id` is already in
-/// `accumulator.absorbed_activity_ids` are skipped — this guards against
+/// `accumulator.absorbed_activity_ids` are skipped, this guards against
 /// double-counting in batched incremental runs.
 pub fn merge_traces_into_consensus(
     accumulator: &mut ConsensusAccumulator,
@@ -563,7 +563,7 @@ fn fold_resolved_into_accumulator(
         .map(|(_, trace, tree)| compute_for_trace(tree.as_ref(), trace))
         .collect();
 
-    // Merge contributions into the accumulator (serial — mutating shared
+    // Merge contributions into the accumulator (serial, mutating shared
     // state, and the per-trace work above already parallelised the heavy
     // R-tree queries).
     for contribution in &contributions {
@@ -653,7 +653,7 @@ mod tests {
     }
 
     fn jitter(track: &[GpsPoint], dx_deg: f64, seed: u64) -> Vec<GpsPoint> {
-        // Deterministic per-point jitter — small, well within proximity threshold.
+        // Deterministic per-point jitter, small, well within proximity threshold.
         track
             .iter()
             .enumerate()
@@ -747,7 +747,7 @@ mod tests {
         let reference = make_corridor(47.37, 8.55, 30);
         let trace = (("a_dup".to_string(), 0), jitter(&reference, 1e-5, 1));
         let mut acc = ConsensusAccumulator::new(reference.clone());
-        merge_traces_into_consensus(&mut acc, &[trace.clone()], 50.0);
+        merge_traces_into_consensus(&mut acc, std::slice::from_ref(&trace), 50.0);
         let mid_total_weight = acc.per_point[0].total_weight;
 
         merge_traces_into_consensus(&mut acc, &[trace], 50.0);
@@ -766,7 +766,7 @@ mod tests {
         let trace = (("a".to_string(), 0), jitter(&reference, 1e-5, 1));
 
         let mut acc = ConsensusAccumulator::new(reference.clone());
-        merge_traces_into_consensus(&mut acc, &[trace.clone()], 50.0);
+        merge_traces_into_consensus(&mut acc, std::slice::from_ref(&trace), 50.0);
 
         let json = serde_json::to_string(&acc).expect("serialize");
         let mut acc2: ConsensusAccumulator = serde_json::from_str(&json).expect("deserialize");
@@ -774,7 +774,7 @@ mod tests {
         // Add another trace; merging into the deserialized accumulator
         // should produce the same result as merging into the original.
         let extra = (("b".to_string(), 0), jitter(&reference, 1e-5, 2));
-        let r1 = merge_traces_into_consensus(&mut acc, &[extra.clone()], 50.0);
+        let r1 = merge_traces_into_consensus(&mut acc, std::slice::from_ref(&extra), 50.0);
         let r2 = merge_traces_into_consensus(&mut acc2, &[extra], 50.0);
 
         for (p, q) in r1.polyline.iter().zip(r2.polyline.iter()) {
