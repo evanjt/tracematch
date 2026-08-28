@@ -176,7 +176,7 @@ pub fn find_all_track_portions(
     reference: &[GpsPoint],
     threshold: f64,
 ) -> Vec<(usize, usize, Direction)> {
-    find_all_track_portions_with_gap(track, reference, threshold, 3)
+    find_all_track_portions_with_gap(track, reference, threshold, super::TRACK_GAP_POINTS)
 }
 
 /// Like `find_all_track_portions`, but with a configurable gap tolerance.

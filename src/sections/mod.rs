@@ -568,6 +568,11 @@ impl FrequentSection {
 /// The label of a section no activity in `sport_types` traverses.
 pub(crate) const UNKNOWN_SPORT: &str = "Unknown";
 
+/// Consecutive off-line points a trace tolerates before it breaks: GPS
+/// noise, not a departure. Shared by every track-against-line scan so the
+/// unit (points, never metres) cannot drift between them.
+pub const TRACK_GAP_POINTS: usize = 3;
+
 /// Pick the most-common sport among the given activities.
 ///
 /// Sections can contain activities from multiple sports (e.g., a road
