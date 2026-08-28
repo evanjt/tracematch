@@ -889,32 +889,37 @@ mod tests {
         );
         assert!(corpus.laps_by_activity.values().all(|&n| n == 3));
 
-        let single = LifecycleCorpus::generate(&LifecycleConfig {
-            bucket_a_count: 40,
-            bucket_b_delta_count: 0,
-            bucket_d_delta_count: 0,
-            bucket_e_delta_count: 0,
-            parallel_street_count: 0,
-            ..LifecycleConfig::default()
-        });
-        let id = corpus.laps_by_activity.keys().next().unwrap();
-        let lapped_len = corpus
-            .through_e()
+        // Every activity shares the corridor's canonical line and the same
+        // approach and departure legs, so three passes are longer than one
+        // for every pair inside this corpus. A second corpus is no yardstick:
+        // the lap draw shifts its random stream.
+        let all = corpus.through_e();
+        let lapped: Vec<usize> = all
             .iter()
-            .find(|a| &a.id == id)
-            .unwrap()
-            .gps_points
-            .len();
-        let plain_len = single
-            .through_e()
+            .filter(|a| corpus.laps_by_activity.contains_key(&a.id))
+            .map(|a| a.gps_points.len())
+            .collect();
+        let plain: Vec<usize> = all
             .iter()
-            .find(|a| &a.id == id)
-            .unwrap()
-            .gps_points
-            .len();
+            .filter(|a| !corpus.laps_by_activity.contains_key(&a.id))
+            .map(|a| a.gps_points.len())
+            .collect();
         assert!(
-            lapped_len > plain_len,
-            "the lapped track is not longer: {lapped_len} vs {plain_len}"
+            !plain.is_empty(),
+            "half the corridor activities were not lapped"
+        );
+        // A lapped track is its corridor walked three times between the
+        // same fixed-length legs a plain track carries, so one leg length
+        // turns every lapped track into a plain length this corpus holds.
+        let plain_set: std::collections::BTreeSet<usize> = plain.iter().copied().collect();
+        let legs = (0..400usize).find(|&legs| {
+            lapped.iter().all(|&l| {
+                l > legs && (l - legs) % 3 == 0 && plain_set.contains(&(legs + (l - legs) / 3))
+            })
+        });
+        assert!(
+            legs.is_some(),
+            "no leg length makes every lapped track three passes of a plain one: {lapped:?} vs {plain:?}"
         );
     }
 
