@@ -27,6 +27,7 @@
 mod consensus;
 mod grid;
 mod identity;
+pub mod interestingness;
 mod medoid;
 mod naming;
 pub mod optimized;
@@ -52,6 +53,10 @@ pub use consensus::{
     ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult, TraceKey, TraceRTreeCache,
     build_accumulator_from_traces, build_trace_rtree_cache, merge_traces_into_consensus,
     merge_traces_into_consensus_with_cache,
+};
+pub use interestingness::{
+    Candidate as RankCandidate, Enrichment, Member as RankMember, Outing as RankOuting,
+    RankFeatures, SectionClass, Traversal as RankTraversal, enrich, max_sustained_grade, rank,
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
@@ -517,6 +522,17 @@ pub struct FrequentSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_grade_percent: Option<f64>,
 
+    /// Profile and shape off the emitted slice: loss, steepest sustained
+    /// grade, straightness, class and the lift flag. The gain and net
+    /// grade above are the same numbers, kept where older readers look.
+    #[serde(default)]
+    pub enrichment: interestingness::Enrichment,
+
+    /// Ranking features and score within the catalogue this section was
+    /// last ranked in; None until a rank has run.
+    #[serde(default)]
+    pub rank: Option<interestingness::RankFeatures>,
+
     /// Number of times this section has been recalibrated
     #[serde(default = "default_version")]
     pub version: u32,
@@ -739,6 +755,8 @@ pub fn process_cluster(
         version: 1,
         updated_at: None,
         created_at: None,
+        enrichment: Default::default(),
+        rank: None,
         consensus_state: None,
     })
 }

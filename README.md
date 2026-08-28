@@ -84,6 +84,21 @@ The **drip** is the whole reason to build incremental: re-batching every day for
 
 **Design.** Incremental for the ingest-concurrent drip (a per-activity budget, re-detecting only the touched region); batch for cold start and large expansions as a background, checkpointed job; a persistent identity layer over both, so ids and history outlive any recompute.
 
+## Enrichment and ranking
+
+After a cut, `enrich` reads each section's own line: gain and loss with
+the same hysteresis, the steepest grade held over 300 m, straightness,
+a class (climb, descent, rolling, flat, loop) and whether the line is
+carried ground. `rank` scores a set of sections against each other from
+what the athlete did on them: how far out on the outing the ground sat,
+how many months it was visited, how many directions it is approached
+from, direction purity, freshness and, when a sensor was worn, the effort
+spent there. Each feature is a percentile within the set, the score is
+their equal-weight mean, and a missing sensor sits at neutral. The score
+ranks, names and breaks ties; it never draws a boundary and never removes
+a section that passed support. The literature each feature rests on is in
+`REFERENCES.md`.
+
 ## Route matching
 
 Compares two GPS tracks by Average Minimum Distance (AMD). For each point on route A, find the nearest point on route B and average the distances. Runs both directions to detect subsets.

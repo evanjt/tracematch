@@ -97,6 +97,10 @@ pub use sections::{
     recalculate_section_polyline, section_heart, self_pass_penalty, shares_ground,
     split_section_at_index, split_section_at_point, track_portions,
 };
+pub use sections::{
+    Enrichment, RankCandidate, RankFeatures, RankMember, RankOuting, RankTraversal, SectionClass,
+    enrich, max_sustained_grade, rank,
+};
 
 // ============================================================================
 // Direction Enum
