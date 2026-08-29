@@ -1819,4 +1819,50 @@ mod tests {
             );
         }
     }
+
+    /// The marginal one-sided senior case, held over repeated detects.
+    ///
+    /// A short senior sits marginally inside a long candidate while a dominant
+    /// junior covers most of it. At the default `merge_mutual_floor` of 0.0
+    /// seniority alone decides the capture, which the merge-floor tests cover
+    /// for a single plan. The open question was whether that capture then
+    /// oscillates once the outcome is fed back as the next prior, churning the
+    /// id and resetting the section's PR era. It does not: the fold reaches a
+    /// fixed point and holds it.
+    #[test]
+    fn a_marginal_senior_capture_settles_instead_of_churning() {
+        let long = line(46.0, 7.0, 120);
+        let most = long[..90].to_vec();
+        let short = long[..20].to_vec();
+
+        let mut state = HysteresisState::default();
+        // The short senior is established first, so it out-ranks the rest.
+        state.step_assign(&[cand(short.clone(), 3)]);
+
+        let batch = [
+            cand(short.clone(), 3),
+            cand(most.clone(), 9),
+            cand(long.clone(), 12),
+        ];
+        let (_, first) = state.step_assign(&batch);
+        let settled: Vec<String> = first.iter().map(|r| r.id.clone()).collect();
+
+        for step in 0..8 {
+            let (_, r) = state.step_assign(&batch);
+            let ids: Vec<String> = r.iter().map(|x| x.id.clone()).collect();
+            assert_eq!(
+                ids, settled,
+                "step {step}: every ground must keep the id it settled on"
+            );
+            assert_eq!(
+                state.visible_len(),
+                3,
+                "step {step}: a settled catalogue mints nothing further"
+            );
+            assert!(
+                r.iter().all(|x| x.fate != CandidateFate::Minted),
+                "step {step}: no ground re-mints once it has an id"
+            );
+        }
+    }
 }
