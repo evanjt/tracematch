@@ -1,6 +1,6 @@
 //! Tests for union_find module
 
-use tracematch::union_find::{self, UnionFind};
+use tracematch::union_find::UnionFind;
 
 #[test]
 fn test_basic_operations() {
