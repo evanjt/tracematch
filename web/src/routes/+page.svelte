@@ -4,6 +4,13 @@
   import { parseGpx } from '$lib/parsers/gpx';
   import { runAnalysisAsync } from '$lib/wasm/engine';
   import MethodIllustration from '$lib/components/MethodIllustration.svelte';
+  import {
+    fetchIndex,
+    fetchNewest,
+    downloadBytes,
+    trackDistance,
+    type GeoLifeEntry,
+  } from '$lib/geolife';
   import type { RouteGroup, FrequentSection, GpsPoint } from '$lib/wasm/types';
 
   // --- Sport color system ---
@@ -688,6 +695,71 @@
     importProgress = null;
   }
 
+  // --- GeoLife demo corpus ---
+  //
+  // The archive is 352 MB, but its index is 2.3 MB and every trajectory
+  // is separately addressable by byte range, so the slider decides what
+  // gets downloaded rather than what gets kept.
+  let geolifeIndex = $state<GeoLifeEntry[] | null>(null);
+  let geolifeCount = $state(200);
+  let geolifeBusy = $state(false);
+  let geolifeStatus = $state<string | null>(null);
+  let geolifeError = $state<string | null>(null);
+
+  const geolifeSelection = $derived(geolifeIndex ? geolifeIndex.slice(0, geolifeCount) : []);
+  const geolifeMb = $derived(downloadBytes(geolifeSelection) / 1e6);
+  const geolifeOldest = $derived(
+    geolifeSelection.length ? geolifeSelection[geolifeSelection.length - 1].startedAt : 0,
+  );
+
+  async function loadGeoLifeIndex() {
+    geolifeBusy = true;
+    geolifeError = null;
+    geolifeStatus = 'Reading the archive index...';
+    try {
+      geolifeIndex = await fetchIndex();
+      geolifeStatus = null;
+    } catch (e) {
+      // The mirror is a third party. If it goes, dropping the zip in by
+      // hand still works, so say that rather than just failing.
+      geolifeError = `Could not reach the dataset (${e instanceof Error ? e.message : e}). You can still drop GPX files above.`;
+      geolifeStatus = null;
+    } finally {
+      geolifeBusy = false;
+    }
+  }
+
+  async function importGeoLife() {
+    if (!geolifeIndex) return;
+    geolifeBusy = true;
+    geolifeError = null;
+    try {
+      const tracks = await fetchNewest(geolifeIndex, geolifeCount, (done, total) => {
+        geolifeStatus = `Downloading ${done} of ${total} activities...`;
+      });
+      geolifeStatus = 'Storing...';
+      const batch: StoredTrace[] = tracks.map((t) => ({
+        // The path is stable and unique, so re-importing replaces rather
+        // than duplicates.
+        id: `geolife:${t.entry.path}`,
+        name: `${t.entry.user} ${new Date(t.entry.startedAt).toISOString().slice(0, 10)}`,
+        fileName: t.entry.path,
+        points: t.points,
+        distance: trackDistance(t.points),
+        // GeoLife is predominantly pedestrian and urban transport.
+        sportType: 'Walk',
+        addedAt: t.entry.startedAt,
+      }));
+      if (batch.length > 0) await traceStore.addTraces(batch);
+      geolifeStatus = null;
+    } catch (e) {
+      geolifeError = `Import failed: ${e instanceof Error ? e.message : e}`;
+      geolifeStatus = null;
+    } finally {
+      geolifeBusy = false;
+    }
+  }
+
   function handleDrop(e: DragEvent) {
     e.preventDefault();
     dragOver = false;
@@ -1030,6 +1102,42 @@
           <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           <span>Drop GPX files or click to browse</span>
           <input type="file" accept=".gpx" multiple onchange={handleFileInput} />
+        </div>
+
+        <!-- Real public data, streamed a trajectory at a time. -->
+        <div class="geolife">
+          {#if !geolifeIndex}
+            <button class="geolife-load" onclick={loadGeoLifeIndex} disabled={geolifeBusy}>
+              {geolifeBusy ? 'Loading index...' : 'Load GeoLife sample data'}
+            </button>
+            <p class="geolife-hint">
+              182 people, Beijing, 2007 to 2012. Reads a 2.3 MB index first, then
+              downloads only the activities you pick.
+            </p>
+          {:else}
+            <label class="slider-row">
+              <span class="slider-label">GeoLife activities</span>
+              <span class="slider-value">{geolifeCount}</span>
+              <input
+                type="range"
+                min="10"
+                max={Math.min(2000, geolifeIndex.length)}
+                step="10"
+                bind:value={geolifeCount}
+                disabled={geolifeBusy}
+              />
+              <span class="slider-hint">
+                {geolifeMb.toFixed(1)} MB to download, newest first
+                {#if geolifeOldest}, back to {new Date(geolifeOldest).toISOString().slice(0, 10)}{/if}
+              </span>
+            </label>
+            <button class="geolife-load" onclick={importGeoLife} disabled={geolifeBusy}>
+              {geolifeBusy ? (geolifeStatus ?? 'Working...') : `Import ${geolifeCount} activities`}
+            </button>
+          {/if}
+          {#if geolifeError}
+            <p class="geolife-error">{geolifeError}</p>
+          {/if}
         </div>
 
         {#if traceStore.traces.length >= 2}
@@ -1521,6 +1629,31 @@
   }
 
   /* --- Drop zone (pre-analysis) --- */
+  .geolife {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .geolife-load {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border, #333);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .geolife-load:hover:not(:disabled) { border-color: var(--accent, #888); }
+  .geolife-load:disabled { opacity: 0.6; cursor: default; }
+  .geolife-hint, .geolife-error {
+    margin: 0;
+    font-size: 0.78rem;
+    opacity: 0.7;
+    line-height: 1.4;
+  }
+  .geolife-error { opacity: 1; color: var(--error, #e06c6c); }
+
   .drop-zone {
     border: 1.5px dashed var(--border);
     border-radius: var(--radius);
