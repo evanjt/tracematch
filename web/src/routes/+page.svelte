@@ -161,6 +161,27 @@
   // Map internals
   let map: L.Map | null = null;
   let tileLayer: L.TileLayer | null = null;
+
+  // Keyless basemaps only. The site is a static build with no server, so
+  // any API key would ship to every visitor in the bundle anyway.
+  //
+  // Dark is Esri's Dark Gray Canvas rather than CARTO, which now wants an
+  // account. It is global to z16 and serves a placeholder above that, so
+  // `maxNativeZoom` upscales instead of showing blank tiles.
+  function basemap(dark: boolean): { url: string; attribution: string; maxNativeZoom: number } {
+    return dark
+      ? {
+          url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+          attribution:
+            'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
+          maxNativeZoom: 16,
+        }
+      : {
+          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          attribution: '&copy; OpenStreetMap contributors',
+          maxNativeZoom: 19,
+        };
+  }
   let traceLayerGroup: L.LayerGroup | null = null;
   let routeLayerGroup: L.LayerGroup | null = null;
   let sectionLayerGroup: L.LayerGroup | null = null;
@@ -604,12 +625,11 @@
       import('leaflet/dist/leaflet.css');
       L = leaflet;
       map = L.map(mapContainer).setView([30, 0], 2);
-      const tileUrl = resolvedDark
-        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-      tileLayer = L.tileLayer(tileUrl, {
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-        maxZoom: 19
+      const base = basemap(resolvedDark);
+      tileLayer = L.tileLayer(base.url, {
+        attribution: base.attribution,
+        maxZoom: 19,
+        maxNativeZoom: base.maxNativeZoom,
       }).addTo(map);
       traceLayerGroup = L.layerGroup().addTo(map);
       routeLayerGroup = L.layerGroup();
@@ -621,14 +641,16 @@
     });
   });
 
-  // Swap tiles when theme changes
+  // Swap tiles when theme changes. The attribution and the native zoom
+  // ceiling differ per provider, so they move with the URL.
   $effect(() => {
     const dark = resolvedDark;
     if (!map || !L || !tileLayer) return;
-    const newUrl = dark
-      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-      : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-    tileLayer.setUrl(newUrl);
+    const base = basemap(dark);
+    tileLayer.options.attribution = base.attribution;
+    tileLayer.options.maxNativeZoom = base.maxNativeZoom;
+    tileLayer.setUrl(base.url);
+    map.attributionControl.addAttribution(base.attribution);
   });
 
   // React to trace list changes
