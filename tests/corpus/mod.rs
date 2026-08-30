@@ -95,30 +95,79 @@ pub fn require_at_least(name: &str, minimum: usize) -> Vec<PathBuf> {
 // `_meta.json` date gives, chronological as the files sort.
 // ---------------------------------------------------------------------------
 
-/// Track points from a GPX, tolerating a `<trkpt` whose attributes wrap onto
-/// following lines.
-pub fn load_points(path: &Path) -> Vec<GpsPoint> {
+/// Points and per-point seconds from a GPX, tolerating a `<trkpt` whose
+/// attributes wrap onto following lines.
+///
+/// Elevation and time are both carried because the lift veto needs both:
+/// `lift_spans_tuned` returns empty below two elevated points, and it judges a
+/// candidate by speed when the track is timed and by GPS jitter when it is
+/// not. A loader that drops either leaves the gates silent about the veto.
+///
+/// The returned seconds are offsets from the first fix, parallel to the
+/// points, and empty unless every point carries a time. A partial stream
+/// cannot be indexed by point, and the veto reads `secs[i]` at a point index,
+/// so half a stream moves the wrong samples. This is the rule
+/// `lift_spans_tuned` applies to a stream whose length disagrees, and the one
+/// the engine applies to a stored one.
+pub fn load_track(path: &Path) -> (Vec<GpsPoint>, Vec<f64>) {
     let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
+
     let mut points = Vec::new();
-    let bytes = content.as_bytes();
+    let mut times: Vec<Option<f64>> = Vec::new();
     let mut from = 0usize;
     while let Some(hit) = content[from..].find("<trkpt") {
         let start = from + hit;
-        let end = (start + 200).min(bytes.len());
-        let window = &content[start..end];
-        let coord = |key: &str| -> Option<f64> {
-            let at = window.find(key)? + key.len();
-            let close = window[at..].find('"')?;
-            window[at..at + close].parse().ok()
-        };
-        if let (Some(lat), Some(lon)) = (coord("lat=\""), coord("lon=\"")) {
-            points.push(GpsPoint::new(lat, lon));
-        }
+        // One point's block runs to the next `<trkpt`, so `<ele>` and `<time>`
+        // are found wherever the exporter wrapped them, in either order, and
+        // the metadata `<time>` above the first block is never in one.
+        let next = content[start + 6..]
+            .find("<trkpt")
+            .map(|o| start + 6 + o)
+            .unwrap_or(content.len());
+        let block = &content[start..next];
         from = start + 6;
+
+        let attr = |key: &str| -> Option<f64> {
+            let at = block.find(key)? + key.len();
+            let close = block[at..].find('"')?;
+            block[at..at + close].parse().ok()
+        };
+        let tag = |key: &str, close: &str| -> Option<&str> {
+            let at = block.find(key)? + key.len();
+            let end = block[at..].find(close)?;
+            Some(&block[at..at + end])
+        };
+
+        let (Some(lat), Some(lon)) = (attr("lat=\""), attr("lon=\"")) else {
+            continue;
+        };
+        match tag("<ele>", "</ele>").and_then(|e| e.trim().parse().ok()) {
+            Some(ele) => points.push(GpsPoint::with_elevation(lat, lon, ele)),
+            None => points.push(GpsPoint::new(lat, lon)),
+        }
+        times.push(tag("<time>", "</time>").and_then(instant_of));
     }
-    points
+
+    let seconds = match times.first().copied().flatten() {
+        Some(first) if times.iter().all(Option::is_some) => {
+            times.into_iter().flatten().map(|t| t - first).collect()
+        }
+        _ => Vec::new(),
+    };
+    (points, seconds)
+}
+
+/// Epoch seconds from an ISO instant, `YYYY-MM-DDTHH:MM:SS` with anything
+/// after it ignored. The corpus anonymises the date to 1970-01-01 and keeps
+/// real offsets, so the date still has to count: an outing past midnight rolls
+/// the day rather than restarting the clock.
+fn instant_of(stamp: &str) -> Option<f64> {
+    let day = epoch_of(stamp)?;
+    let field = |at: usize| -> Option<i64> { stamp.get(at..at + 2)?.parse().ok() };
+    let (h, m, s) = (field(11)?, field(14)?, field(17)?);
+    Some((day + h * 3600 + m * 60 + s) as f64)
 }
 
 fn epoch_of(date: &str) -> Option<i64> {
@@ -149,16 +198,22 @@ fn load_dates(dir: &Path) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Every track in the named corpus with the start epoch of each dated one.
+/// Every track in the named corpus, with the start epoch of each dated one
+/// and the per-point seconds of each timed one.
 /// A corpus with fewer than `minimum` tracks is a wrong checkout, not data.
 #[allow(clippy::type_complexity)]
 pub fn load_tracks(
     name: &str,
     minimum: usize,
-) -> (Vec<(String, Vec<GpsPoint>)>, HashMap<String, i64>) {
+) -> (
+    Vec<(String, Vec<GpsPoint>)>,
+    HashMap<String, i64>,
+    HashMap<String, Vec<f64>>,
+) {
     let dir = dir(name);
     let dates = load_dates(&dir);
     let mut tracks: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut seconds: HashMap<String, Vec<f64>> = HashMap::new();
     for path in gpx_files(name, usize::MAX) {
         let id = path
             .file_stem()
@@ -168,8 +223,11 @@ pub fn load_tracks(
             .next()
             .unwrap_or_default()
             .to_string();
-        let pts = load_points(&path);
+        let (pts, secs) = load_track(&path);
         if pts.len() > 1 {
+            if secs.len() == pts.len() {
+                seconds.insert(id.clone(), secs);
+            }
             tracks.push((id, pts));
         }
     }
@@ -187,5 +245,103 @@ pub fn load_tracks(
                 .map(|e| (id.clone(), e))
         })
         .collect();
-    (tracks, starts)
+    (tracks, starts, seconds)
+}
+
+// ---------------------------------------------------------------------------
+// Loader tests. The corpus GPX carries `<ele>` and a per-point `<time>`, and
+// the lift veto is inert without both: `lift_spans_tuned` returns empty when
+// fewer than two points are elevated, and falls back to the jitter estimate
+// when the track is untimed. A loader that drops either makes every gate
+// below it vacuous about the veto, the same way an empty corpus does.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GPX: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="tracematch" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Morning Run</name>
+    <time>2025-12-19T06:23:01</time>
+  </metadata>
+  <trk>
+    <trkseg>
+      <trkpt lat="-33.739803" lon="151.005000">
+        <ele>120.8</ele>
+        <time>1970-01-01T00:00:00+00:00</time>
+      </trkpt>
+      <trkpt lat="-33.739800" lon="151.004990">
+        <ele>121.0</ele>
+        <time>1970-01-01T00:00:04+00:00</time>
+      </trkpt>
+      <trkpt lat="-33.739796" lon="151.004980">
+        <ele>121.4</ele>
+        <time>1970-01-01T00:01:07+00:00</time>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>
+"#;
+
+    fn write(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("tracematch-corpus-{name}.gpx"));
+        std::fs::write(&path, body).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn a_loaded_track_carries_the_elevation_and_time_the_gpx_holds() {
+        let (points, seconds) = load_track(&write("full", GPX));
+
+        assert_eq!(points.len(), 3);
+        assert_eq!(
+            points.iter().map(|p| p.elevation).collect::<Vec<_>>(),
+            vec![Some(120.8), Some(121.0), Some(121.4)],
+            "the veto needs two elevated points before it looks at anything else"
+        );
+        assert_eq!(
+            seconds,
+            vec![0.0, 4.0, 67.0],
+            "seconds are offsets from the first fix, parallel to the points"
+        );
+    }
+
+    #[test]
+    fn a_track_missing_one_point_time_is_loaded_untimed_rather_than_misaligned() {
+        // A partial stream cannot be indexed by point, and the veto's speed
+        // windows read `secs[i]` at a point index. Dropping the whole stream
+        // costs the velocity veto; keeping part of it moves the wrong points.
+        let body = GPX.replace("<time>1970-01-01T00:00:04+00:00</time>", "");
+        let (points, seconds) = load_track(&write("partial", &body));
+
+        assert_eq!(points.len(), 3);
+        assert!(
+            seconds.is_empty(),
+            "a stream that does not time every point must not be returned, got {seconds:?}"
+        );
+    }
+
+    #[test]
+    fn a_track_with_no_elevation_still_loads_its_points_and_times() {
+        let body: String = GPX
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("<ele>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (points, seconds) = load_track(&write("flat", &body));
+
+        assert_eq!(points.len(), 3);
+        assert!(points.iter().all(|p| p.elevation.is_none()));
+        assert_eq!(seconds, vec![0.0, 4.0, 67.0]);
+    }
+
+    #[test]
+    fn the_metadata_time_is_not_mistaken_for_a_point_time() {
+        // `<metadata><time>` dates the activity and is not a fix. Counting it
+        // would push every point's offset one place along.
+        let (_, seconds) = load_track(&write("meta", GPX));
+        assert_eq!(seconds.first().copied(), Some(0.0));
+    }
 }

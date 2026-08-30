@@ -78,6 +78,11 @@ fn data_dir() -> PathBuf {
 struct Corpus {
     tracks: Vec<(String, Vec<GpsPoint>)>,
     sports: HashMap<String, String>,
+    /// Per-point seconds, parallel to each track's points. GeoLife times every
+    /// fix and carries no elevation it can trust, so these reach the lift
+    /// veto's velocity test and no candidate ever reaches them. They are
+    /// loaded anyway so this suite folds the inputs the engine folds.
+    seconds: Vec<Vec<f64>>,
 }
 
 /// The single busiest logger in the set, which is the closest GeoLife gets to
@@ -118,9 +123,23 @@ fn load() -> Corpus {
         .iter()
         .map(|t| (t.id.clone(), t.sport.clone()))
         .collect();
-    let tracks = mine.into_iter().map(|t| (t.id, t.points)).collect();
+    let mut tracks = Vec::with_capacity(mine.len());
+    let mut seconds = Vec::with_capacity(mine.len());
+    for t in mine {
+        // A stream that does not cover every point cannot be indexed by point.
+        seconds.push(if t.seconds.len() == t.points.len() {
+            t.seconds
+        } else {
+            Vec::new()
+        });
+        tracks.push((t.id, t.points));
+    }
 
-    Corpus { tracks, sports }
+    Corpus {
+        tracks,
+        sports,
+        seconds,
+    }
 }
 
 /// Grouping then detection, the order the engine runs them in. Detection
@@ -136,9 +155,10 @@ fn detect(corpus: &Corpus) -> Vec<FrequentSection> {
     let groups = group_signatures_parallel(&signatures, &match_config);
 
     let _ = groups;
+    let seconds: Vec<&[f64]> = corpus.seconds.iter().map(Vec::as_slice).collect();
     detect_sections_unified(
         &corpus.tracks,
-        &[],
+        &seconds,
         &corpus.sports,
         &SectionConfig::default(),
     )
