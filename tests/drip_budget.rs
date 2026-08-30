@@ -37,7 +37,7 @@ const BAND: Band = Band {
 
 #[test]
 fn a_warm_add_stays_inside_the_budget() {
-    let (tracks, starts) = corpus::load_tracks(CORPUS, 1000);
+    let (tracks, starts, seconds) = corpus::load_tracks(CORPUS, 1000);
     let sports = tracks
         .iter()
         .map(|(id, _)| (id.clone(), "All".to_string()))
@@ -46,6 +46,7 @@ fn a_warm_add_stays_inside_the_budget() {
         tracks,
         sports,
         starts,
+        seconds,
     };
     let config = SectionConfig::default();
     let split = c.tracks.len() - WARM_ADDS;
