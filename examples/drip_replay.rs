@@ -628,7 +628,7 @@ fn main() {
     }
 
     // ------------------------------------------------- visible summary
-    println!("\n== visible layer (identity + hysteresis, D2 adoption) ==");
+    println!("\n== visible layer (identity + hysteresis, agreement adoption) ==");
     println!(
         "carries: stable {} | agreement-adopt {} | fired re-cut {} (engine recut_applied {}) | frozen {}",
         n_stable, n_agree, n_fired, n_recut_applied, n_frozen

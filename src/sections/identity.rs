@@ -352,7 +352,7 @@ pub struct IdentityParams {
     /// senior mostly inside a long candidate) can out-rank a dominant junior.
     /// Above 0.0 a prior below the floor cannot capture a candidate's identity
     /// by seniority, so the dominant junior wins it instead. See the
-    /// marginal-capture stress scenario (`tests/b2_inheritance_stress.rs`).
+    /// marginal-capture stress scenario (`tests/inheritance_stress.rs`).
     pub merge_mutual_floor: f64,
 }
 
@@ -730,7 +730,7 @@ struct HeldSection {
 /// streak; only a decisive continuation (an agreement carry, or a fired
 /// change) clears the ledger. The single-`kind` predecessor reset the other
 /// streak on every flip, so a marginal capture rotating with absence pinned a
-/// dead id forever (the D2 corpus replay's stale visible-only sections) and
+/// dead id forever (the corpus replay's stale visible-only sections) and
 /// alternating plans never converged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {

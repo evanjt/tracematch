@@ -1,15 +1,15 @@
 //! Identity-layer edge cases: degenerate inputs, debounce boundaries, state
-//! round-trips, and the pinning pathologies the D2 corpus replay measured.
+//! round-trips, and the pinning pathologies the corpus replay measured.
 //! Every scenario is hand-drawn synthetic ground driven through
 //! `plan_identity` and `HysteresisState`; no corpus data is required.
 //!
-//! The pinning pathologies the D2 gate replay quantified on both corpora
+//! The pinning pathologies the corpus replay quantified on both corpora
 //! (stale visible-only sections that never retire: sion 10 of 66 visible,
 //! fullcorpus 22 of 217; re-cut/dissolve kind flips: sion 85 across 44 ids,
-//! fullcorpus 685 across 208) are fixed by the D5 streak ledger: both
+//! fullcorpus 685 across 208) are fixed by the streak ledger: both
 //! debounce directions accumulate through each other's steps and only a
 //! decisive continuation clears them. Every test here is a green contract
-//! the veloqrs registry and the D5 emitter build on.
+//! the veloqrs registry and the change emitter build on.
 
 use tracematch::geo_utils::haversine_distance;
 use tracematch::sections::{CARRY_COVERAGE, DEFAULT_K, GROUND_TOL_M, RECUT_AGREEMENT};
@@ -70,7 +70,7 @@ fn spur_of(ground: &[GpsPoint]) -> Vec<GpsPoint> {
 }
 
 // ============================================================================
-// Pinning pathologies measured by the D2 corpus replay (fixed in D5)
+// Pinning pathologies measured by the corpus replay, fixed by the streak ledger
 // ============================================================================
 
 /// Scenario: a section's ground stops being ridden. The batch is empty for two
@@ -78,7 +78,7 @@ fn spur_of(ground: &[GpsPoint]) -> Vec<GpsPoint> {
 /// third, and the cycle repeats: the ground is gone from 8 of 12 detects.
 /// Expected behaviour: the id retires within the run. The dissolve streak
 /// survives the marginal capture (a frozen carry preserves it), so the
-/// rotation cannot reset the debounce forever. The D2 corpus replay measured
+/// rotation cannot reset the debounce forever. The corpus replay measured
 /// the pinning this fixes: stale visible-only sections, sion 10 of 66,
 /// fullcorpus 22 of 217, settle trajectories flat.
 #[test]
@@ -107,7 +107,7 @@ fn capture_rotation_must_not_pin_a_dead_section() {
 /// Expected behaviour: the view converges: the id either tombstones or adopts
 /// the spur geometry. Both streaks accumulate through each other's steps
 /// (only a decisive continuation clears the ledger), so one of the two fires
-/// within 2k detects. The D2 corpus replay measured the oscillation this
+/// within 2k detects. The corpus replay measured the oscillation this
 /// fixes: 85 kind flips across 44 ids on sion (max 7 per id), 685 across 208
 /// on fullcorpus (max 15).
 #[test]
@@ -593,7 +593,7 @@ fn forget_releases_id_forever() {
 }
 
 // ============================================================================
-// Per-id fire-time reporting (the D5 emitter contract)
+// Per-id fire-time reporting (the change emitter contract)
 // ============================================================================
 
 /// Scenario: four held corridors; the batch then sustains a union of the
@@ -731,7 +731,7 @@ fn step_is_deterministic_from_any_state() {
     assert_eq!(s1.pending_len(), s2.pending_len());
 }
 
-/// Scenario: the B4 persistence contract: a state holding a stable id, a mid
+/// Scenario: the persistence contract: a state holding a stable id, a mid
 /// re-cut debounce, a mid dissolve debounce, a tombstone, and an advanced
 /// ordinal survives a serde round-trip.
 /// Expected behaviour: both copies step identically, and both in-flight
@@ -784,7 +784,7 @@ fn serde_roundtrip_preserves_streaks() {
 }
 
 // ============================================================================
-// The fate contract the veloqrs reconcile (D3) leans on
+// The fate contract the veloqrs reconcile leans on
 // ============================================================================
 
 /// Scenario: a scripted mix of mints, splits, dissolves, and restores.

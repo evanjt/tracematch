@@ -76,11 +76,11 @@ harness = false
 required-features = ["synthetic"]
 
 [[test]]
-name = "b1_foundation"
+name = "fold_foundation"
 required-features = ["synthetic"]
 
 [[test]]
-name = "b2_identity_measure"
+name = "identity_measure"
 required-features = ["synthetic"]
 
 [[example]]

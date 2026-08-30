@@ -1,4 +1,4 @@
-//! Geometry codec sizing on real catalogue polylines (D4 storage gate).
+//! Geometry codec sizing on real catalogue polylines, the storage gate.
 //!
 //! `section_geometry` stores versioned polylines so history can show and
 //! revert re-cuts. Before the schema lands, measure what a version costs

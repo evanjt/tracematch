@@ -1,6 +1,6 @@
-//! B2 split/merge inheritance stress scenarios.
+//! Split and merge inheritance stress scenarios.
 //!
-//! The reduced growth corpus that b2_identity_measure drives barely exercises
+//! The reduced growth corpus that identity_measure drives barely exercises
 //! GENUINE inheritance tangles: it is mostly monotone growth, so carry / mint /
 //! dissolve dominate and real splits and merges are rare. This file builds the
 //! tangles directly on hand-drawn synthetic ground and drives each one through
