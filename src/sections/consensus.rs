@@ -298,13 +298,13 @@ pub fn build_trace_rtree_cache(traces: &[(TraceKey, Vec<GpsPoint>)]) -> TraceRTr
         .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let pairs: Vec<(String, std::sync::Arc<RTree<IndexedPoint>>)> = traces
+    let pairs: Vec<(TraceKey, std::sync::Arc<RTree<IndexedPoint>>)> = traces
         .iter()
-        .filter_map(|(id, pts)| {
+        .filter_map(|(key, pts)| {
             if pts.is_empty() {
                 None
             } else {
-                Some((id.clone(), std::sync::Arc::new(build_rtree(pts))))
+                Some((key.clone(), std::sync::Arc::new(build_rtree(pts))))
             }
         })
         .collect();
