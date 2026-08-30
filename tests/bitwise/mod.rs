@@ -26,13 +26,18 @@ use baseline::Band;
 use tracematch::sections::FrequentSection;
 use tracematch::{
     GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    sections::detect_sections_unified_incremental_dated,
+    sections::{confirmed_lift_spans, detect_sections_unified_incremental_dated},
 };
 
 pub struct Corpus {
     pub tracks: Vec<(String, Vec<GpsPoint>)>,
     pub sports: HashMap<String, String>,
     pub starts: HashMap<String, i64>,
+    /// Per-point seconds by activity id, for the tracks that carry a stream
+    /// covering every point. The lift veto judges a timed candidate by speed
+    /// and an untimed one by GPS jitter, so a corpus folded without these
+    /// measures a detector the app does not run.
+    pub seconds: HashMap<String, Vec<f64>>,
 }
 
 /// How the three scenarios slice the corpus.
@@ -147,6 +152,37 @@ pub fn catalogue_digest(sections: &[FrequentSection]) -> u64 {
     h.0
 }
 
+/// The corpus seconds as the detector takes them: one slice per pool entry, in
+/// pool order, empty where a track has no stream. Built by id rather than by
+/// index because the scenarios fold prefixes of the corpus, not all of it.
+pub fn seconds_view<'a>(pool: &[(String, Vec<GpsPoint>)], c: &'a Corpus) -> Vec<&'a [f64]> {
+    pool.iter()
+        .map(|(id, _)| c.seconds.get(id).map_or(&[][..], |s| s.as_slice()))
+        .collect()
+}
+
+/// What the lift veto actually removes from `c`, as `(spans, points)` over the
+/// whole corpus after the cross-track descent rescue. This is the ground the
+/// catalogue below never sees. Recorded in the golden and compared for
+/// equality, not banded: it is an exact count of a pure function, so any drift
+/// is a change in the veto's reach and worth failing on.
+pub fn lift_reach(c: &Corpus) -> (usize, usize) {
+    let view: Vec<(&str, &[GpsPoint])> = c
+        .tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+    let spans = confirmed_lift_spans(&view, &seconds_view(&c.tracks, c));
+    (
+        spans.iter().map(Vec::len).sum(),
+        spans
+            .iter()
+            .flatten()
+            .map(|(start, end)| end - start + 1)
+            .sum(),
+    )
+}
+
 pub fn fold(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
@@ -160,7 +196,7 @@ pub fn fold(
         existing,
         pool,
         new_ids,
-        &[],
+        &seconds_view(pool, c),
         &c.sports,
         &c.starts,
         config,
@@ -182,6 +218,15 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         shape.bulk_base
     );
     let mut lines: Vec<String> = Vec::new();
+
+    // The veto's reach, before any scenario. A corpus that excludes nothing
+    // makes every digest below silent about it, so the number is recorded
+    // rather than assumed: GeoLife reads zero because it carries no elevation
+    // to raise a candidate from.
+    let (lift_spans, lift_points) = lift_reach(c);
+    println!("lift veto: {lift_spans} confirmed spans, {lift_points} points excluded");
+    lines.push(format!("L {lift_spans} {lift_points}"));
+
     // The corpus is already in memory and stays there, so anchor here and let
     // the peak report what folding it costs on top.
     baseline::anchor_peak();
