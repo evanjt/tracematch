@@ -1,8 +1,8 @@
 //! Assign-once identity and hysteresis over a churny section catalogue.
 //!
 //! The Unified batch is legitimately non-monotone: sections dissolve and reform
-//! as evidence accumulates (B1). That churn is correct, but a user watching the
-//! map does not want to see it. This module is the pure decision half of B2: it
+//! as evidence accumulates. That churn is correct, but a user watching the
+//! map does not want to see it. This module is the pure decision half: it
 //! matches a fresh batch catalogue against the ids already assigned, so a piece
 //! of ground keeps its id across a recompute, and it low-pass filters the churn
 //! so a single add can never flip the visible view while the view still
@@ -820,7 +820,7 @@ pub struct CandidateResolution {
 /// The assign-once identity registry plus its hysteresis debounce. Holds the
 /// visible catalogue (stable id -> held ground), the tombstones a dissolved
 /// ground can re-emerge under, and the per-id debounce counters. In-memory for
-/// the lab; the engine persists the same shape in B4.
+/// the lab; the engine persists the same shape.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HysteresisState {
     params: HysteresisParams,
