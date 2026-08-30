@@ -274,7 +274,12 @@ pub struct UnifiedDetection {
 /// the validation lab can sweep each value one at a time and verify the
 /// defaults sit on plateaus rather than on peaks fitted to one
 /// athlete's corpus (plateau tables: unified-lab REPORT.md, A1).
-#[derive(Clone, Copy, Debug)]
+///
+/// Serialises camelCase with every field defaulted, so a caller can send
+/// only the knobs it wants to move and the rest stay on `DEFAULT`. The
+/// website's settings panel relies on that.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Tunables {
     /// A re-arrival only counts as a new pass after this many distinct
     /// fine-cell events away: a wiggly line re-clipping a cell corner

@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use tracematch::{BoundaryReason, BoundaryRecord};
+use tracematch::{BoundaryReason, BoundaryRecord, Tunables};
 use tracematch::{FrequentSection, GpsPoint};
 
 fn keys(value: &Value) -> Vec<String> {
@@ -236,5 +236,58 @@ fn boundary_reason_tags_match_the_sites_switch() {
     assert_eq!(
         tag(BoundaryReason::PassEnd { requeued_cells: 0 }),
         "pass_end"
+    );
+}
+
+/// Scenario: the settings panel sends only the knobs the user moved.
+///
+/// Expected behaviour: every constant is camelCase and every one of them
+/// defaults, so a partial object leaves the rest on `DEFAULT`. The panel's
+/// KNOB_GROUPS table keys straight into this, so a rename here silently
+/// stops that slider working unless this fails first.
+#[test]
+fn tunables_round_trip_partially_and_stay_camel_case() {
+    let value = serde_json::to_value(Tunables::DEFAULT).expect("Tunables serialises");
+    assert_eq!(
+        keys(&value),
+        vec![
+            "clusterGapM",
+            "descentMatchM",
+            "dwellEvents",
+            "eleLevelTolM",
+            "jitterHumanMin",
+            "liftMinClimbMh",
+            "liftMinGrade",
+            "liftMinSpeedMs",
+            "liftMinStraight",
+            "liftSpanM",
+            "minorityRunM",
+            "occasionSpanH",
+            "passAwayCells",
+            "passNeeded",
+            "passSubgrid",
+            "passWindow",
+            "reach",
+            "refLatQuantDeg",
+            "selfPassClean",
+            "selfPassMax",
+        ],
+        "Tunables keys; update KNOB_GROUPS in web/src/routes/+page.svelte to match"
+    );
+
+    // A partial object is the whole point: the panel sends only what moved.
+    let partial: Tunables = serde_json::from_str(r#"{"passSubgrid": 4}"#).expect("partial parses");
+    assert_eq!(partial.pass_subgrid, 4.0, "the moved knob takes effect");
+    assert_eq!(
+        partial.lift_min_climb_mh,
+        Tunables::DEFAULT.lift_min_climb_mh,
+        "every other knob stays on its default"
+    );
+
+    let empty: Tunables = serde_json::from_str("{}").expect("empty parses");
+    assert_eq!(
+        empty.pass_subgrid,
+        Tunables::DEFAULT.pass_subgrid,
+        "an empty object is DEFAULT"
     );
 }
