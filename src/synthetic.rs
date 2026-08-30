@@ -462,22 +462,6 @@ impl SyntheticScenario {
         }
     }
 
-    /// 1000 activities, 1x 10km corridor with 50% overlap. Finds the N^2 cliff.
-    pub fn extreme_scale() -> Self {
-        Self {
-            origin: ZURICH,
-            activity_count: 1000,
-            corridors: vec![CorridorConfig {
-                length_meters: 10_000.0,
-                overlap_fraction: 0.5,
-                pattern: CorridorPattern::Winding,
-                approach_length: 500.0,
-            }],
-            gps_noise_sigma_meters: 3.0,
-            seed: 44,
-        }
-    }
-
     /// 200 activities, no corridors. Worst case: O(N^2) work, zero sections found.
     pub fn no_overlap() -> Self {
         Self {
@@ -528,22 +512,6 @@ impl SyntheticScenario {
             ],
             gps_noise_sigma_meters: 3.5,
             seed: 46,
-        }
-    }
-
-    /// 500 activities, 1x 5km corridor with 90% overlap. High overlap density.
-    pub fn urban_commute() -> Self {
-        Self {
-            origin: ZURICH,
-            activity_count: 500,
-            corridors: vec![CorridorConfig {
-                length_meters: 5_000.0,
-                overlap_fraction: 0.9,
-                pattern: CorridorPattern::Winding,
-                approach_length: 300.0,
-            }],
-            gps_noise_sigma_meters: 5.0,
-            seed: 47,
         }
     }
 

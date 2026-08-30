@@ -152,30 +152,3 @@ impl<T: Eq + Hash + Clone + Ord> UnionFind<T> {
         self.parent.is_empty()
     }
 }
-
-/// Helper module for String-based Union-Find (most common use case).
-pub mod string_uf {
-    use super::*;
-
-    /// Create a Union-Find from an iterator of string IDs.
-    pub fn from_ids<'a, I>(ids: I) -> UnionFind<String>
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        let mut uf = UnionFind::new();
-        for id in ids {
-            uf.make_set(id.to_string());
-        }
-        uf
-    }
-
-    /// Find operation for string slices.
-    pub fn find(uf: &mut UnionFind<String>, id: &str) -> String {
-        uf.find(&id.to_string())
-    }
-
-    /// Union operation for string slices.
-    pub fn union(uf: &mut UnionFind<String>, a: &str, b: &str) -> bool {
-        uf.union(&a.to_string(), &b.to_string())
-    }
-}
