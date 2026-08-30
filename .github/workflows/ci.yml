@@ -23,9 +23,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test
-      # The synthetic-gated targets (b1_*, b2_*, pool_incremental_parity and the
-      # scenario corpora) are invisible to the default lane, which enables only
-      # `parallel`.
+      # fold_foundation, identity_measure and fold_resume are invisible to the
+      # default lane, which enables only `parallel`. They build their corpora
+      # from `tracematch::synthetic`, and only that feature compiles the module in.
       - name: Test (synthetic)
         run: cargo test --features synthetic
 
