@@ -11,7 +11,7 @@
     trackDistance,
     type GeoLifeEntry,
   } from '$lib/geolife';
-  import type { RouteGroup, FrequentSection, GpsPoint } from '$lib/wasm/types';
+  import type { RouteGroup, FrequentSection, GpsPoint, BoundaryReason } from '$lib/wasm/types';
 
   // --- Sport color system ---
   const SPORT_COLORS: Record<string, string> = {
@@ -141,6 +141,7 @@
   let showTraces = $state(true);
   let showRoutes = $state(false);
   let showSections = $state(false);
+  let showBoundaries = $state(false);
   let sportFilters = $state(new Set(['Ride', 'Run', 'Walk', 'Swim', 'Other']));
 
   // Sidebar state
@@ -163,6 +164,7 @@
   let traceLayerGroup: L.LayerGroup | null = null;
   let routeLayerGroup: L.LayerGroup | null = null;
   let sectionLayerGroup: L.LayerGroup | null = null;
+  let boundaryLayerGroup: L.LayerGroup | null = null;
   let L: typeof import('leaflet') | null = null;
   let hasFitOnce = false;
   let lastAnalyzedAt: number | null = null;
@@ -481,8 +483,70 @@
     }
   }
 
+  // Every boundary the detector drew, at the point it drew it, with the
+  // numbers that decided it. This is the detector explaining itself:
+  // a cut, or a candidate that backed off and left its evidence behind.
+  const BOUNDARY_STYLE: Record<string, { colour: string; label: string }> = {
+    fork:          { colour: '#e0533d', label: 'Fork' },
+    traffic_cliff: { colour: '#e08a3d', label: 'Traffic cliff' },
+    usage_change:  { colour: '#d9b23d', label: 'Usage change' },
+    low_support:   { colour: '#7d8ea8', label: 'Low support' },
+    backoff:       { colour: '#8a6fd1', label: 'Backed off' },
+    trim:          { colour: '#4a9d8e', label: 'Trimmed' },
+    no_single_pass:{ colour: '#a8748f', label: 'No single pass' },
+    pass_end:      { colour: '#5c8fd6', label: 'Pass end' },
+  };
+
+  function boundaryDetail(reason: BoundaryReason): string {
+    switch (reason.kind) {
+      case 'fork':
+        return `${reason.branch_leavers} of ${reason.through} left here (needed ${reason.needed.toFixed(2)})`;
+      case 'traffic_cliff':
+        return `${reason.thin} passes meeting ${reason.thick}`;
+      case 'usage_change':
+        return `${reason.mismatched} of ${reason.shared} crossed at a different pass class`;
+      case 'low_support':
+        return `${reason.dropped_cells} cells below a floor of ${reason.floor}`;
+      case 'backoff':
+        return `${reason.represented} of ${reason.probed} already represented, ${Math.round(reason.score_metres)} m`;
+      case 'trim':
+        return `kept ${Math.round(reason.kept_metres)} m, dropped ${Math.round(reason.dropped_metres)} m`;
+      case 'no_single_pass':
+        return `${reason.portions} portions, best penalty ${reason.best_penalty.toFixed(2)}`;
+      case 'pass_end':
+        return `${reason.requeued_cells} cells requeued`;
+    }
+  }
+
+  function syncBoundaries() {
+    if (!map || !L || !boundaryLayerGroup) return;
+    boundaryLayerGroup.clearLayers();
+
+    const boundaries = traceStore.analysis?.boundaries;
+    if (!boundaries?.length) return;
+
+    for (const b of boundaries) {
+      const style = BOUNDARY_STYLE[b.reason.kind] ?? { colour: '#888', label: b.reason.kind };
+      L.circleMarker(L.latLng(b.latitude, b.longitude), {
+        radius: 5,
+        color: '#ffffff',
+        weight: 1.5,
+        fillColor: style.colour,
+        fillOpacity: 0.95,
+      })
+        .bindPopup(
+          `<b>${style.label}</b><br><span style="font-size:11px">${boundaryDetail(b.reason)}</span>`
+        )
+        .addTo(boundaryLayerGroup!);
+    }
+  }
+
   function updateLayerVisibility() {
     if (!map || !traceLayerGroup || !routeLayerGroup || !sectionLayerGroup) return;
+    if (boundaryLayerGroup) {
+      if (showBoundaries) boundaryLayerGroup.addTo(map);
+      else boundaryLayerGroup.remove();
+    }
     if (showTraces) traceLayerGroup.addTo(map);
     else traceLayerGroup.remove();
     if (showRoutes) routeLayerGroup.addTo(map);
@@ -550,6 +614,7 @@
       traceLayerGroup = L.layerGroup().addTo(map);
       routeLayerGroup = L.layerGroup();
       sectionLayerGroup = L.layerGroup();
+      boundaryLayerGroup = L.layerGroup();
 
       void syncTracesToMap();
       updateLayerVisibility();
@@ -582,6 +647,7 @@
       lastAnalyzedAt = analyzedAt;
       syncRoutesToMap();
       syncSections();
+      syncBoundaries();
       if (analysis) {
         showTraces = false;
         showRoutes = true;
@@ -609,7 +675,7 @@
 
   // React to layer toggles
   $effect(() => {
-    showTraces; showRoutes; showSections;
+    showTraces; showRoutes; showSections; showBoundaries;
     updateLayerVisibility();
   });
 
@@ -1261,6 +1327,14 @@
             title="Sections"
           >
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+          </button>
+          <button
+            class="layer-btn"
+            class:active={showBoundaries}
+            onclick={() => showBoundaries = !showBoundaries}
+            title="Why the detector cut where it did"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
           </button>
           <div class="layer-divider"></div>
           {#each [['Ride', SPORT_COLORS.Ride], ['Run', SPORT_COLORS.Run], ['Walk', SPORT_COLORS.Walk], ['Swim', SPORT_COLORS.Swim], ['Other', DEFAULT_SPORT_COLOR]] as [sport, color]}
