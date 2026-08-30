@@ -1,7 +1,7 @@
-//! Route-section utilities: find/split sections within a single GPS route.
+//! Route-section utilities: find sections within a single GPS route.
 //!
 //! Used to project known sections onto a single new route, and to
-//! manipulate stored sections (split / recalculate polyline).
+//! recalculate a stored section's polyline.
 
 use super::{FrequentSection, SectionConfig};
 use crate::GpsPoint;
@@ -9,7 +9,6 @@ use crate::geo_utils::haversine_distance;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// A section match found within a route
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,156 +244,6 @@ fn find_all_section_spans_directed(
     }
 
     results
-}
-
-/// Result of splitting a section
-#[derive(Debug, Clone)]
-pub struct SplitResult {
-    /// The first part of the split section
-    pub first: FrequentSection,
-    /// The second part of the split section
-    pub second: FrequentSection,
-}
-
-/// Split a section at a specific point index.
-///
-/// This creates two new sections from the original, splitting at the given
-/// index in the polyline. Both sections inherit the activity associations
-/// but need their portions recalculated.
-///
-/// # Arguments
-/// * `section` - The section to split
-/// * `split_index` - Index in the polyline where to split (must be > 0 and < len-1)
-///
-/// # Returns
-/// SplitResult with two new sections, or None if split_index is invalid
-pub fn split_section_at_index(
-    section: &FrequentSection,
-    split_index: usize,
-) -> Option<SplitResult> {
-    if split_index == 0 || split_index >= section.polyline.len() - 1 {
-        return None;
-    }
-
-    let first_polyline: Vec<_> = section.polyline[..=split_index].to_vec();
-    let second_polyline: Vec<_> = section.polyline[split_index..].to_vec();
-
-    let first_distance = crate::matching::calculate_route_distance(&first_polyline);
-    let second_distance = crate::matching::calculate_route_distance(&second_polyline);
-
-    let base_id = section.id.trim_end_matches(char::is_numeric);
-
-    // Both halves are index slices of the parent line, so each keeps a real
-    // range into the same activity.
-    let split = split_index as u32;
-    let first_range = section
-        .representative_range
-        .map(|(start, _)| (start, start + split + 1));
-    let second_range = section
-        .representative_range
-        .map(|(start, end)| (start + split, end));
-
-    Some(SplitResult {
-        first: FrequentSection {
-            id: format!("{}_a", base_id),
-            name: section.name.clone().map(|n| format!("{} (1)", n)),
-            sport_type: section.sport_type.clone(),
-            polyline: first_polyline,
-            representative_activity_id: section.representative_activity_id.clone(),
-            representative_range: first_range,
-            activity_ids: section.activity_ids.clone(),
-            activity_portions: vec![], // Need recalculation
-            route_ids: section.route_ids.clone(),
-            visit_count: section.visit_count,
-            distance_meters: first_distance,
-            // Lazy: traces need re-extraction for the new polyline
-            activity_traces: HashMap::new(),
-            confidence: section.confidence * 0.9, // Slight reduction
-            observation_count: section.observation_count,
-            average_spread: section.average_spread,
-            point_density: vec![], // Need recalculation
-            scale: section.scale,
-            is_user_defined: true, // Mark as user-modified
-            stability: 0.0,        // Needs recalculation
-            elevation_gain_m: None,
-            avg_grade_percent: None,
-            version: 1,
-            updated_at: None,
-            created_at: section.created_at.clone(),
-            enrichment: Default::default(),
-            rank: None,
-            consensus_state: None,
-        },
-        second: FrequentSection {
-            id: format!("{}_b", base_id),
-            name: section.name.clone().map(|n| format!("{} (2)", n)),
-            sport_type: section.sport_type.clone(),
-            polyline: second_polyline,
-            representative_activity_id: section.representative_activity_id.clone(),
-            representative_range: second_range,
-            activity_ids: section.activity_ids.clone(),
-            activity_portions: vec![],
-            route_ids: section.route_ids.clone(),
-            visit_count: section.visit_count,
-            distance_meters: second_distance,
-            activity_traces: HashMap::new(),
-            confidence: section.confidence * 0.9,
-            observation_count: section.observation_count,
-            average_spread: section.average_spread,
-            point_density: vec![],
-            scale: section.scale,
-            is_user_defined: true,
-            stability: 0.0, // Needs recalculation
-            elevation_gain_m: None,
-            avg_grade_percent: None,
-            version: 1,
-            updated_at: None,
-            created_at: section.created_at.clone(),
-            enrichment: Default::default(),
-            rank: None,
-            consensus_state: None,
-        },
-    })
-}
-
-/// Split a section at a geographic point (finds nearest polyline index).
-///
-/// # Arguments
-/// * `section` - The section to split
-/// * `split_point` - The geographic point where to split
-///
-/// # Returns
-/// SplitResult with two new sections, or None if point is not near polyline
-pub fn split_section_at_point(
-    section: &FrequentSection,
-    split_point: &GpsPoint,
-    max_distance: f64,
-) -> Option<SplitResult> {
-    // Find nearest polyline index
-    let mut best_idx = None;
-    let mut best_dist = f64::MAX;
-
-    for (i, point) in section.polyline.iter().enumerate() {
-        let dist = haversine_distance(point, split_point);
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = Some(i);
-        }
-    }
-
-    let idx = best_idx?;
-
-    // Check if close enough
-    if best_dist > max_distance {
-        return None;
-    }
-
-    // Don't split at endpoints
-    if idx == 0 || idx >= section.polyline.len() - 1 {
-        return None;
-    }
-
-    split_section_at_index(section, idx)
 }
 
 /// Recalculate a section's polyline based on its activity traces.
