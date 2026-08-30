@@ -49,7 +49,7 @@
 //! standard used by GPS receivers and mapping services.
 
 use crate::{Bounds, GpsPoint};
-use geo::{Bearing, Distance, Haversine, Point};
+use geo::{Distance, Haversine, Point};
 
 // =============================================================================
 // Distance Functions
@@ -187,115 +187,8 @@ pub fn compute_center(points: &[GpsPoint]) -> GpsPoint {
 }
 
 // =============================================================================
-// Bearing and Gradient Utilities
+// Elevation Utilities
 // =============================================================================
-
-/// Calculate the initial bearing (forward azimuth) from p1 to p2.
-///
-/// Returns bearing in degrees (0-360), where:
-/// - 0° = North
-/// - 90° = East
-/// - 180° = South
-/// - 270° = West
-///
-/// Uses the spherical law of cosines for azimuth calculation.
-#[inline]
-pub fn calculate_bearing(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
-    let point1 = Point::new(p1.longitude, p1.latitude);
-    let point2 = Point::new(p2.longitude, p2.latitude);
-    let bearing = Haversine::bearing(point1, point2);
-    // geo returns [-180, 180], normalize to [0, 360)
-    (bearing + 360.0) % 360.0
-}
-
-/// Calculate the absolute angular difference between two bearings.
-///
-/// Returns a value in the range [0, 180] degrees, handling the wraparound at 360°.
-#[inline]
-pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
-    let diff = (b1 - b2).abs();
-    if diff > 180.0 { 360.0 - diff } else { diff }
-}
-
-/// Calculate the circular mean of a set of bearings.
-///
-/// Handles the circular nature of bearings (e.g., average of 350° and 10° should be 0°).
-/// Returns a bearing in the range [0, 360).
-pub fn circular_mean_bearing(bearings: &[f64]) -> f64 {
-    if bearings.is_empty() {
-        return 0.0;
-    }
-
-    let sum_sin: f64 = bearings.iter().map(|b| b.to_radians().sin()).sum();
-    let sum_cos: f64 = bearings.iter().map(|b| b.to_radians().cos()).sum();
-
-    (sum_sin.atan2(sum_cos).to_degrees() + 360.0) % 360.0
-}
-
-/// Calculate the circular standard deviation of bearings.
-///
-/// Measures how spread out the bearings are. A value near 0 indicates
-/// consistent direction; higher values indicate more variation.
-pub fn circular_std_bearing(bearings: &[f64]) -> f64 {
-    if bearings.len() < 2 {
-        return 0.0;
-    }
-
-    let mean = circular_mean_bearing(bearings);
-    let sum_sq: f64 = bearings
-        .iter()
-        .map(|b| bearing_difference(*b, mean).powi(2))
-        .sum();
-
-    (sum_sq / bearings.len() as f64).sqrt()
-}
-
-/// Calculate gradient (grade %) between two points.
-///
-/// Returns `None` if either point lacks elevation data.
-/// Positive values indicate uphill (ascending), negative indicates downhill.
-///
-/// Formula: gradient = (elevation_change / horizontal_distance) * 100
-pub fn calculate_gradient(p1: &GpsPoint, p2: &GpsPoint) -> Option<f64> {
-    let elev1 = p1.elevation?;
-    let elev2 = p2.elevation?;
-
-    let horizontal_dist = haversine_distance(p1, p2);
-    if horizontal_dist < 1.0 {
-        // Too close - avoid division by very small numbers
-        return Some(0.0);
-    }
-
-    let elevation_change = elev2 - elev1;
-    Some((elevation_change / horizontal_dist) * 100.0)
-}
-
-/// Compute average gradient over a segment of points.
-///
-/// Returns `None` if insufficient elevation data is available.
-pub fn segment_gradient(points: &[GpsPoint]) -> Option<f64> {
-    if points.len() < 2 {
-        return None;
-    }
-
-    let first = points.first()?;
-    let last = points.last()?;
-
-    let elev_start = first.elevation?;
-    let elev_end = last.elevation?;
-
-    // Calculate total horizontal distance
-    let mut total_dist = 0.0;
-    for i in 1..points.len() {
-        total_dist += haversine_distance(&points[i - 1], &points[i]);
-    }
-
-    if total_dist < 1.0 {
-        return Some(0.0);
-    }
-
-    Some(((elev_end - elev_start) / total_dist) * 100.0)
-}
 
 /// A climb must clear this before it counts towards elevation gain,
 /// filtering barometric and GPS noise between real rises.
@@ -307,7 +200,7 @@ pub const ELEVATION_GAIN_HYSTERESIS_M: f64 = 3.0;
 /// Elevations are conditioned by a 3-point mean, gain accumulates only
 /// when a rise clears [`ELEVATION_GAIN_HYSTERESIS_M`] above the last
 /// anchor, and grade is the net elevation change over the track's
-/// horizontal distance (the [`segment_gradient`] formula).
+/// horizontal distance.
 pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
     if points.len() < 2 {
         return None;
