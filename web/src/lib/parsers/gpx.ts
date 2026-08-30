@@ -52,8 +52,8 @@ const ELE_RE = /<ele[^>]*>([\-\d.]+)<\/ele>/;
 
 /**
  * Fast regex-based GPX parser. Skips the DOMParser + @tmcw/togeojson
- * round-trip which dominated import time on large datasets (Sion's 428
- * runs went from ~3 minutes to a few seconds). Handles the structure
+ * round-trip which dominated import time on large datasets (a 400-run corpus
+ * went from ~3 minutes to a few seconds). Handles the structure
  * intervals.icu / Garmin / Strava export: one or more `<trk>` blocks
  * with `<name>`, optional `<type>`, and any number of `<trkseg>` /
  * `<trkpt>` children.

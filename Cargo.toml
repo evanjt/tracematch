@@ -92,7 +92,7 @@ name = "route_grouping"
 path = "examples/route_grouping.rs"
 
 [[test]]
-name = "grouping_sion_corpus"
+name = "grouping_city_corpus"
 required-features = ["real-corpus"]
 
 [[test]]

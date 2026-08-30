@@ -4,7 +4,7 @@
 //! only the tracks near a dense centre, how far does the result drift
 //! from what the full global detect would draw on that same ground?
 //!
-//!     cargo run --release --example preview_bbox -- sionrunning
+//!     cargo run --release --example preview_bbox -- citycorpus
 //!
 //! Prints, per radius: subset size, detect time, and the ground-match
 //! rate between the subset catalogue and the full catalogue inside the
@@ -242,7 +242,7 @@ fn within(p: &GpsPoint, c: (f64, f64), half_lat: f64, half_lng: f64) -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("sionrunning"));
+    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("citycorpus"));
     let activities = load_corpus(&dir);
     println!("corpus {} : {} activities", dir.display(), activities.len());
 

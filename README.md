@@ -190,11 +190,11 @@ cargo add tracematch
 
 - Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). _SIGMOD_, 593-604.
 
-- Xu, W., & Dong, S. (2022). [Unsupervised trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). _Wireless Comm. and Mobile Computing_, 2022.
+- Xu, W., & Dong, S. (2022). [Application of artificial intelligence in an unsupervised algorithm for trajectory segmentation based on multiple motion features](https://doi.org/10.1155/2022/9540944). _Wireless Communications and Mobile Computing_, 2022, 9540944.
 
 - Yang, J., Mariescu-Istodor, R., & Fränti, P. (2019). [Three rapid methods for averaging GPS segments](https://doi.org/10.3390/app9224899). _Applied Sciences_, 9(22), 4899.
 
-- Zygouras, N., et al. Discovering corridors from GPS trajectories.
+- Zygouras, N., & Gunopulos, D. (2017). [Discovering corridors from GPS trajectories](https://doi.org/10.1145/3139958.3139994). _ACM SIGSPATIAL_, 1-4.
 
 ## License
 

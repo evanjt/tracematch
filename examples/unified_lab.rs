@@ -7,7 +7,7 @@
 //! GeoJSON per sport for visual inspection.
 //!
 //!     cargo run --release --example unified_lab -- \
-//!         ~/projects/personal/intervals/tracematch/sionrunning \
+//!         ~/projects/personal/intervals/tracematch/citycorpus \
 //!         --out ~/projects/personal/intervals/tracematch/unified-lab
 //!
 //! Optional flags:
@@ -129,7 +129,7 @@ fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, Vec<f64>, String) {
     (points, seconds, date)
 }
 
-/// Derive a sport type from the activity file name (Sion corpus naming,
+/// Derive a sport type from the activity file name (city corpus naming,
 /// English + French).
 fn sport_from_name(name: &str) -> &'static str {
     let lower = name.to_lowercase();
@@ -767,7 +767,7 @@ fn main() {
         log::LevelFilter::Info
     });
     let args: Vec<String> = std::env::args().collect();
-    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("sionrunning"));
+    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("citycorpus"));
     let mut out_dir: Option<PathBuf> = None;
     let mut only_sport: Option<String> = None;
     let mut only_method: Option<String> = None;

@@ -64,7 +64,7 @@ fn load_gpx_files(name: &str, limit: usize) -> Vec<(String, Vec<GpsPoint>)> {
 
 #[test]
 fn test_find_sections_in_route() {
-    let tracks = load_gpx_files("sionrunning", 20);
+    let tracks = load_gpx_files("citycorpus", 20);
     assert!(
         tracks.len() >= 5,
         "loaded {} usable tracks, this test needs 5",
@@ -243,7 +243,7 @@ fn test_recalculate_section_polyline() {
 
 #[test]
 fn test_find_sections_real_data() {
-    let tracks = load_gpx_files("sionrunning", 50);
+    let tracks = load_gpx_files("citycorpus", 50);
     assert!(
         tracks.len() >= 10,
         "loaded {} usable tracks, this test needs 10",

@@ -11,7 +11,7 @@
 //! within the ~2-4 MB budget.
 //!
 //!     cargo run --release --example geometry_codec -- \
-//!         ~/projects/personal/intervals/tracematch/sionrunning
+//!         ~/projects/personal/intervals/tracematch/citycorpus
 //!
 //! GPX parsing is lifted from `examples/unified_lab.rs` (examples cannot
 //! import each other's private items, so the loader is copied verbatim).
@@ -123,7 +123,7 @@ fn load_gpx_full(path: &Path) -> (Vec<GpsPoint>, Vec<f64>, String) {
     (points, seconds, date)
 }
 
-/// Derive a sport type from the activity file name (Sion corpus naming,
+/// Derive a sport type from the activity file name (city corpus naming,
 /// English + French).
 fn sport_from_name(name: &str) -> &'static str {
     let lower = name.to_lowercase();

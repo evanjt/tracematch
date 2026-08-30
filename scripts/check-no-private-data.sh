@@ -16,7 +16,7 @@ blocked="$(echo "$staged" | grep -iE '\.(gpx|fit|tcx|kml|plt|db|sqlite3?)(\.(gz|
 
 # Corpus directories, whatever they hold and whatever it is named.
 blocked="$blocked
-$(echo "$staged" | grep -E '^(fullcorpus|sionrunning|sionrunning_sections|aussietest|unified-lab|geolife|corpus)/' || true)"
+$(echo "$staged" | grep -E '^(fullcorpus|citycorpus|citycorpus_sections|aussietest|unified-lab|geolife|corpus)/' || true)"
 
 blocked="$(echo "$blocked" | grep -v '^$' || true)"
 
