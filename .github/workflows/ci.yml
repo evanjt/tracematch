@@ -21,6 +21,13 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # `parallel` is a default feature and --all-features never turns it off,
+      # so every `cfg(not(feature = "parallel"))` branch is invisible to the
+      # steps above. tracematch-wasm takes the library with
+      # default-features = false, which is how those branches reach a build at
+      # all, and one drifted out of sync for three months unnoticed.
+      - name: Check (no default features)
+        run: cargo check -p tracematch --no-default-features
       - name: Test
         run: cargo test
       # fold_foundation, identity_measure and fold_resume are invisible to the
