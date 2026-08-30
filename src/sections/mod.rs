@@ -99,10 +99,10 @@ pub use unified::{
     detect_sections_unified_tuned, lift_spans, lift_spans_tuned, self_pass_penalty,
 };
 
-// Re-export single-route section utilities (find/split known sections).
+// Re-export single-route section utilities (find known sections).
 pub use optimized::{
-    SectionMatch, SplitResult, find_all_section_spans_in_route, find_sections_in_route,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    SectionMatch, find_all_section_spans_in_route, find_sections_in_route,
+    recalculate_section_polyline,
 };
 
 /// Detection mode for section detection
@@ -559,20 +559,6 @@ fn default_version() -> u32 {
 }
 
 impl FrequentSection {
-    /// Split this section at a polyline index.
-    ///
-    /// Convenience wrapper around [`split_section_at_index`].
-    pub fn split_at_index(&self, split_index: usize) -> Option<SplitResult> {
-        optimized::split_section_at_index(self, split_index)
-    }
-
-    /// Split this section at a geographic point (finds nearest polyline index).
-    ///
-    /// Convenience wrapper around [`split_section_at_point`].
-    pub fn split_at_point(&self, point: &GpsPoint, max_distance: f64) -> Option<SplitResult> {
-        optimized::split_section_at_point(self, point, max_distance)
-    }
-
     /// Recalculate this section's polyline from stored activity traces.
     ///
     /// Convenience wrapper around [`recalculate_section_polyline`].

@@ -2,8 +2,6 @@
 //!
 //! Tests:
 //! - find_sections_in_route
-//! - split_section_at_point
-//! - split_section_at_index
 //! - recalculate_section_polyline
 
 mod corpus;
@@ -11,7 +9,7 @@ mod corpus;
 use std::path::Path;
 use tracematch::{
     FrequentSection, GpsPoint, ScaleName, SectionConfig, find_sections_in_route,
-    recalculate_section_polyline, split_section_at_index, split_section_at_point,
+    recalculate_section_polyline,
 };
 
 /// Load GPX file and extract GPS points
@@ -145,149 +143,6 @@ fn test_find_sections_in_route() {
         }
     }
     println!("Section found in {} other tracks", found_in_others);
-}
-
-#[test]
-fn test_split_section_at_index() {
-    // Create a simple linear section
-    let polyline: Vec<_> = (0..100)
-        .map(|i| GpsPoint::new(46.23 + i as f64 * 0.0001, 7.36 + i as f64 * 0.0001))
-        .collect();
-
-    let section = FrequentSection {
-        id: "split_test".to_string(),
-        name: Some("Split Test Section".to_string()),
-        sport_type: "Run".to_string(),
-        polyline: polyline.clone(),
-        representative_activity_id: "test".to_string(),
-        representative_range: None,
-        activity_ids: vec!["test".to_string()],
-        activity_portions: vec![],
-        route_ids: vec![],
-        visit_count: 5,
-        distance_meters: calculate_distance(&polyline),
-        activity_traces: std::collections::HashMap::new(),
-        confidence: 0.8,
-        observation_count: 5,
-        average_spread: 10.0,
-        point_density: vec![5; polyline.len()],
-        scale: Some(ScaleName::Short),
-        version: 1,
-        is_user_defined: false,
-        created_at: None,
-        enrichment: Default::default(),
-        rank: None,
-        consensus_state: None,
-        updated_at: None,
-        stability: 0.5,
-        elevation_gain_m: None,
-        avg_grade_percent: None,
-    };
-
-    // Split at index 50
-    let result = split_section_at_index(&section, 50);
-    assert!(result.is_some(), "Split should succeed");
-
-    let split = result.unwrap();
-    println!("Split at index 50:");
-    println!(
-        "  First: {} points, {:.0}m",
-        split.first.polyline.len(),
-        split.first.distance_meters
-    );
-    println!(
-        "  Second: {} points, {:.0}m",
-        split.second.polyline.len(),
-        split.second.distance_meters
-    );
-
-    assert_eq!(split.first.polyline.len(), 51); // 0..=50
-    assert_eq!(split.second.polyline.len(), 50); // 50..100
-    assert!(
-        split.first.is_user_defined,
-        "Split sections should be marked user-defined"
-    );
-    assert!(
-        split.second.is_user_defined,
-        "Split sections should be marked user-defined"
-    );
-
-    // Test invalid splits
-    assert!(
-        split_section_at_index(&section, 0).is_none(),
-        "Split at 0 should fail"
-    );
-    assert!(
-        split_section_at_index(&section, 99).is_none(),
-        "Split at last index should fail"
-    );
-    assert!(
-        split_section_at_index(&section, 100).is_none(),
-        "Split beyond length should fail"
-    );
-}
-
-#[test]
-fn test_split_section_at_point() {
-    // Create a simple linear section
-    let polyline: Vec<_> = (0..100)
-        .map(|i| GpsPoint::new(46.23 + i as f64 * 0.0001, 7.36 + i as f64 * 0.0001))
-        .collect();
-
-    let section = FrequentSection {
-        id: "split_point_test".to_string(),
-        name: Some("Split Point Test".to_string()),
-        sport_type: "Run".to_string(),
-        polyline: polyline.clone(),
-        representative_activity_id: "test".to_string(),
-        representative_range: None,
-        activity_ids: vec!["test".to_string()],
-        activity_portions: vec![],
-        route_ids: vec![],
-        visit_count: 5,
-        distance_meters: calculate_distance(&polyline),
-        activity_traces: std::collections::HashMap::new(),
-        confidence: 0.8,
-        observation_count: 5,
-        average_spread: 10.0,
-        point_density: vec![5; polyline.len()],
-        scale: Some(ScaleName::Short),
-        version: 1,
-        is_user_defined: false,
-        created_at: None,
-        enrichment: Default::default(),
-        rank: None,
-        consensus_state: None,
-        updated_at: None,
-        stability: 0.5,
-        elevation_gain_m: None,
-        avg_grade_percent: None,
-    };
-
-    // Split at the midpoint (approximately index 50)
-    let mid_point = &polyline[50];
-    let split_point = GpsPoint::new(mid_point.latitude, mid_point.longitude);
-
-    let result = split_section_at_point(&section, &split_point, 50.0);
-    assert!(result.is_some(), "Split at midpoint should succeed");
-
-    let split = result.unwrap();
-    println!("Split at geographic midpoint:");
-    println!(
-        "  First: {} points, {:.0}m",
-        split.first.polyline.len(),
-        split.first.distance_meters
-    );
-    println!(
-        "  Second: {} points, {:.0}m",
-        split.second.polyline.len(),
-        split.second.distance_meters
-    );
-
-    // Test split at point too far away
-    let far_point = GpsPoint::new(46.5, 7.5); // Far from section
-    let result = split_section_at_point(&section, &far_point, 50.0);
-    assert!(result.is_none(), "Split at distant point should fail");
 }
 
 #[test]
