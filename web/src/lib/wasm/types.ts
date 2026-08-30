@@ -105,22 +105,26 @@ export interface RankFeatures {
 }
 
 // Why the detector cut where it did, or why a candidate backed off.
-// Rust: #[serde(tag = "kind", rename_all = "snake_case")].
+//
+// Rust: #[serde(tag = "kind", rename_all = "snake_case")]. That renames
+// the VARIANTS, not their fields, so unlike every other type here the
+// payload keys stay snake_case. Verified against a real run; the golden
+// in tests/wasm_shape.rs holds it.
 export type BoundaryReason =
   | { kind: 'usage_change'; shared: number; mismatched: number }
   | {
       kind: 'fork';
       through: number;
       needed: number;
-      branchLeavers: number;
-      branchActivityIds: string[];
+      branch_leavers: number;
+      branch_activity_ids: string[];
     }
-  | { kind: 'backoff'; represented: number; probed: number; scoreMetres: number }
-  | { kind: 'trim'; keptMetres: number; droppedMetres: number }
-  | { kind: 'no_single_pass'; bestPenalty: number; portions: number }
-  | { kind: 'low_support'; floor: number; droppedCells: number }
+  | { kind: 'backoff'; represented: number; probed: number; score_metres: number }
+  | { kind: 'trim'; kept_metres: number; dropped_metres: number }
+  | { kind: 'no_single_pass'; best_penalty: number; portions: number }
+  | { kind: 'low_support'; floor: number; dropped_cells: number }
   | { kind: 'traffic_cliff'; thin: number; thick: number }
-  | { kind: 'pass_end'; requeuedCells: number };
+  | { kind: 'pass_end'; requeued_cells: number };
 
 // A geolocated reason for a boundary, in place of a log line.
 export interface BoundaryRecord {

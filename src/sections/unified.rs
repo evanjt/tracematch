@@ -2491,7 +2491,7 @@ fn portions_for_memo(
     #[cfg(feature = "profile")]
     let (mut pfm_pairs, mut pfm_miss, mut pfm_l2) = (0usize, 0usize, 0usize);
     #[cfg(feature = "profile")]
-    let t_pfm = std::time::Instant::now();
+    let t_pfm = web_time::Instant::now();
     for &t_idx in &t_indices {
         let (id, pts) = sport_tracks[t_idx as usize];
         let tn = track_num(leaves, id);
@@ -3528,7 +3528,7 @@ fn unify_chain_references(
     if n < 2 {
         return;
     }
-    let t_u = std::time::Instant::now();
+    let t_u = web_time::Instant::now();
     let line_digests: Vec<u64> = sections
         .iter()
         .map(|s| line_digest(&s.polyline, s.distance_meters))
@@ -4117,10 +4117,10 @@ fn detect_for_cluster_with_grid(
     let span_s = (tun.occasion_span_h * 3600.0) as i64;
     let same_traffic = 1.0 - divergence;
 
-    let t_partition = std::time::Instant::now();
+    let t_partition = web_time::Instant::now();
     let mut supernodes = partition_supernodes(&hot_cells, coverage, same_traffic);
     phase!("partition", t_partition);
-    let t_worthy = std::time::Instant::now();
+    let t_worthy = web_time::Instant::now();
 
     // Two rules applied to a fixed point:
     //  * a component that cannot be a section is not a barrier, absorb it
@@ -4211,7 +4211,7 @@ fn detect_for_cluster_with_grid(
     // terminates.
     let mut orphaned: std::collections::BTreeSet<Cell> = std::collections::BTreeSet::new();
     phase!("worthiness", t_worthy);
-    let t_portions = std::time::Instant::now();
+    let t_portions = web_time::Instant::now();
     let mut candidates: Vec<(usize, Supernode, Vec<Portion>, f64)> = Vec::new();
     for (n_idx, node) in supernodes.iter().enumerate() {
         // Rough length from core cell count (cells are ~square).
@@ -4262,7 +4262,7 @@ fn detect_for_cluster_with_grid(
     {
         use rayon::prelude::*;
         phase!("portions", t_portions);
-        let t_leaves = std::time::Instant::now();
+        let t_leaves = web_time::Instant::now();
         let leaves_ro: &LeafMemos = leaves;
         #[cfg(feature = "profile")]
         let miss_us = std::sync::atomic::AtomicU64::new(0);
@@ -4270,7 +4270,7 @@ fn detect_for_cluster_with_grid(
             .par_iter()
             .map(|(_, _, portions, _)| {
                 #[cfg(feature = "profile")]
-                let t_miss = std::time::Instant::now();
+                let t_miss = web_time::Instant::now();
                 let (ckey, rkey) = candidate_keys(
                     portions,
                     &track_nums,
@@ -4334,17 +4334,17 @@ fn detect_for_cluster_with_grid(
         phase!("leaves", t_leaves);
     }
 
-    let t_backoff = std::time::Instant::now();
+    let t_backoff = web_time::Instant::now();
     #[cfg(feature = "profile")]
     let mut lap_acc = [0u128; 9];
     #[cfg(feature = "profile")]
-    let mut lap = std::time::Instant::now();
+    let mut lap = web_time::Instant::now();
     macro_rules! lap {
         ($i:expr) => {
             #[cfg(feature = "profile")]
             {
                 lap_acc[$i] += lap.elapsed().as_micros();
-                lap = std::time::Instant::now();
+                lap = web_time::Instant::now();
             }
         };
     }
@@ -5445,7 +5445,7 @@ fn detect_for_cluster_with_grid(
             eprintln!("PROFILE {name} {}", lap_acc[i]);
         }
     }
-    let t_chains = std::time::Instant::now();
+    let t_chains = web_time::Instant::now();
     unify_chain_references(
         &mut sections,
         &emitted_portions,
@@ -5456,11 +5456,11 @@ fn detect_for_cluster_with_grid(
         leaves,
     );
     phase!("unify", t_chains);
-    let t_seam = std::time::Instant::now();
+    let t_seam = web_time::Instant::now();
     reconcile_seam_overruns(&mut sections, coverage.ref_lat, config.min_section_length);
     phase!("seam", t_seam);
     phase!("chains", t_chains);
-    let t_enrich = std::time::Instant::now();
+    let t_enrich = web_time::Instant::now();
 
     // Profile and shape off each section's own emitted slice, after every
     // reslice has settled; never averaged across tracks.
@@ -6056,7 +6056,7 @@ fn resolve_fold(
         .collect();
     let candidates: Vec<CandidateSection> =
         fresh.iter().map(CandidateSection::from_section).collect();
-    let t_plan = std::time::Instant::now();
+    let t_plan = web_time::Instant::now();
     let plan = plan_identity_memo(
         &priors,
         &candidates,
@@ -6092,7 +6092,7 @@ fn resolve_fold(
         .iter()
         .map(|d| d.carried_id().and_then(|id| index_of.get(id).copied()))
         .collect();
-    let t_left = std::time::Instant::now();
+    let t_left = web_time::Instant::now();
     let rescued = pair_leftovers(&plan, existing, &fresh, &index_of, &mut carrier);
     phase!("r_leftovers", t_left);
 
@@ -6893,10 +6893,10 @@ fn fold_by_sport(
     // then resolve it against what the caller holds. The pairing inside
     // `resolve_fold` is bbox-gated, so the delta cost tracks the CHANGED
     // ground rather than the whole (growing) catalogue.
-    let t_assemble = std::time::Instant::now();
+    let t_assemble = web_time::Instant::now();
     let assembled = assemble_catalogue(cache);
     phase!("assemble", t_assemble);
-    let t_resolve = std::time::Instant::now();
+    let t_resolve = web_time::Instant::now();
     let out = resolve_fold(
         assembled,
         boundaries,
@@ -7040,7 +7040,7 @@ fn recompute_cluster(
         .collect();
     let sport_seconds: Vec<&[f64]> = members.iter().map(|id| lookup[id.as_str()].1).collect();
 
-    let t_grid = std::time::Instant::now();
+    let t_grid = web_time::Instant::now();
     let coverage = build_coverage_grid_from(
         cluster.grid.take(),
         &sport_tracks,
@@ -7053,7 +7053,7 @@ fn recompute_cluster(
     let ref_lat = coverage.ref_lat;
     let mut idx = 0usize;
     let mut records = Vec::new();
-    let t_detect = std::time::Instant::now();
+    let t_detect = web_time::Instant::now();
     let sections = detect_for_cluster_with_grid(
         sport,
         &sport_tracks,

@@ -26,6 +26,8 @@ tests/fixtures/streams/
 
 # WASM build output
 tracematch-wasm/pkg/
+# bench/city_wasm.mjs tells you to build a nodejs target here.
+tracematch-wasm/pkg-node/
 
 # Web build output and deps
 web/build/
