@@ -1,4 +1,4 @@
-//! B1's foundation: what is SALVAGEABLE from tracematch for an order-free,
+//! The incremental fold's foundation: what is SALVAGEABLE from tracematch for an order-free,
 //! Unified-aware incremental, and what CONVERGENCE TARGET it must hit.
 //!
 //! This file does two things, both pure tracematch, both on the seeded
@@ -7,15 +7,15 @@
 //! PART A characterises the reusable MATCHING half. `find_sections_in_route`
 //! projects an existing section onto a new activity. We seed it with real
 //! UNIFIED geometry and measure exactly what it returns and when it matches, so
-//! B1 can lean on it for the "fold a new activity into an existing section"
+//! the fold can lean on it for the "fold a new activity into an existing section"
 //! path without pulling in banned consensus averaging.
 //!
 //! PART B pins the CONVERGENCE TARGET and the cost that makes an incremental
 //! mandatory. A naive re-batch drip (re-run `detect_sections_unified` over the
 //! whole accumulated pool on every add) is by construction the exact catalogue
-//! B1 must reproduce; its per-add cost grows with N, which is the O(N^2) bar
-//! B1's real incremental (target <= 150 ms/activity, flat) has to beat. A
-//! ready-to-arm `#[ignore]` gate is left as B1's literal drop-in.
+//! the fold must reproduce; its per-add cost grows with N, which is the O(N^2)
+//! bar a real incremental (target <= 150 ms/activity, flat) has to beat. A
+//! ready-to-arm `#[ignore]` gate is left as that incremental's drop-in.
 //!
 //! Green-by-default: the measurement tests never fail; the gate is `#[ignore]`d
 //! (RED under `--include-ignored`) because no incremental exists yet.
@@ -223,8 +223,8 @@ fn print_probe(p: &MatchProbe) {
 /// (the actual reuse scenario: the shipped incremental feeds full activities to
 /// this matcher, not synthetic section copies). Reports return shape and match
 /// behaviour across a real traverser, its reverse, a truncated partial, a 60 m
-/// parallel street, and a far one-off. Asserts only the robust contracts B1
-/// leans on; direction/partial/near-miss are reportage because their outcome
+/// parallel street, and a far one-off. Asserts only the robust contracts the
+/// fold leans on; direction/partial/near-miss are reportage because their outcome
 /// depends on how elongated the seed section is at the coarse 2x tolerance.
 #[test]
 fn matching_half_characterisation() {
@@ -336,14 +336,14 @@ fn matching_half_characterisation() {
          find_all_section_spans_in_route -> find_all_section_spans_directed ->\n\
          haversine_distance has NO consensus call. merge_traces_into_consensus_with_cache\n\
          is a SEPARATE step the shipped incremental runs in Phase 2\n\
-         (incremental.rs:204-253). B1 reuses the index/portion CONTRACT and never calls\n\
+         (incremental.rs:204-253). The fold reuses the index/portion CONTRACT and never calls\n\
          the consensus merge, so real-trace geometry is preserved.\n\
          BUT the predicate itself is TOLERANCE-BRITTLE on Unified's compact sections\n\
          (endpoint_span 63-198 m): at the 400 m default it degenerates (19-70 slivers,\n\
          matches a 60 m parallel street), and tightening proximity makes it MISS the real\n\
          traverser (see proximity=40 m -> NO MATCH). VERDICT: salvage the return contract\n\
          + portion extraction; do NOT reuse find_sections_in_route's endpoint-anchored\n\
-         predicate as-is. B1 needs a tolerance-robust match (coverage/AMD) for the\n\
+         predicate as-is. The fold needs a tolerance-robust match (coverage/AMD) for the\n\
          maintain-existing query. MUST NOT: merge_traces_into_consensus_with_cache\n\
          (Phase 2 consensus averaging) in the maintain path.\n"
     );
@@ -365,14 +365,14 @@ fn matching_half_characterisation() {
 }
 
 // ============================================================================
-// PART B — pure-layer parity + cost contract for B1
+// PART B — pure-layer parity + cost contract for the incremental fold
 // ============================================================================
 
 /// Naive re-batch drip: on each add, re-run `detect_sections_unified` over the
 /// full accumulated pool. The final step IS the batch call, so it equals the
 /// batch by construction; more usefully, the batch is order-free (a shuffled
 /// ingest yields a ground-identical catalogue), which is the convergence target
-/// B1's incremental must reproduce step for step.
+/// the incremental must reproduce step for step.
 #[test]
 fn naive_rebatch_convergence_and_order_free() {
     let corpus = reduced_corpus();
@@ -406,7 +406,7 @@ fn naive_rebatch_convergence_and_order_free() {
     let final_vs_batch = catalogue_overlap(&final_drip, &batch);
     let order_free = catalogue_overlap(&batch_reordered, &batch);
 
-    println!("\n================ PART B1: naive re-batch convergence ================");
+    println!("\n================ naive re-batch convergence ================");
     println!("corpus activities .......... {}", tracks.len());
     println!("batch sections ............. {}", batch.len());
     println!("re-batch step counts ....... {:?}", step_counts);
@@ -414,9 +414,9 @@ fn naive_rebatch_convergence_and_order_free() {
     println!("order-free (reversed set) .. {order_free:.3}  (ground overlap of two ingest orders)");
     println!("--------------------------------------------------------------------");
     println!(
-        "TARGET: B1's incremental must land, step for step, on this order-free\n\
+        "TARGET: the incremental must land, step for step, on this order-free\n\
          catalogue. The re-batch drip is the ground truth; it is just too slow\n\
-         (see the cost curve). Convergence bar for B1 = ground overlap >= 0.95.\n"
+         (see the cost curve). Convergence bar = ground overlap >= 0.95.\n"
     );
 
     assert_eq!(
@@ -435,9 +435,9 @@ fn naive_rebatch_convergence_and_order_free() {
 }
 
 /// Cost curve: the per-add price of the naive re-batch as the pool grows. Each
-/// number is one `detect_sections_unified` over N tracks, i.e. the cost B1 would
+/// number is one `detect_sections_unified` over N tracks, i.e. the cost the fold would
 /// pay for a single add if it re-batched at pool size N. The drip TOTAL to reach
-/// N is the running sum of these, which is quadratic. B1's incremental must make
+/// N is the running sum of these, which is quadratic. The incremental must make
 /// the per-add cost roughly flat and <= 150 ms. Debug timings; release is much
 /// faster but the growth shape is the point, not the absolute ms.
 #[test]
@@ -451,7 +451,7 @@ fn naive_rebatch_cost_curve() {
     let tracks = corpus.tracks_through_e();
     let sports = corpus.sport_map_through_e();
 
-    println!("\n================ PART B2: naive re-batch cost curve (debug) ================");
+    println!("\n================ naive re-batch cost curve (debug) ================");
     println!("(per-add = one detect_sections_unified over N tracks; drip total = running sum)");
     let mut prev: Option<(usize, u128)> = None;
     for &n in &sizes {
@@ -477,7 +477,7 @@ fn naive_rebatch_cost_curve() {
     println!("---------------------------------------------------------------------------");
     println!(
         "READ: per-add cost climbs with N (each add reprocesses the whole pool), so\n\
-         the re-batch drip is O(N^2) overall. That is why B1 needs a real incremental:\n\
+         the re-batch drip is O(N^2) overall. That is why the fold needs a real incremental:\n\
          constant work per add, target <= 150 ms/activity regardless of pool size.\n"
     );
 }
@@ -516,7 +516,7 @@ fn gate_unified_incremental_converges_to_batch() {
     let overlap = catalogue_overlap(&catalogue, &batch);
     assert!(
         overlap >= 0.95,
-        "B1 incremental must converge to the Unified batch: ground overlap {overlap:.3} < 0.95 \
+        "The incremental must converge to the Unified batch: ground overlap {overlap:.3} < 0.95 \
          (batch sections = {}, incremental sections = {}).",
         batch.len(),
         catalogue.len(),

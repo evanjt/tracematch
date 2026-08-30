@@ -1356,7 +1356,7 @@ fn main() {
         }
 
         // --- Identity + hysteresis: the visible view over the same windows ---
-        // Feed each window's detected catalogue through the B2 hysteresis layer
+        // Feed each window's detected catalogue through the identity and hysteresis layer
         // in horizon order, snapshot the visible catalogue after each step, and
         // score the SAME survival metric on it. Raw reproduces the churn
         // baseline (survive->full above); visible is what a user's catalogue

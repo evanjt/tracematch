@@ -23,13 +23,13 @@ present. The algorithm and its rules live in `src/sections/unified.rs`.
 | Chain members each picked their own reference, so one physical line rendered as splices from different days | `chain_members_share_one_reference_and_meet_exactly`. Unification changes the source trace only, never the span: member extents stay medoid-anchored (re-deriving spans from the cover activity's portions was probed 2026-07-21 and sheared jackknife core persistence 92% → 70%) |
 | A rendered representative was a real trace yet not a single pass: a mid-line spin too tight for the cell-event cut to catch, or a junction where every visit mills | single-pass render guard (`straight_line_has_no_self_pass`, `out_and_back_revisits_its_outbound_leg`, `closed_loop_join_is_exempt`, unit). The render takes the cleanest contributing pass; a candidate with no pass under the floor backs off. Verified 2026-07-24: two spins re-render straight and the 178-visit junction blob backs off, every other section holds. Section-level `self_overlap` was blind to a tight spin (read 0.00 on a 40%-revisiting line), so the render metric is now the reported one |
 | A forward-and-reverse over the same ground rendered as a section: a closed out-and-back whose short spurs slip the self-pass arc gap | `out_and_back_scores_high_but_a_through_line_does_not`, `switchback_climb_is_not_an_out_and_back` (unit). Only CLOSED lines are scored (endpoints within a fifth of the length), so a switchback climbs away and keeps its antiparallel hairpins (`switchback_climb_survives_as_one_section`). Verified 2026-07-24: the flagged out-and-back and one 4-visit twin re-render one-way, every loop and climb byte-identical, no out-and-back survives on either corpus |
-| A section rendered a minority end-branch that most of its own traffic skips: a wrong-way turn at a junction (short, well-supported, but off the through-flow) drawn as if it were the section's extent | `a_minority_branch_behind_a_cliff_clips_but_a_taper_does_not` (unit). The rendered line is clipped, display only, where metre-resolution support falls under half the line's median across a short end run behind a cliff (the body sample abutting it carries at least double), so a genuine wrong-turn branch is dropped from the drawing while a gradual taper or a legitimately lower-traffic half is left whole. Counts, extent, and occupied footprint keep the full portion. The clean signal is directed flow continuation through a junction, which the coarse coverage grid cannot express (its one-ring tolerance leaks through-traffic onto the branch); the metre-resolution end clip is the interim, and the exact query lands with B1's per-portion alignment. Verified 2026-07-24: sec_all_113's SE tail is clipped so it connects to its neighbour, six more wrong-turn branches drop elsewhere, gradients and tapers are untouched, no new display overlaps on either corpus |
+| A section rendered a minority end-branch that most of its own traffic skips: a wrong-way turn at a junction (short, well-supported, but off the through-flow) drawn as if it were the section's extent | `a_minority_branch_behind_a_cliff_clips_but_a_taper_does_not` (unit). The rendered line is clipped, display only, where metre-resolution support falls under half the line's median across a short end run behind a cliff (the body sample abutting it carries at least double), so a genuine wrong-turn branch is dropped from the drawing while a gradual taper or a legitimately lower-traffic half is left whole. Counts, extent, and occupied footprint keep the full portion. The clean signal is directed flow continuation through a junction, which the coarse coverage grid cannot express (its one-ring tolerance leaks through-traffic onto the branch); the metre-resolution end clip is the interim, and the exact query lands with the incremental fold's per-portion alignment. Verified 2026-07-24: sec_all_113's SE tail is clipped so it connects to its neighbour, six more wrong-turn branches drop elsewhere, gradients and tapers are untouched, no new display overlaps on either corpus |
 | Support held only at the supernode total, so a near-private spur welded onto a busy corridor through the traffic gradient at their junction (adjacent thin cells always pass the one-missing-track rule), inherited its visit count, and could be rendered | `one_off_tail_is_cut_where_its_own_support_ends` (contract), `support_counts_contributor_passes_not_strangers_or_clips` (unit). Support binds along the length: every cell must be traversed by the section's own floor of its OWN contributors' qualifying passes (all runs count, so a fragmented loop traversal is not read as absent; stranger traffic and corner clips lend nothing). The floor is fixed pre-trim (re-deriving it as portions shorten ratchets the length tier and spirals short sections to death) and ordering uses the pre-trim score (the trim corrects extent, never priority — score-reordering was probed 2026-07-24 and reshuffled a whole city's catalogue). Verified 2026-07-24: the flagged welded section re-renders as its uniformly-traversed corridor under a new representative, four 3-visit stitched lines whose middles were one outing's private ground dissolve, one inflated count de-inflates (11 to 3 on identical geometry), jackknife improves on the full corpus and holds on Sion, disjointness 0 violations both corpora |
 
 ## Identity and hysteresis contracts (2026-07-29)
 
 The identity layer (`src/sections/identity.rs`) and its veloqrs registry
-mirror, pinned after the D2 corpus gate. Pure-layer contracts live in
+mirror, pinned after the corpus gate. Pure-layer contracts live in
 `tests/identity_edge_cases.rs`; seam contracts in veloqrs
 `tests/identity_seam.rs` (synthetic feature); detector explanations in
 `tests/boundary_records.rs` and `tests/tunables_neighbourhood.rs`.
@@ -42,7 +42,7 @@ mirror, pinned after the D2 corpus gate. Pure-layer contracts live in
 | A dissolved corridor that re-forms comes back under its old id, with its old seniority, and needs a full fresh k to dissolve again | `grown_ground_restores_under_old_id`, `restored_id_keeps_seniority`, `restore_enters_clean_then_needs_full_k`, `carried_candidate_never_consults_tombstones` |
 | The k debounce is well defined at its edges (0, 1, 255) | `k_zero_and_one_disable_debounce` |
 | The agreement plateau boundary is inclusive: mutual exactly 0.85 adopts, 0.84 freezes | `recut_agreement_boundary_is_inclusive` |
-| Fates are membership-honest: Carried* was visible, Restored was tombstoned, Minted was neither; resolutions parallel, ids distinct (the D3 fate-verbatim reconcile spec) | `fate_membership_property` |
+| Fates are membership-honest: Carried* was visible, Restored was tombstoned, Minted was neither; resolutions parallel, ids distinct (the fate-verbatim reconcile spec) | `fate_membership_property` |
 | `forget()` transfers ownership forever: idempotent, never re-issues the id | `forget_releases_id_forever` |
 | The suppression metric cannot be silently retuned | `shares_ground_canary` (0.59/0.61 coverage, 45/55 m offsets) |
 | Flickering-but-real ground stays visible; a full-agreement carry clears the pending | `flicker_keeps_ground_visible`, `flip_flop_damps_to_a_stable_view` |
@@ -72,16 +72,16 @@ behaviour as conscious. The fix is pooled detection (locked ruling 2);
 per-sport feeding is the defect, not the registry.
 
 None open. Each was written red on purpose so the fix ungated it instead
-of rediscovering the defect; corpus evidence from the D2 gate replay is
+of rediscovering the defect; corpus evidence from the corpus gate replay is
 quoted in the histories below.
 
-Ungated by the D5 grave sweep: veloqrs
+Ungated by the grave sweep: veloqrs
 `durable_claim_mid_tombstone_clears_the_grave` — the apply sweeps
 tombstoned ground against the durable-intent grounds, so a user claim on
 dead ground clears the grave/tombstone pair that relinquish (by real id)
 could never reach.
 
-Ungated by the D5 streak ledger (both debounce directions accumulate
+Ungated by the streak ledger (both debounce directions accumulate
 through each other's steps; only a decisive continuation clears them; a
 restore needs mutual coverage; both-empty grounds share vacuously):
 `capture_rotation_must_not_pin_a_dead_section`,
@@ -91,7 +91,7 @@ New contracts pinning the mechanism:
 `foreign_extension_does_not_restore_a_tombstone` (a mostly-foreign spur
 mints, never resurrects a dead id) and
 `fired_changes_report_ids_and_reasons` (per-id retirements with fire-time
-reasons plus fired re-cut ids on `StepOutcome`, the D5 emitter's feed).
+reasons plus fired re-cut ids on `StepOutcome`, the change emitter's feed).
 
 Ungated earlier: veloqrs `grave_restore_survives_restart` is green — the
 identity blob is rmp-encoded (blob version 2), whose length-prefixed arrays
@@ -101,7 +101,7 @@ Blob version 3 accompanies the streak ledger (the debounce record reshaped),
 reseeding v2 blobs by tag.
 
 Overtaken: the earlier attribution default reset a section's streak on
-every decision-kind flip. The D5 ledger keeps both directions' streaks
+every decision-kind flip. The streak ledger keeps both directions' streaks
 through each other's steps, so there is no flip to reset on; attribution
 accumulates the arrivals of every pending step and clears with the
 ledger, on the decisive continuation or the fired change.
@@ -110,9 +110,9 @@ ledger, on the decisive continuation or the fired change.
 
 | Assumption | Where its contract lands |
 |---|---|
-| One engine, no cosmetic method selector | C4 deletion, compiler-verified |
-| Split lineage: a mint carries the prior it was carved from | D3; `fate_membership_property` is the reconcile spec it extends |
-| Per-id retire reasons at fire time | Landed with the D5 streak ledger: `fired_changes_report_ids_and_reasons` |
+| One engine, no cosmetic method selector | The multiscale deletion, compiler-verified |
+| Split lineage: a mint carries the prior it was carved from | `fate_membership_property`, the reconcile spec it extends |
+| Per-id retire reasons at fire time | Landed with the streak ledger: `fired_changes_report_ids_and_reasons` |
 
 ## Defects these contracts caught at birth (2026-07-21)
 

@@ -1,14 +1,14 @@
-//! B2 measurement: how much churn the identity + hysteresis layer removes.
+//! Identity measurement: how much churn the identity + hysteresis layer removes.
 //!
-//! B1's batch is legitimately non-monotone: dripped one activity at a time over
+//! The batch is legitimately non-monotone: dripped one activity at a time over
 //! a growing pool, the Unified catalogue dissolves and reforms sections (section
 //! count walks a path like `.. 3, 3, 2, 2, 3 ..`, never a superset of an earlier
-//! step). B2 sits on top: [`plan_identity`] carries a stable id onto the ground
-//! that survives a recompute, and [`HysteresisState`] debounces the dissolves
-//! and re-cuts so the visible view moves slowly.
+//! step). The identity layer sits on top: [`plan_identity`] carries a stable
+//! id onto the ground that survives a recompute, and [`HysteresisState`]
+//! debounces the dissolves and re-cuts so the visible view moves slowly.
 //!
 //! This binary drives the real corpus drip through the cached Unified
-//! incremental (the same path b1_foundation's oracle uses), threads each step's
+//! incremental (the same path fold_foundation's oracle uses), threads each step's
 //! catalogue through the identity + hysteresis fold, and reports two things per
 //! step and in total:
 //!
@@ -16,8 +16,8 @@
 //!   this step, the fraction under the SAME id. The raw batch renumbers ids
 //!   positionally (they are a function of geographic sort order), so its raw
 //!   retention drops whenever a cluster count or order shifts; the visible view
-//!   holds ids, so its retention stays at 1.0. That gap is the R2 reshuffle B2
-//!   removes.
+//!   holds ids, so its retention stays at 1.0. That gap is the positional
+//!   reshuffle the identity layer removes.
 //! - CHURN EVENTS: a section appearing or disappearing (by ground) between
 //!   consecutive steps. The batch churns as it converges; the visible view damps
 //!   most of it. Fewer visible churn events than raw is the headline number.
@@ -96,7 +96,7 @@ fn churn_events(before: &Snapshot, after: &Snapshot) -> usize {
 // ============================================================================
 
 /// A 24-activity slice (bucket A 20 + C 1 + D 3): the same reduced corpus the
-/// B1 foundation uses, small enough to run fast and already exercising the
+/// fold foundation uses, small enough to run fast and already exercising the
 /// non-monotone dissolve/reform walk.
 fn reduced_corpus() -> LifecycleCorpus {
     LifecycleCorpus::generate(&LifecycleConfig {
@@ -159,7 +159,7 @@ fn drip_measure(corpus: &LifecycleCorpus) -> MeasureRun {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
 
-        // Raw batch catalogue for this pool (the B1 truth the fold damps).
+        // Raw batch catalogue for this pool (the batch truth the fold damps).
         let result = detect_sections_unified_incremental_cached(
             &mut cache,
             &cached_cat,
@@ -230,7 +230,7 @@ fn b2_identity_and_churn_measurement() {
     let run = drip_measure(&corpus);
 
     println!(
-        "\n================ B2: identity retention + churn damping (reduced corpus) ================"
+        "\n================ identity retention + churn damping (reduced corpus) ================"
     );
     println!("   N  raw  vis   rawRet  visRet   rawChurn  visChurn   mint rest diss recut");
     let mut raw_churn_total = 0usize;

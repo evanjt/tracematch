@@ -5,7 +5,7 @@
 //! (`shapes::late_fork`): a trunk detected from straight-through outings
 //! that the evidence later wants to re-cut when branch outings arrive.
 //! The default policy follows the evidence (see
-//! `b1_lifecycle_scenarios.rs`); these tests hold the POLICY behaviours:
+//! `fold_lifecycle_scenarios.rs`); these tests hold the POLICY behaviours:
 //! a pinned trunk keeps its geometry and its corridor, withheld re-cuts
 //! stay observable in `held`, evidence keeps growing on frozen geometry,
 //! and dissolves stay live under `freeze_all_geometry`.

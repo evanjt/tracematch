@@ -79,7 +79,7 @@ pub use identity::{
     StepOutcome, dissolve_pressure, earth_cell, mutual_overlap, plan_identity, plan_identity_tuned,
     section_heart, shares_ground,
 };
-// Named-corridor resolution scoring (D3 ride-along): the pure layer decides
+// Named-corridor resolution scoring: the pure layer decides
 // which visible section carries a name; the engine owns intent storage and
 // SQL.
 pub use naming::{
