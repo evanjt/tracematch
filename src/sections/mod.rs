@@ -327,7 +327,7 @@ pub struct SectionConfig {
     pub divergence_threshold: f64,
     /// Minimum unique tracks per cell for corridor detection. Cells with
     /// fewer unique visitors are not "hot" and won't participate in
-    /// skeletonization. Higher = fewer, more confident sections. Default 3.
+    /// support floors. Higher = fewer, more confident sections. Default 3.
     #[serde(default = "default_min_corridor_tracks")]
     pub min_corridor_tracks: u32,
     /// Detect over one pool rather than one per sport, so a road two

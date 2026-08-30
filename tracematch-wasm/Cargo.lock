@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "tracematch"
-version = "0.2.2"
+version = "2.0.0"
 dependencies = [
  "geo",
  "log",

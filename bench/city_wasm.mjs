@@ -144,12 +144,13 @@ const sectionConfig = JSON.stringify({
 });
 
 const tSec = performance.now();
-const sections = wasm.detectSections(
+const detection = wasm.detectSectionsUnified(
   JSON.stringify(sectionTracks),
+  '[]',
   JSON.stringify(sportTypes),
-  JSON.stringify(groups),
   sectionConfig,
 );
+const sections = detection.sections;
 const dSec = performance.now() - tSec;
 
 const sortedSections = [...sections].sort((a, b) => b.activityIds.length - a.activityIds.length);

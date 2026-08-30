@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { traceStore, type StoredTrace } from '$lib/stores/traces.svelte';
+  import { traceStore, ANALYSIS_SCHEMA_VERSION, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
   import { runAnalysisAsync } from '$lib/wasm/engine';
   import MethodIllustration from '$lib/components/MethodIllustration.svelte';
@@ -37,18 +37,16 @@
   const ANALYSIS_STEPS = [
     'Creating signatures',
     'Comparing route pairs',
-    'Building spatial indices',
-    'Finding section overlaps',
-    'Post-processing sections',
+    'Detecting sections',
     'Saving results'
   ] as const;
   const TOTAL_STEPS = ANALYSIS_STEPS.length;
   // Maps every phase string (including transitions and the init phase) to
   // the step index it belongs to. Step index = 0 for everything before
   // grouping; transitions hop to the index of the upcoming real step.
-  // The "Finding dense regions" / "Assembling sections" labels come from
-  // the density-grid section detection in Rust (re-labelled in
-  // sectionWorker.ts via PHASE_LABELS).
+  // Grouping is the only phase that counts: the unified detector's batch
+  // entry point reports nothing, so 'Detecting sections' fills its slice
+  // and then sits there until the call returns.
   const PHASE_TO_STEP: Record<string, number> = {
     'Preparing': 0,
     'Initializing WASM engine': 0,
@@ -57,12 +55,9 @@
     'Preparing route comparison': 1,
     'Comparing route pairs': 1,
     'Serializing tracks for section detection': 2,
-    'Preparing section detection': 2,
-    'Finding dense regions': 2,
-    'Assembling sections': 3,
-    'Post-processing sections': 4,
-    'Finalizing results': 5,
-    'Saving results': 5
+    'Detecting sections': 2,
+    'Finalizing results': 3,
+    'Saving results': 3
   };
   let sectionError = $state<string | null>(null);
   let dragOver = $state(false);
@@ -73,9 +68,9 @@
 
   // Section detection parameters
   const PRESETS = {
-    relaxed: { proximityThreshold: 200, minSectionLength: 100, minActivities: 2, minRoutes: 2 },
-    balanced: { proximityThreshold: 150, minSectionLength: 200, minActivities: 3, minRoutes: 3 },
-    strict: { proximityThreshold: 75, minSectionLength: 500, minActivities: 5, minRoutes: 4 },
+    relaxed: { proximityThreshold: 200, minSectionLength: 100, minActivities: 2 },
+    balanced: { proximityThreshold: 150, minSectionLength: 200, minActivities: 3 },
+    strict: { proximityThreshold: 75, minSectionLength: 500, minActivities: 5 },
   } as const;
   type PresetKey = keyof typeof PRESETS;
 
@@ -84,8 +79,6 @@
     proximityThreshold: number;
     minSectionLength: number;
     minActivities: number;
-    minRoutes: number;
-    sectionMode: 'density' | 'flow' | 'corridor';
   };
 
   function loadSettings(): Partial<SavedSettings> {
@@ -100,9 +93,7 @@
   let proximityThreshold = $state(saved.proximityThreshold ?? 150);
   let minSectionLength = $state(saved.minSectionLength ?? 200);
   let minActivities = $state(saved.minActivities ?? 3);
-  let minRoutes = $state(saved.minRoutes ?? 3);
   let activePreset = $state<PresetKey | null>(null);
-  let sectionMode = $state<'density' | 'flow' | 'corridor'>(saved.sectionMode ?? 'corridor');
   let settingsCollapsed = $state(true);
 
   // Determine initial preset from loaded values
@@ -110,8 +101,7 @@
     ([, p]) =>
       p.proximityThreshold === proximityThreshold &&
       p.minSectionLength === minSectionLength &&
-      p.minActivities === minActivities &&
-      p.minRoutes === minRoutes
+      p.minActivities === minActivities
   )?.[0] ?? null;
 
   function applyPreset(key: PresetKey) {
@@ -119,7 +109,6 @@
     proximityThreshold = p.proximityThreshold;
     minSectionLength = p.minSectionLength;
     minActivities = p.minActivities;
-    minRoutes = p.minRoutes;
     activePreset = key;
   }
 
@@ -128,8 +117,7 @@
       ([, p]) =>
         p.proximityThreshold === proximityThreshold &&
         p.minSectionLength === minSectionLength &&
-        p.minActivities === minActivities &&
-        p.minRoutes === minRoutes
+        p.minActivities === minActivities
     )?.[0] ?? null;
   }
 
@@ -137,7 +125,7 @@
   $effect(() => {
     if (typeof localStorage === 'undefined') return;
     const settings: SavedSettings = {
-      proximityThreshold, minSectionLength, minActivities, minRoutes, sectionMode,
+      proximityThreshold, minSectionLength, minActivities,
     };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   });
@@ -740,10 +728,9 @@
           { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
         ],
         preserveHierarchy: true,
-        minRoutes,
-        minCellVisits: 50,
+        // Live under the unified detector.
         divergenceThreshold: 0.15,
-        minCorridorTracks: minActivities,
+        poolSports: true,
       });
 
       const traces = traceStore.traces.map((t) => ({
@@ -754,7 +741,7 @@
 
       const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
         analysisProgress = { phase, current, total };
-      }, sectionMode);
+      });
 
       if (result.sections.length === 0 && traceStore.traces.length >= 3) {
         sectionError = 'No sections detected with current settings.';
@@ -765,7 +752,9 @@
         signatures: result.signatures,
         groups: result.groups,
         sections: result.sections,
-        analyzedAt: Date.now()
+        boundaries: result.boundaries,
+        analyzedAt: Date.now(),
+        schemaVersion: ANALYSIS_SCHEMA_VERSION
       });
       // Show 100% briefly so the user sees a completed bar before it
       // disappears, instead of jumping from ~83% back to nothing.
@@ -948,21 +937,12 @@
           </button>
           {#if !settingsCollapsed}
             <div class="settings-panel">
-              <div class="preset-chips">
-                <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
-                <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
-                <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
-              </div>
               <p class="mode-description">
-                {#if sectionMode === 'corridor'}
-                  Finds corridors where many activities converge. Works on raw GPS traces, no route grouping needed. Best coverage.
-                {:else if sectionMode === 'density'}
-                  Detects sections where distinct route groups overlap. Requires multiple different routes to share a stretch.
-                {:else}
-                  Identifies road junctions from GPS flow and traces sections between divergence points.
-                {/if}
+                One detector. Coverage becomes same-traffic supernodes, then
+                junction-anchored chains, and every boundary carries the reason
+                it was cut there.
               </p>
-              <MethodIllustration mode={sectionMode} proximity={proximityThreshold} minTracks={minActivities} {minRoutes} {minSectionLength} />
+              <MethodIllustration proximity={proximityThreshold} minTracks={minActivities} {minSectionLength} />
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
                   <button
@@ -989,12 +969,6 @@
                 <span class="slider-value">{minActivities}</span>
                 <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                 <span class="slider-hint">Activities needed to form a section</span>
-              </label>
-              <label class="slider-row">
-                <span class="slider-label">Min distinct routes</span>
-                <span class="slider-value">{minRoutes}</span>
-                <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
-                <span class="slider-hint">How many different routes must overlap</span>
               </label>
             </div>
           {/if}
@@ -1066,21 +1040,12 @@
             </button>
             {#if !settingsCollapsed}
               <div class="settings-panel">
-                <div class="preset-chips">
-                  <button class="preset-chip" class:active={sectionMode === 'corridor'} onclick={() => sectionMode = 'corridor'}>corridor</button>
-                  <button class="preset-chip" class:active={sectionMode === 'density'} onclick={() => sectionMode = 'density'}>density grid</button>
-                  <button class="preset-chip" class:active={sectionMode === 'flow'} onclick={() => sectionMode = 'flow'}>flow graph</button>
-                </div>
                 <p class="mode-description">
-                  {#if sectionMode === 'corridor'}
-                    Finds corridors where many activities converge. Works on raw GPS traces, no route grouping needed. Best coverage.
-                  {:else if sectionMode === 'density'}
-                    Detects sections where distinct route groups overlap. Requires multiple different routes to share a stretch.
-                  {:else}
-                    Identifies road junctions from GPS flow and traces sections between divergence points.
-                  {/if}
+                  One detector. Coverage becomes same-traffic supernodes, then
+                  junction-anchored chains, and every boundary carries the reason
+                  it was cut there.
                 </p>
-                <MethodIllustration mode={sectionMode} proximity={proximityThreshold} minTracks={minActivities} {minRoutes} {minSectionLength} />
+                <MethodIllustration proximity={proximityThreshold} minTracks={minActivities} {minSectionLength} />
                 <div class="preset-chips">
                   {#each Object.keys(PRESETS) as key}
                     <button
@@ -1107,12 +1072,6 @@
                   <span class="slider-value">{minActivities}</span>
                   <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                   <span class="slider-hint">Activities needed to form a section</span>
-                </label>
-                <label class="slider-row">
-                  <span class="slider-label">Min distinct routes</span>
-                  <span class="slider-value">{minRoutes}</span>
-                  <input type="range" min="2" max="6" step="1" bind:value={minRoutes} oninput={onSliderChange} />
-                  <span class="slider-hint">How many different routes must overlap</span>
                 </label>
               </div>
             {/if}

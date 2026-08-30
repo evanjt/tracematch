@@ -3,7 +3,10 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [web/**, docs/**, tracematch-wasm/**]
+    # src/** matters: the site is a WASM build of the library, so a change
+    # there can break the deploy. Its absence is why this stayed red.
+    # docs/** is gitignored and can never match.
+    paths: [web/**, src/**, Cargo.toml, Cargo.lock, tracematch-wasm/**]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +30,12 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: tracematch-wasm
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 

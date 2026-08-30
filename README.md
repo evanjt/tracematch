@@ -31,8 +31,6 @@ Far-apart regions each get their own reference latitude, so one lat/lng scale ne
 
 Total is **O(N·P)**, linear in the data, dominated by the grid build and the per-contributor portions. Measured on desktop: 426 activities in ~3 s, 1188 activities in ~8.6 s (linear). The rules and their evidence live in `src/sections/unified.rs`; the executable spec is `tests/unified_contracts.rs`, with the failure-mode map in `tests/ASSUMPTIONS.md`.
 
-Older methods (`detect_sections_corridor`, `detect_sections_multiscale`, `detect_sections_flow_graph`) remain callable via `DetectionMethod` but are superseded by the unified detector.
-
 ## Scaling: batch vs incremental
 
 The pipeline above is a **batch** over the whole set. Re-running it fresh whenever an activity arrives is wasteful, but naive incremental updates can drift from the batch answer. Three separate questions decide the design, geometry, identity, and cost, and they are orthogonal.
@@ -184,9 +182,9 @@ cargo add tracematch
 
 - Kaufman, L., & Rousseeuw, P. J. (1987). Clustering by means of medoids. _Statistical Data Analysis Based on the L1-Norm_, 405-416.
 
-- Zhang, T. Y. & Suen, C. Y. (1984). A fast parallel algorithm for thinning digital patterns. _Communications of the ACM_, 27(3), 236-239.
-
 **Conceptual inspiration:**
+
+- Zhang, T. Y. & Suen, C. Y. (1984). A fast parallel algorithm for thinning digital patterns. _Communications of the ACM_, 27(3), 236-239.
 
 - Lee, J.-G., Han, J., & Whang, K.-Y. (2007). [Trajectory clustering: A partition-and-group framework](https://doi.org/10.1145/1247480.1247546). _SIGMOD_, 593-604.
 

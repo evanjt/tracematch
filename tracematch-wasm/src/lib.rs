@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use tracematch::{DetectionPhase, DetectionProgressCallback};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -8,35 +6,19 @@ pub fn init() {
 }
 
 /// Adapter that turns a JS `Function(phase: string, current: number, total: number)`
-/// into a `DetectionProgressCallback`.
+/// into the `&mut dyn FnMut` the grouping path takes.
 ///
-/// The library already batches `on_progress` calls (~100 per phase), so
-/// every emission from Rust calls into JS exactly once — no extra
-/// throttling needed here. WASM is single-threaded so the unsafe
-/// Send+Sync bounds are sound; the lib's trait requires them because
-/// the native parallel path uses rayon.
+/// The library already batches its progress calls (~100 per phase), so
+/// every emission from Rust calls into JS exactly once. Only grouping
+/// reports progress: the unified detector's batch entry points emit
+/// nothing, so the site's bar is indeterminate while it runs.
 struct JsProgressCallback {
     js_fn: js_sys::Function,
-    current: std::sync::atomic::AtomicU32,
-    total: std::sync::atomic::AtomicU32,
-    phase: std::sync::Mutex<String>,
 }
-
-// SAFETY: JsValue / js_sys::Function are !Send + !Sync because they wrap a
-// JS-side reference. We're in WASM (single-threaded), and the
-// `DetectionProgressCallback` trait's Send+Sync bound only exists for
-// the native rayon path which we don't compile here.
-unsafe impl Send for JsProgressCallback {}
-unsafe impl Sync for JsProgressCallback {}
 
 impl JsProgressCallback {
     fn new(js_fn: js_sys::Function) -> Self {
-        Self {
-            js_fn,
-            current: std::sync::atomic::AtomicU32::new(0),
-            total: std::sync::atomic::AtomicU32::new(0),
-            phase: std::sync::Mutex::new(String::new()),
-        }
+        Self { js_fn }
     }
 
     fn emit(&self, phase: &str, current: u32, total: u32) {
@@ -47,28 +29,6 @@ impl JsProgressCallback {
             &JsValue::from_f64(current as f64),
             &JsValue::from_f64(total as f64),
         );
-    }
-}
-
-impl DetectionProgressCallback for JsProgressCallback {
-    fn on_phase(&self, phase: DetectionPhase, total: u32) {
-        let phase_str = phase.as_str();
-        *self.phase.lock().unwrap() = phase_str.to_string();
-        self.total
-            .store(total, std::sync::atomic::Ordering::Relaxed);
-        self.current
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.emit(phase_str, 0, total);
-    }
-
-    fn on_progress(&self) {
-        let current = self
-            .current
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
-        let phase = self.phase.lock().unwrap().clone();
-        self.emit(&phase, current, total);
     }
 }
 
@@ -184,27 +144,35 @@ pub fn group_routes_with_progress(
 
 /// Detect frequent sections across multiple GPS tracks.
 ///
-/// tracks_json: `[["activity_id", [GpsPoint, ...]], ...]`
+/// tracks_json:      `[["activity_id", [GpsPoint, ...]], ...]`
+/// seconds_json:     `[[f64, ...], ...]`, one row per track, elapsed
+///                   seconds per point. Empty (`""` or `"[]"`) is
+///                   supported: the lift veto then rests on geometry.
 /// sport_types_json: `{"activity_id": "Ride", ...}`
-/// groups_json: result from groupRoutes
-/// config_json: optional SectionConfig JSON
+/// config_json:      optional SectionConfig JSON
 ///
-/// Returns array of FrequentSection objects.
-#[wasm_bindgen(js_name = "detectSections")]
-pub fn detect_sections(
+/// Returns `{ sections: FrequentSection[], boundaries: BoundaryRecord[] }`.
+/// The boundaries carry the reason behind every cut and every candidate
+/// that backed off, which is what the site renders to explain itself.
+#[wasm_bindgen(js_name = "detectSectionsUnified")]
+pub fn detect_sections_unified(
     tracks_json: &str,
+    seconds_json: &str,
     sport_types_json: &str,
-    groups_json: &str,
     config_json: &str,
 ) -> Result<JsValue, JsError> {
     let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
         serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
 
+    let seconds_owned: Vec<Vec<f64>> = if seconds_json.is_empty() || seconds_json == "[]" {
+        Vec::new()
+    } else {
+        serde_json::from_str(seconds_json).map_err(|e| JsError::new(&e.to_string()))?
+    };
+    let seconds: Vec<&[f64]> = seconds_owned.iter().map(|s| s.as_slice()).collect();
+
     let sport_types: std::collections::HashMap<String, String> =
         serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let groups: Vec<tracematch::RouteGroup> =
-        serde_json::from_str(groups_json).map_err(|e| JsError::new(&e.to_string()))?;
 
     let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
         tracematch::SectionConfig::default()
@@ -212,113 +180,28 @@ pub fn detect_sections(
         serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
     };
 
-    let ms = tracematch::detect_sections_multiscale(&tracks, &sport_types, &groups, &config);
-
-    let val =
-        serde_wasm_bindgen::to_value(&ms.sections).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(val)
-}
-
-/// Detect sections with a progress callback.
-///
-/// `progress_cb` is called as `progress_cb(phase, current, total)`. Phase
-/// strings come from `DetectionPhase::as_str()`: `building_rtrees`,
-/// `finding_overlaps`, `postprocessing`. Update batching (~100 per
-/// phase) is done inside the library so this callback path is cheap.
-#[wasm_bindgen(js_name = "detectSectionsWithProgress")]
-pub fn detect_sections_with_progress(
-    tracks_json: &str,
-    sport_types_json: &str,
-    groups_json: &str,
-    config_json: &str,
-    progress_cb: &js_sys::Function,
-) -> Result<JsValue, JsError> {
-    let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
-        serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let sport_types: std::collections::HashMap<String, String> =
-        serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let groups: Vec<tracematch::RouteGroup> =
-        serde_json::from_str(groups_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
-        tracematch::SectionConfig::default()
-    } else {
-        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
-    };
-
-    let cb: Arc<dyn DetectionProgressCallback> =
-        Arc::new(JsProgressCallback::new(progress_cb.clone()));
-    let ms = tracematch::detect_sections_multiscale_with_progress(
+    let detection = tracematch::detect_sections_unified_explained(
         &tracks,
+        &seconds,
         &sport_types,
-        &groups,
         &config,
-        cb,
+        &tracematch::Tunables::DEFAULT,
     );
 
-    let val =
-        serde_wasm_bindgen::to_value(&ms.sections).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(val)
-}
+    // `UnifiedDetection` carries no serde derive, so mirror it here.
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Detection {
+        sections: Vec<tracematch::FrequentSection>,
+        boundaries: Vec<tracematch::BoundaryRecord>,
+    }
 
-/// Detect sections via flow-graph analysis.
-///
-/// Builds a road/trail network from GPS traces by tracking cell-to-cell
-/// flow, finds divergence points (junctions), and returns edges between
-/// them as sections.
-#[wasm_bindgen(js_name = "detectSectionsFlowGraph")]
-pub fn detect_sections_flow_graph(
-    tracks_json: &str,
-    sport_types_json: &str,
-    config_json: &str,
-) -> Result<JsValue, JsError> {
-    let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
-        serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let sport_types: std::collections::HashMap<String, String> =
-        serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
-        tracematch::SectionConfig::default()
-    } else {
-        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
+    let out = Detection {
+        sections: detection.sections,
+        boundaries: detection.boundaries,
     };
 
-    let sections = tracematch::detect_sections_flow_graph(&tracks, &sport_types, &config);
-
-    let val =
-        serde_wasm_bindgen::to_value(&sections).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(val)
-}
-
-/// Detect sections via density corridor extraction.
-///
-/// Rasterises tracks, thresholds hot cells, skeletonises via Zhang-Suen
-/// thinning, and snaps each corridor centerline to an actual GPS track.
-#[wasm_bindgen(js_name = "detectSectionsCorridor")]
-pub fn detect_sections_corridor(
-    tracks_json: &str,
-    sport_types_json: &str,
-    config_json: &str,
-) -> Result<JsValue, JsError> {
-    let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
-        serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let sport_types: std::collections::HashMap<String, String> =
-        serde_json::from_str(sport_types_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
-        tracematch::SectionConfig::default()
-    } else {
-        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
-    };
-
-    let sections = tracematch::detect_sections_corridor(&tracks, &sport_types, &config);
-
-    let val =
-        serde_wasm_bindgen::to_value(&sections).map_err(|e| JsError::new(&e.to_string()))?;
+    let val = serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(val)
 }
 

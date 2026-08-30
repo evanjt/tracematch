@@ -24,8 +24,8 @@ jobs:
       # `parallel` is a default feature and --all-features never turns it off,
       # so every `cfg(not(feature = "parallel"))` branch is invisible to the
       # steps above. tracematch-wasm takes the library with
-      # default-features = false, which is how those branches reach a build at
-      # all, and one drifted out of sync for three months unnoticed.
+      # default-features = false, which is the only consumer that reaches
+      # them, and one drifted out of sync for three months unnoticed.
       - name: Check (no default features)
         run: cargo check -p tracematch --no-default-features
       - name: Test
@@ -35,6 +35,57 @@ jobs:
       # from `tracematch::synthetic`, and only that feature compiles the module in.
       - name: Test (synthetic)
         run: cargo test --features synthetic
+
+  # tracematch-wasm is its own workspace with its own lockfile, so the jobs
+  # above never touch it. Only the Pages deploy built it before, and Pages
+  # does not fire on src/ changes: that is how deleting a detector left the
+  # published site broken for three months.
+  wasm:
+    name: WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: tracematch-wasm
+      - name: Check (wasm32)
+        run: cargo check --manifest-path tracematch-wasm/Cargo.toml --target wasm32-unknown-unknown
+
+  # Nothing typechecked the site. Pages runs `npm run build`, which
+  # transpiles TypeScript through esbuild without checking it, so a wrong
+  # argument list or a stale type mirror shipped silently.
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: tracematch-wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+      # The worker's types come from the generated tracematch_wasm.d.ts, so
+      # the package has to exist before svelte-check runs. No wasm-opt: this
+      # job only needs the bindings.
+      - name: Build WASM package
+        run: wasm-pack build tracematch-wasm --target web --out-dir ../web/src/lib/wasm/pkg --no-opt
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+      - name: Typecheck
+        run: npm run check
+        working-directory: web
 
   # Real GPS from people who are not the author. The archive is fetched once
   # per cache lifetime and unpacked on every run; the data never lives in the
