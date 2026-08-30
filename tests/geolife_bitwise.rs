@@ -17,9 +17,21 @@ mod geolife;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use bitwise::{Corpus, Shape};
+use bitwise::{Corpus, Shape, baseline::Band};
 
 const ENV: &str = "LAB_GEOLIFE_DIR";
+
+/// This gate runs on shared CI runners with a quarter of the cores that
+/// recorded the golden, so the clock band is wide enough to catch only an
+/// order-of-magnitude regression. Allocation does not vary with the runner,
+/// so the heap is bounded properly here. The private corpus carries the tight
+/// clock band.
+const BAND: Band = Band {
+    time_factor: 10.0,
+    time_floor_ms: 250,
+    bytes_factor: 1.25,
+    bytes_floor: 8 * 1024 * 1024,
+};
 const MAX_USERS: usize = 200;
 const MAX_PER_USER: usize = 120;
 
@@ -109,6 +121,7 @@ fn geolife_output_is_bitwise_stable() {
             warm_adds: 20,
             bulk_base: 40,
         },
+        BAND,
         &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/geolife_bitwise_golden.txt"),
     );
