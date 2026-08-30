@@ -69,7 +69,7 @@ pub use traces::{
     extract_activity_passes, extract_activity_trace, extract_all_activity_traces,
     longest_pass_per_activity,
 };
-// Assign-once identity + hysteresis (B2): pure decision layer over the churny
+// Assign-once identity + hysteresis: pure decision layer over the churny
 // batch catalogue. tracematch decides which candidate inherits which prior id;
 // the engine owns the id strings and the persistence.
 pub use identity::{

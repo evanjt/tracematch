@@ -5895,7 +5895,7 @@ pub struct SectionUpdatePolicy {
 /// dissolve set falls out naturally: a touched cluster's fresh discovery
 /// replaces its prior sections wholesale.
 ///
-/// # This is the NAIVE-CORRECT baseline (B1 anchor)
+/// # This is the NAIVE-CORRECT baseline
 ///
 /// The body re-batches the WHOLE pool on every call: correct by
 /// construction (the batch IS the convergence target) but O(N) per add,
