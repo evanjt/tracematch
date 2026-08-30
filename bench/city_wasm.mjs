@@ -1,10 +1,10 @@
-// Run the Sion corpus end-to-end through the WASM module.
+// Run the city corpus end-to-end through the WASM module.
 //
 // Prerequisites:
 //   cd tracematch-wasm && wasm-pack build --target nodejs --release --out-dir pkg-node
-//   node bench/sion_wasm.mjs
+//   node bench/city_wasm.mjs
 //
-// Compares apples-to-apples with `cargo run --release --example sion_corpus_report`
+// Compares apples-to-apples with the native corpus report example
 // — same data, same configs, same operations, but executing the WASM module
 // instead of the native Rust library. Use this to see the WASM-vs-native gap
 // without browser overhead (no message passing, no JSON re-serialisation
@@ -30,7 +30,7 @@ try {
   process.exit(1);
 }
 
-const SION_DIR = path.join(__dirname, '..', 'sionrunning');
+const CORPUS_DIR = path.join(__dirname, '..', 'citycorpus');
 
 function parseGpx(content) {
   const points = [];
@@ -53,17 +53,17 @@ function fmtMs(ms) {
 }
 
 console.log('============================================================');
-console.log('  Sion corpus WASM report');
+console.log('  City corpus WASM report');
 console.log('============================================================\n');
 
 // --- 1. Load GPX -----------------------------------------------------
 const tLoad = performance.now();
-const files = (await readdir(SION_DIR)).filter((f) => f.endsWith('.gpx'));
+const files = (await readdir(CORPUS_DIR)).filter((f) => f.endsWith('.gpx'));
 const tracks = [];
 let totalPoints = 0;
 let skippedShort = 0;
 for (const f of files) {
-  const content = await readFile(path.join(SION_DIR, f), 'utf8');
+  const content = await readFile(path.join(CORPUS_DIR, f), 'utf8');
   const points = parseGpx(content);
   if (points.length < 50) {
     skippedShort++;

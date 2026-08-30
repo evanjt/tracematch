@@ -56,9 +56,9 @@ design decision leans on published work.
   https://doi.org/10.3390/land13050589
   Detour magnitudes by activity: running most detour-prone, cycling about
   2.8 times the beeline, hiking 4.3 km beeline against 10 km travelled.
-- Why do bicyclists take detours? A multilevel regression model using
-  smartphone GPS data. Journal of Transport Geography, 2018.
-  https://doi.org/10.1016/j.jtrangeo.2018.04.012
+- Park, Akar. Why do bicyclists take detours? A multilevel regression
+  model using smartphone GPS data. Journal of Transport Geography 74,
+  2019. https://doi.org/10.1016/j.jtrangeo.2018.11.013
   Recreational trips take detours utilitarian trips do not.
 - How do cyclists make their way? A GPS-based revealed preference study in
   Copenhagen. International Journal of Geographical Information Science
@@ -66,8 +66,9 @@ design decision leans on published work.
 
 ## Interestingness: challenge, flow, attachment
 
-- Measuring the motivation to ride bicycles for tourism through a
-  comparison of tourist attractions. Transport Policy, 2017.
+- Watthanaklang, Ratanavaraha, Chatpattananan, Jomnonkwao. Measuring the
+  motivation to ride bicycles for tourism through a comparison of tourist
+  attractions. Transport Policy 52, 2016.
   Physical challenge, self-development, exploration and stimulus seeking
   as core cycling motives.
 - When the mountains call: exploring mountaineering motivations through
@@ -75,8 +76,9 @@ design decision leans on published work.
   Tourism, 2024. Accomplishment and mastery drive repeated ascents.
 - Health promotion as a motivational factor in alpine cycling.
   International Journal of Environmental Research and Public Health, 2021.
-- Optimal experiences in exercise: a qualitative investigation of flow and
-  clutch states. Psychology of Sport and Exercise, 2018.
+- Swann, Jackman, Schweickle, Vella. Optimal experiences in exercise: a
+  qualitative investigation of flow and clutch states. Psychology of Sport
+  and Exercise 40, 2019.
 - Optimal psychological states in advanced climbers: antecedents,
   characteristics, and consequences of flow and clutch states. Psychology
   of Sport and Exercise, 2022. Flow needs challenge-skill balance, clear
@@ -91,13 +93,15 @@ design decision leans on published work.
 
 ## Carried-ground exclusion
 
-- International Skyrunning Federation, Vertical Kilometre world record:
-  1,000 m of gain in 29:42 (Fully, Switzerland, 2017). The all-time human
-  vertical ceiling, ~2,020 m/h sustained for half an hour. Anchors the
-  velocity veto's climb-rate floor: ground climbed well below this rate
-  was climbed by a person, not ridden.
-- EN 12929-1, Safety requirements for cableway installations designed to
-  carry persons. Governs ropeway design including line speeds: fixed-grip
+- Vertical Kilometer World Circuit, Vertical Kilometre world record:
+  1,000 m of gain in 27:21, Remi Bonnet at Fully, Switzerland, 2025. The
+  all-time human vertical ceiling, ~2,190 m/h sustained for under half an
+  hour. Anchors the velocity veto's climb-rate floor: ground climbed well
+  below this rate was climbed by a person, not ridden.
+- EN 12929-1:2015+A1:2022, Safety requirements for cableway installations
+  designed to carry persons. General requirements, part 1. The design
+  frame for ropeways. The operating line speeds below are industry
+  practice, not figures quoted from the standard's text: fixed-grip
   chairlifts run ~2-2.5 m/s, detachable chairs and gondolas 4-6 m/s.
   Anchors the veto's ground-speed floor from the carried side.
 

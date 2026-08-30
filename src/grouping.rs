@@ -737,7 +737,7 @@ pub fn distance_ratio_ok(d1: f64, d2: f64) -> bool {
 /// can short-circuit pairs that survived the grid pre-filter (which
 /// allows a 4× safety margin) but cannot pass the actual 1× threshold.
 ///
-/// On the sionrunning corpus this cuts `compare_routes` calls by
+/// On the city corpus this cuts `compare_routes` calls by
 /// another ~60% on top of the grid filter, since the grid is sized
 /// generously to never drop a valid match. The check is conservative:
 /// loops (start ≈ end) always pass through to the full gate, since

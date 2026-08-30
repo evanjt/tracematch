@@ -1,11 +1,11 @@
 //! Real-corpus smoke test for the endpoint-grid grouping path.
 //!
-//! Runs `group_signatures_parallel` over the `sionrunning` corpus and asserts
+//! Runs `group_signatures_parallel` over the `citycorpus` corpus and asserts
 //! the grouping is non-trivial: groups form, and they do not collapse into one.
 //! Synthetic corpora replay a canonical polyline, so this is the only place the
 //! grouping pipeline meets braided GPS.
 //!
-//! Run: `cargo test --features real-corpus --test grouping_sion_corpus`
+//! Run: `cargo test --features real-corpus --test grouping_city_corpus`
 
 mod corpus;
 
@@ -42,8 +42,8 @@ fn load_gpx(path: &Path) -> Vec<GpsPoint> {
 }
 
 #[test]
-fn route_grouping_sion_corpus_smoke() {
-    let paths = corpus::require_at_least("sionrunning", 50);
+fn route_grouping_city_corpus_smoke() {
+    let paths = corpus::require_at_least("citycorpus", 50);
     let config = MatchConfig::default();
 
     // Sorted paths, so the signature order is the same on every machine.
@@ -66,7 +66,7 @@ fn route_grouping_sion_corpus_smoke() {
     println!("[sion corpus] {} signatures loaded", signatures.len());
     assert!(
         signatures.len() >= 50,
-        "expected ≥50 GPX files in sionrunning/, got {}",
+        "expected ≥50 GPX files in citycorpus/, got {}",
         signatures.len()
     );
 
@@ -81,7 +81,7 @@ fn route_grouping_sion_corpus_smoke() {
         signatures.len()
     );
 
-    // Sanity: we found non-trivial groups (Sion is a small enough city
+    // Sanity: we found non-trivial groups (the corpus covers a small enough city
     // that most routes share corridors, so we expect groups but not
     // EVERYTHING in one big group).
     assert!(

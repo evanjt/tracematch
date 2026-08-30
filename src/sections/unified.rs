@@ -300,8 +300,8 @@ pub struct Tunables {
     /// questions at their natural scale. A resolution, not a free
     /// knob: fine cells are cell/3 ≈ 33 m at default proximity,
     /// between GPS braid noise (subgrid 4 over-cuts, stability −12
-    /// points on Sion) and small-feature scale (subgrid 2
-    /// under-resolves laps on Sion, over-fragments the full corpus).
+    /// points on the city corpus) and small-feature scale (subgrid 2
+    /// under-resolves laps there, over-fragments the full corpus).
     /// 3 is the value that behaves on both corpora.
     pub pass_subgrid: f64,
     /// Single-pass cut: a re-entry only counts against ground last
@@ -380,8 +380,8 @@ pub struct Tunables {
     pub lift_min_speed_ms: f64,
     /// Lift exclusion, velocity veto: vertical rate below which a timed
     /// span climbs like a human. The all-time human ceiling is the
-    /// Vertical Kilometre record, ~2,020 m/h sustained for half an hour
-    /// (Fully, 2017); recreational steep hiking runs 300-900 m/h.
+    /// Vertical Kilometre record, ~2,190 m/h sustained for under half an
+    /// hour (Fully, 2025); recreational steep hiking runs 300-900 m/h.
     /// Measured candidates: human spans 317-566 m/h, carried spans
     /// 4,400-13,900 m/h. 1,500 m/h sits 2.6x above the measured human
     /// envelope and 2.9x under the measured carried envelope. A span is
@@ -400,7 +400,7 @@ pub struct Tunables {
     /// beyond ~2 x 100 m); the value sits far above that so a region's
     /// outings share one stable plane, and far below continent spacing
     /// so hemispheres never share one (a single global plane sized
-    /// Melbourne's east-west cells ~14% wrong against a Valais-heavy
+    /// a 38°S corpus's east-west cells ~14% wrong against a 46°N-heavy
     /// mean, and let ground on another continent move every cell
     /// boundary at home). Within a cluster the residual scale error is
     /// tan(lat) x half-span: under 1% out to ~60 km half-spans at
@@ -445,7 +445,7 @@ pub struct Tunables {
     /// sustained run marks a variant walk; scattered single samples (a
     /// staircase jog, an end taper) never trip it. Three samples at
     /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
-    /// floor. Calibrated on the Sion braid (a 1939 m section drawn by
+    /// floor. Calibrated on the city corpus's braid (a 1939 m section drawn by
     /// a diverter): share bars cannot tell a braid walk from a
     /// staircase jog, both 6-11 % of the line, a contiguous 60 m run
     /// can.
@@ -3829,7 +3829,7 @@ fn unify_chain_references(
 /// Tracks split into geographic clusters first and the pipeline runs
 /// per cluster on the cluster's own reference latitude. One global
 /// plane sizes east-west cells by cos(reference)/cos(local), ~14%
-/// wrong for a corpus spanning Valais and Melbourne, and lets ground
+/// wrong for a corpus spanning both hemispheres, and lets ground
 /// on another continent shift every cell boundary at home; local
 /// projection removes both, and makes each region's catalogue
 /// independent of the rest of the corpus.
@@ -7776,7 +7776,7 @@ mod tests {
         // into and out of the corner run antiparallel within `near`,
         // but only a corner's arc apart along the line, the corner's
         // own shape, not a retrace. An out-and-back's antiparallel
-        // pairs sit a full out-leg apart. Regression: the Sion
+        // pairs sit a full out-leg apart. Regression: an
         // athletics oval charged its own entry corner 0.064, failed
         // the clean bar, and lost the closed-lap render to a
         // lap-plus-stem pass.
