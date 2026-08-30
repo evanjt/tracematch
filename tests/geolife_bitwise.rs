@@ -104,11 +104,23 @@ fn load_corpus() -> Corpus {
         .iter()
         .filter_map(|t| day_of(&t.date).map(|d| (t.id.clone(), d * 86_400)))
         .collect();
+    // GeoLife times every fix and carries no elevation it can trust
+    // (`examples/common/geolife.rs`), so these seconds reach the velocity
+    // veto but no candidate ever reaches them: `lift_spans_tuned` returns
+    // empty below two elevated points. Only the private corpus can gate the
+    // veto. They are passed anyway so this gate folds the same inputs the
+    // engine does.
+    let seconds = mine
+        .iter()
+        .filter(|t| t.seconds.len() == t.points.len())
+        .map(|t| (t.id.clone(), t.seconds.clone()))
+        .collect();
     let tracks = mine.into_iter().map(|t| (t.id, t.points)).collect();
     Corpus {
         tracks,
         sports,
         starts,
+        seconds,
     }
 }
 
