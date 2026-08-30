@@ -1719,7 +1719,9 @@
     display: flex;
     flex-direction: column;
     overflow-y: auto;
-    padding: 12px 14px;
+    /* Runway at the end of the scroll. Without it the last control sits
+       flush against the viewport edge and reads as cut off. */
+    padding: 12px 14px 32px;
     gap: 0;
   }
 
@@ -2097,7 +2099,13 @@
     transition: background 0.15s;
     overflow: hidden;
     position: relative;
-    margin-bottom: 12px;
+    margin-bottom: 20px;
+    /* The button also hosts a three-row progress readout while running,
+       so it grows. This is the floor for the idle single-line label,
+       which was clipping against the fixed padding. */
+    min-height: 44px;
+    line-height: 1.3;
+    flex-shrink: 0;
   }
   .btn-analyse:hover:not(:disabled) { background: var(--primary-dark); }
   .btn-analyse:disabled { opacity: 0.6; cursor: not-allowed; }
