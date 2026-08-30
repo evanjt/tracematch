@@ -24,7 +24,17 @@ use tracematch::{SectionConfig, SectionEvidenceCache};
 const CORPUS: &str = "fullcorpus";
 const BASELINE: &str = "_drip_baseline.txt";
 const WARM_ADDS: usize = 50;
-const BUDGET_MS: u64 = 500;
+/// The per-add ceiling, measured on a corpus shaped like the app's data.
+///
+/// It was 500 while the corpus loaded flat, unelevated tracks. Elevation
+/// raises every candidate the lift veto then has to confirm, and the app has
+/// stored elevation with every track all along, so 500 was guarding a fold the
+/// app does not run: the same 50 adds measure 335 ms flat and 752-787 ms
+/// elevated. Per-point time is free on top of that, inside the run to run
+/// spread. 900 is the corrected measurement with room for the spread, not a
+/// target: `Q55`, 2026-08-30, which also raised `B71` for the pass that
+/// accounts for most of the difference.
+const BUDGET_MS: u64 = 900;
 
 /// One machine holds this corpus, so the clock only has to absorb run-to-run
 /// scheduling noise. The heap is the code's own and gets a tighter band.
