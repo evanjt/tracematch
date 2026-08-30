@@ -52,6 +52,7 @@ export type AnalyseRequest = {
   requestId: number;
   traces: { id: string; points: GpsPoint[]; sportType: string }[];
   sectionConfig: string;
+  tunables: string;
 };
 
 export type WorkerResponse =
@@ -128,7 +129,13 @@ async function handleAnalyse(req: AnalyseRequest) {
       // parser reads no <time>, and the lift veto falls back to
       // geometry when the stream is absent.
       progress(req.requestId, 'Detecting sections', 0, 0);
-      const detection = detectSectionsUnified(tracksJson, '[]', sportTypesJson, req.sectionConfig);
+      const detection = detectSectionsUnified(
+        tracksJson,
+        '[]',
+        sportTypesJson,
+        req.sectionConfig,
+        req.tunables,
+      );
       sections = detection.sections;
       boundaries = detection.boundaries;
       console.timeEnd('[worker] sections');

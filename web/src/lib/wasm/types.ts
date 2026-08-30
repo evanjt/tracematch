@@ -133,6 +133,32 @@ export interface BoundaryRecord {
   reason: BoundaryReason;
 }
 
+// The detector's free constants. Every field is optional: the Rust side
+// defaults each one, so sending a partial object moves only those knobs.
+// Rust: #[serde(default, rename_all = "camelCase")].
+export interface Tunables {
+  passAwayCells?: number;
+  eleLevelTolM?: number;
+  passSubgrid?: number;
+  dwellEvents?: number;
+  passWindow?: number;
+  passNeeded?: number;
+  reach?: number;
+  liftSpanM?: number;
+  liftMinGrade?: number;
+  liftMinStraight?: number;
+  jitterHumanMin?: number;
+  liftMinSpeedMs?: number;
+  liftMinClimbMh?: number;
+  descentMatchM?: number;
+  clusterGapM?: number;
+  selfPassMax?: number;
+  selfPassClean?: number;
+  minorityRunM?: number;
+  occasionSpanH?: number;
+  refLatQuantDeg?: number;
+}
+
 // What detectSectionsUnified returns.
 export interface UnifiedDetection {
   sections: FrequentSection[];

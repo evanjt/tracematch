@@ -150,6 +150,9 @@ pub fn group_routes_with_progress(
 ///                   supported: the lift veto then rests on geometry.
 /// sport_types_json: `{"activity_id": "Ride", ...}`
 /// config_json:      optional SectionConfig JSON
+/// tunables_json:    optional partial Tunables JSON. Every field
+///                   defaults, so `{"passSubgrid": 4}` moves one knob
+///                   and leaves the other nineteen on their defaults.
 ///
 /// Returns `{ sections: FrequentSection[], boundaries: BoundaryRecord[] }`.
 /// The boundaries carry the reason behind every cut and every candidate
@@ -160,6 +163,7 @@ pub fn detect_sections_unified(
     seconds_json: &str,
     sport_types_json: &str,
     config_json: &str,
+    tunables_json: &str,
 ) -> Result<JsValue, JsError> {
     let tracks: Vec<(String, Vec<tracematch::GpsPoint>)> =
         serde_json::from_str(tracks_json).map_err(|e| JsError::new(&e.to_string()))?;
@@ -180,12 +184,18 @@ pub fn detect_sections_unified(
         serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
     };
 
+    let tunables: tracematch::Tunables = if tunables_json.is_empty() || tunables_json == "{}" {
+        tracematch::Tunables::DEFAULT
+    } else {
+        serde_json::from_str(tunables_json).map_err(|e| JsError::new(&e.to_string()))?
+    };
+
     let detection = tracematch::detect_sections_unified_explained(
         &tracks,
         &seconds,
         &sport_types,
         &config,
-        &tracematch::Tunables::DEFAULT,
+        &tunables,
     );
 
     // `UnifiedDetection` carries no serde derive, so mirror it here.

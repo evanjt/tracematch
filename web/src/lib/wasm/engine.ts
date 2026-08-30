@@ -76,6 +76,7 @@ export interface AnalysisTrace {
 export function runAnalysisAsync(
   traces: AnalysisTrace[],
   sectionConfig: string,
+  tunables: string,
   onProgress?: (phase: string, current: number, total: number) => void,
 ): Promise<{
   signatures: RouteSignature[];
@@ -92,6 +93,7 @@ export function runAnalysisAsync(
       requestId,
       traces,
       sectionConfig,
+      tunables,
     });
   });
 }

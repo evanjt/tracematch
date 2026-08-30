@@ -3,7 +3,6 @@
   import { traceStore, ANALYSIS_SCHEMA_VERSION, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
   import { runAnalysisAsync } from '$lib/wasm/engine';
-  import MethodIllustration from '$lib/components/MethodIllustration.svelte';
   import {
     fetchIndex,
     fetchNewest,
@@ -11,7 +10,7 @@
     trackDistance,
     type GeoLifeEntry,
   } from '$lib/geolife';
-  import type { RouteGroup, FrequentSection, GpsPoint, BoundaryReason } from '$lib/wasm/types';
+  import type { RouteGroup, FrequentSection, GpsPoint, BoundaryReason, Tunables } from '$lib/wasm/types';
 
   // --- Sport color system ---
   const SPORT_COLORS: Record<string, string> = {
@@ -102,6 +101,96 @@
   let minActivities = $state(saved.minActivities ?? 3);
   let activePreset = $state<PresetKey | null>(null);
   let settingsCollapsed = $state(true);
+  let advancedCollapsed = $state(true);
+
+  // Every detector constant, with the range each was swept over and a
+  // one-line reading of what it decides. `key` is the camelCase name the
+  // Rust Tunables struct deserialises, so the panel and the payload
+  // cannot drift apart.
+  type Knob = {
+    key: keyof Tunables;
+    label: string;
+    hint: string;
+    min: number;
+    max: number;
+    step: number;
+    unit?: string;
+  };
+  const KNOB_GROUPS: { title: string; blurb: string; knobs: Knob[] }[] = [
+    {
+      title: 'Coverage grid',
+      blurb: 'How ground is divided before any section exists.',
+      knobs: [
+        { key: 'passSubgrid', label: 'Pass subgrid', hint: 'Fineness of the pass-counting grid against the partition grid', min: 1, max: 6, step: 1 },
+        { key: 'reach', label: 'Reach', hint: 'Neighbourhood reach in fine cells for the single-pass cut', min: 1, max: 4, step: 1 },
+        { key: 'clusterGapM', label: 'Cluster gap', hint: 'Bounding boxes within this share one cluster and one projection', min: 1000, max: 200000, step: 1000, unit: 'm' },
+        { key: 'refLatQuantDeg', label: 'Projection quantisation', hint: 'Latitude rounding for a cluster reference plane', min: 0.01, max: 1, step: 0.01, unit: '°' },
+        { key: 'eleLevelTolM', label: 'Level tolerance', hint: 'Elevation separation that makes ground a different level', min: 2, max: 60, step: 1, unit: 'm' },
+      ],
+    },
+    {
+      title: 'Passes',
+      blurb: 'When a return over the same ground counts as a new traversal.',
+      knobs: [
+        { key: 'passAwayCells', label: 'Away cells', hint: 'Distinct cell events away before a re-arrival is a new pass', min: 1, max: 20, step: 1 },
+        { key: 'dwellEvents', label: 'Dwell events', hint: 'How stale ground must be before a re-entry counts against it', min: 1, max: 20, step: 1 },
+        { key: 'passWindow', label: 'Pass window', hint: 'Recent cell events inspected for the single-pass cut', min: 2, max: 20, step: 1 },
+        { key: 'passNeeded', label: 'Passes needed', hint: 'Re-entries within that window before the portion is cut', min: 1, max: 10, step: 1 },
+      ],
+    },
+    {
+      title: 'Render quality',
+      blurb: 'Which contributor gets to be the line you see.',
+      knobs: [
+        { key: 'selfPassMax', label: 'Self-pass ceiling', hint: 'Largest share of a render that may revisit its own ground', min: 0, max: 1, step: 0.01 },
+        { key: 'selfPassClean', label: 'Clean bar', hint: 'Below this a render keeps its stability privilege', min: 0, max: 0.5, step: 0.01 },
+        { key: 'minorityRunM', label: 'Minority run', hint: 'Longest stretch a render may hold on thinly supported ground', min: 10, max: 300, step: 10, unit: 'm' },
+      ],
+    },
+    {
+      title: 'Carried ground',
+      blurb: 'Telling a lift, tow or gondola from a person climbing.',
+      knobs: [
+        { key: 'liftSpanM', label: 'Lift span', hint: 'Window over which ascent and straightness must hold', min: 50, max: 1000, step: 50, unit: 'm' },
+        { key: 'liftMinGrade', label: 'Min grade', hint: 'Sustained ascent grade for a window to qualify', min: 0.05, max: 0.6, step: 0.01 },
+        { key: 'liftMinStraight', label: 'Min straightness', hint: 'Chord over arc for a qualifying window', min: 0.8, max: 1, step: 0.005 },
+        { key: 'jitterHumanMin', label: 'Human jitter', hint: 'Raw arc over smoothed arc at which a span moves like a person', min: 1, max: 1.5, step: 0.01 },
+        { key: 'liftMinSpeedMs', label: 'Human speed ceiling', hint: 'Median ground speed below which a timed span is human', min: 0.5, max: 5, step: 0.1, unit: 'm/s' },
+        { key: 'liftMinClimbMh', label: 'Human climb ceiling', hint: 'Vertical rate below which a timed span climbs like a person', min: 500, max: 3000, step: 100, unit: 'm/h' },
+        { key: 'descentMatchM', label: 'Descent match', hint: 'Tolerance when hunting a walked descent along a lift line', min: 20, max: 200, step: 10, unit: 'm' },
+      ],
+    },
+    {
+      title: 'Time',
+      blurb: 'Only bites when activities carry dates.',
+      knobs: [
+        { key: 'occasionSpanH', label: 'Occasion span', hint: 'Dated support must span at least this to count as separate occasions', min: 0, max: 720, step: 24, unit: 'h' },
+      ],
+    },
+  ];
+
+  // Start from the detector's own defaults and only send what moved.
+  const TUNABLE_DEFAULTS: Required<Tunables> = {
+    passAwayCells: 5, eleLevelTolM: 15, passSubgrid: 3, dwellEvents: 6, passWindow: 5,
+    passNeeded: 3, reach: 1, liftSpanM: 300, liftMinGrade: 0.22, liftMinStraight: 0.975,
+    jitterHumanMin: 1.05, liftMinSpeedMs: 1.5, liftMinClimbMh: 1500, descentMatchM: 60,
+    clusterGapM: 50000, selfPassMax: 0.25, selfPassClean: 0.05, minorityRunM: 60,
+    occasionSpanH: 168, refLatQuantDeg: 0.1,
+  };
+  let tunables = $state<Required<Tunables>>({ ...TUNABLE_DEFAULTS });
+  const tunablesChanged = $derived(
+    (Object.keys(TUNABLE_DEFAULTS) as (keyof Tunables)[]).filter(
+      (k) => tunables[k] !== TUNABLE_DEFAULTS[k],
+    ),
+  );
+  function resetTunables() {
+    tunables = { ...TUNABLE_DEFAULTS };
+  }
+
+  // Two more live SectionConfig fields the panel never exposed.
+  let maxSectionLength = $state(5000);
+  let divergenceThreshold = $state(0.15);
+  let poolSports = $state(true);
 
   // Determine initial preset from loaded values
   activePreset = (Object.entries(PRESETS) as [PresetKey, typeof PRESETS[PresetKey]][]).find(
@@ -162,26 +251,17 @@
   let map: L.Map | null = null;
   let tileLayer: L.TileLayer | null = null;
 
-  // Keyless basemaps only. The site is a static build with no server, so
-  // any API key would ship to every visitor in the bundle anyway.
+  // Plain OpenStreetMap, no key. The site is a static build with no
+  // server, so any key would ship to every visitor in the bundle.
   //
-  // Dark is Esri's Dark Gray Canvas rather than CARTO, which now wants an
-  // account. It is global to z16 and serves a placeholder above that, so
-  // `maxNativeZoom` upscales instead of showing blank tiles.
-  function basemap(dark: boolean): { url: string; attribution: string; maxNativeZoom: number } {
-    return dark
-      ? {
-          url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-          attribution:
-            'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
-          maxNativeZoom: 16,
-        }
-      : {
-          url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          attribution: '&copy; OpenStreetMap contributors',
-          maxNativeZoom: 19,
-        };
-  }
+  // OSM publishes no dark style, which is what CARTO was there for.
+  // Rather than take on a second provider, dark inverts the tiles in CSS
+  // (see .dark-tiles) and leaves the overlays untouched.
+  const BASEMAP = {
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; OpenStreetMap contributors',
+    maxNativeZoom: 19,
+  };
   let traceLayerGroup: L.LayerGroup | null = null;
   let routeLayerGroup: L.LayerGroup | null = null;
   let sectionLayerGroup: L.LayerGroup | null = null;
@@ -625,11 +705,10 @@
       import('leaflet/dist/leaflet.css');
       L = leaflet;
       map = L.map(mapContainer).setView([30, 0], 2);
-      const base = basemap(resolvedDark);
-      tileLayer = L.tileLayer(base.url, {
-        attribution: base.attribution,
+      tileLayer = L.tileLayer(BASEMAP.url, {
+        attribution: BASEMAP.attribution,
         maxZoom: 19,
-        maxNativeZoom: base.maxNativeZoom,
+        maxNativeZoom: BASEMAP.maxNativeZoom,
       }).addTo(map);
       traceLayerGroup = L.layerGroup().addTo(map);
       routeLayerGroup = L.layerGroup();
@@ -641,16 +720,12 @@
     });
   });
 
-  // Swap tiles when theme changes. The attribution and the native zoom
-  // ceiling differ per provider, so they move with the URL.
+  // One tile source for both themes. Dark just inverts the tile pane, so
+  // there is nothing to refetch when the theme flips.
   $effect(() => {
     const dark = resolvedDark;
-    if (!map || !L || !tileLayer) return;
-    const base = basemap(dark);
-    tileLayer.options.attribution = base.attribution;
-    tileLayer.options.maxNativeZoom = base.maxNativeZoom;
-    tileLayer.setUrl(base.url);
-    map.attributionControl.addAttribution(base.attribution);
+    if (!mapContainer) return;
+    mapContainer.classList.toggle('dark-tiles', dark);
   });
 
   // React to trace list changes
@@ -876,7 +951,7 @@
       const sectionConfig = JSON.stringify({
         proximityThreshold,
         minSectionLength,
-        maxSectionLength: 5000,
+        maxSectionLength,
         minActivities,
         clusterTolerance: 80,
         samplePoints: 50,
@@ -889,9 +964,14 @@
         ],
         preserveHierarchy: true,
         // Live under the unified detector.
-        divergenceThreshold: 0.15,
-        poolSports: true,
+        divergenceThreshold,
+        poolSports,
       });
+
+      // Only the knobs that moved. Rust defaults the rest.
+      const tunablesJson = JSON.stringify(
+        Object.fromEntries(tunablesChanged.map((k) => [k, tunables[k]])),
+      );
 
       const traces = traceStore.traces.map((t) => ({
         id: t.id,
@@ -899,9 +979,14 @@
         sportType: t.sportType ?? 'Ride'
       }));
 
-      const result = await runAnalysisAsync(traces, sectionConfig, (phase, current, total) => {
-        analysisProgress = { phase, current, total };
-      });
+      const result = await runAnalysisAsync(
+        traces,
+        sectionConfig,
+        tunablesJson,
+        (phase, current, total) => {
+          analysisProgress = { phase, current, total };
+        },
+      );
 
       if (result.sections.length === 0 && traceStore.traces.length >= 3) {
         sectionError = 'No sections detected with current settings.';
@@ -1102,7 +1187,6 @@
                 junction-anchored chains, and every boundary carries the reason
                 it was cut there.
               </p>
-              <MethodIllustration proximity={proximityThreshold} minTracks={minActivities} {minSectionLength} />
               <div class="preset-chips">
                 {#each Object.keys(PRESETS) as key}
                   <button
@@ -1130,6 +1214,53 @@
                 <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                 <span class="slider-hint">Activities needed to form a section</span>
               </label>
+              <label class="slider-row">
+                <span class="slider-label">Max section length</span>
+                <span class="slider-value">{maxSectionLength} m</span>
+                <input type="range" min="500" max="50000" step="500" bind:value={maxSectionLength} oninput={onSliderChange} />
+                <span class="slider-hint">Longest section before it is just a route</span>
+              </label>
+              <label class="slider-row">
+                <span class="slider-label">Divergence threshold</span>
+                <span class="slider-value">{divergenceThreshold.toFixed(2)}</span>
+                <input type="range" min="0" max="1" step="0.01" bind:value={divergenceThreshold} oninput={onSliderChange} />
+                <span class="slider-hint">How far traffic must part before the line is cut</span>
+              </label>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={poolSports} />
+                <span class="slider-label">Pool sports</span>
+                <span class="slider-hint">Cut once across all sports, label each section afterwards</span>
+              </label>
+
+              <button class="panel-toggle nested" onclick={() => advancedCollapsed = !advancedCollapsed}>
+                <span class="panel-chevron">{advancedCollapsed ? '▸' : '▾'}</span>
+                <span>Detector constants{tunablesChanged.length ? ` (${tunablesChanged.length} changed)` : ''}</span>
+              </button>
+              {#if !advancedCollapsed}
+                <p class="mode-description">
+                  Every free constant the detector has. Each default sits on a measured
+                  plateau, so moving one should change little until it leaves the plateau.
+                </p>
+                {#each KNOB_GROUPS as group}
+                  <div class="knob-group">
+                    <h4>{group.title}</h4>
+                    <p class="knob-blurb">{group.blurb}</p>
+                    {#each group.knobs as knob}
+                      <label class="slider-row">
+                        <span class="slider-label">{knob.label}</span>
+                        <span class="slider-value" class:changed={tunables[knob.key] !== TUNABLE_DEFAULTS[knob.key]}>
+                          {knob.step < 1 ? tunables[knob.key].toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : tunables[knob.key]}{knob.unit ? ` ${knob.unit}` : ''}
+                        </span>
+                        <input type="range" min={knob.min} max={knob.max} step={knob.step} bind:value={tunables[knob.key]} />
+                        <span class="slider-hint">{knob.hint}</span>
+                      </label>
+                    {/each}
+                  </div>
+                {/each}
+                <button class="geolife-load" onclick={resetTunables} disabled={tunablesChanged.length === 0}>
+                  Reset {tunablesChanged.length || 'all'} to defaults
+                </button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1241,7 +1372,6 @@
                   junction-anchored chains, and every boundary carries the reason
                   it was cut there.
                 </p>
-                <MethodIllustration proximity={proximityThreshold} minTracks={minActivities} {minSectionLength} />
                 <div class="preset-chips">
                   {#each Object.keys(PRESETS) as key}
                     <button
@@ -1269,6 +1399,53 @@
                   <input type="range" min="2" max="10" step="1" bind:value={minActivities} oninput={onSliderChange} />
                   <span class="slider-hint">Activities needed to form a section</span>
                 </label>
+                <label class="slider-row">
+                  <span class="slider-label">Max section length</span>
+                  <span class="slider-value">{maxSectionLength} m</span>
+                  <input type="range" min="500" max="50000" step="500" bind:value={maxSectionLength} oninput={onSliderChange} />
+                  <span class="slider-hint">Longest section before it is just a route</span>
+                </label>
+                <label class="slider-row">
+                  <span class="slider-label">Divergence threshold</span>
+                  <span class="slider-value">{divergenceThreshold.toFixed(2)}</span>
+                  <input type="range" min="0" max="1" step="0.01" bind:value={divergenceThreshold} oninput={onSliderChange} />
+                  <span class="slider-hint">How far traffic must part before the line is cut</span>
+                </label>
+                <label class="toggle-row">
+                  <input type="checkbox" bind:checked={poolSports} />
+                  <span class="slider-label">Pool sports</span>
+                  <span class="slider-hint">Cut once across all sports, label each section afterwards</span>
+                </label>
+
+                <button class="panel-toggle nested" onclick={() => advancedCollapsed = !advancedCollapsed}>
+                  <span class="panel-chevron">{advancedCollapsed ? '▸' : '▾'}</span>
+                  <span>Detector constants{tunablesChanged.length ? ` (${tunablesChanged.length} changed)` : ''}</span>
+                </button>
+                {#if !advancedCollapsed}
+                  <p class="mode-description">
+                    Every free constant the detector has. Each default sits on a measured
+                    plateau, so moving one should change little until it leaves the plateau.
+                  </p>
+                  {#each KNOB_GROUPS as group}
+                    <div class="knob-group">
+                      <h4>{group.title}</h4>
+                      <p class="knob-blurb">{group.blurb}</p>
+                      {#each group.knobs as knob}
+                        <label class="slider-row">
+                          <span class="slider-label">{knob.label}</span>
+                          <span class="slider-value" class:changed={tunables[knob.key] !== TUNABLE_DEFAULTS[knob.key]}>
+                            {knob.step < 1 ? tunables[knob.key].toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : tunables[knob.key]}{knob.unit ? ` ${knob.unit}` : ''}
+                          </span>
+                          <input type="range" min={knob.min} max={knob.max} step={knob.step} bind:value={tunables[knob.key]} />
+                          <span class="slider-hint">{knob.hint}</span>
+                        </label>
+                      {/each}
+                    </div>
+                  {/each}
+                  <button class="geolife-load" onclick={resetTunables} disabled={tunablesChanged.length === 0}>
+                    Reset {tunablesChanged.length || 'all'} to defaults
+                  </button>
+                {/if}
               </div>
             {/if}
           </div>
@@ -1725,6 +1902,44 @@
   }
 
   /* --- Drop zone (pre-analysis) --- */
+  /* OSM has no dark style. Inverting the tile pane gets close enough,
+     and the filter is scoped to the tiles so traces, sections and
+     boundary pins keep their own colours. */
+  :global(.dark-tiles .leaflet-tile-pane) {
+    filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.7);
+  }
+
+  .knob-group { margin: 0.75rem 0 0.25rem; }
+  .knob-group h4 {
+    margin: 0 0 0.1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    opacity: 0.85;
+  }
+  .knob-blurb {
+    margin: 0 0 0.5rem;
+    font-size: 0.72rem;
+    opacity: 0.55;
+  }
+  .slider-value.changed {
+    color: var(--accent, #6ea8fe);
+    font-weight: 600;
+  }
+  .panel-toggle.nested {
+    font-size: 0.82rem;
+    opacity: 0.85;
+    margin-top: 0.5rem;
+  }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin: 0.4rem 0;
+  }
+  .toggle-row .slider-hint { flex-basis: 100%; }
+
   .geolife {
     display: flex;
     flex-direction: column;
