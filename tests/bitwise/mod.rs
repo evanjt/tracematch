@@ -6,14 +6,22 @@
 //! order, fails. Run-to-run determinism is asserted in-process, so a
 //! parallelism regression surfaces without a baseline.
 //!
-//! After an INTENTIONAL output change, re-baseline with
+//! What each scenario cost is recorded in the same golden and bounded by a
+//! band, so a cold-path slowdown fails the same gate the output does. See
+//! `baseline`.
+//!
+//! After an INTENTIONAL output or cost change, re-baseline with
 //! `TRACEMATCH_BITWISE_REBASE=1`.
 
 #![allow(dead_code)]
 
+pub mod baseline;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
+
+use baseline::Band;
 
 use tracematch::sections::FrequentSection;
 use tracematch::{
@@ -161,9 +169,10 @@ pub fn fold(
     .catalogue
 }
 
-/// Run the three scenarios and compare their digests with `golden_path`, or
-/// record them there when it is absent or a rebase is requested.
-pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
+/// Run the three scenarios and compare their digests and costs with
+/// `golden_path`, or record them there when it is absent or a rebase is
+/// requested.
+pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
     let config = SectionConfig::default();
     let n = c.tracks.len();
     assert!(
@@ -173,9 +182,14 @@ pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
         shape.bulk_base
     );
     let mut lines: Vec<String> = Vec::new();
+    // The corpus is already in memory and stays there, so anchor here and let
+    // the peak report what folding it costs on top.
+    baseline::anchor_peak();
 
     // A: full cold fold, twice in-process. Equal digests prove run-to-run
-    // determinism (including under rayon) with no baseline needed.
+    // determinism (including under rayon) with no baseline needed. The first
+    // catalogue is released before the second fold, so holding both does not
+    // show up as the fold's own memory.
     let all_ids: Vec<&str> = c.tracks.iter().map(|(id, _)| id.as_str()).collect();
     let t = Instant::now();
     let cold = fold(
@@ -186,7 +200,10 @@ pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
         c,
         &config,
     );
-    let cold_ms = t.elapsed().as_millis();
+    let cold_ms = t.elapsed().as_millis() as u64;
+    let cold_digest = catalogue_digest(&cold);
+    let cold_len = cold.len();
+    drop(cold);
     let again = fold(
         &mut SectionEvidenceCache::new(),
         &[],
@@ -196,18 +213,14 @@ pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
         &config,
     );
     assert_eq!(
-        catalogue_digest(&cold),
+        cold_digest,
         catalogue_digest(&again),
         "two identical cold folds diverged within one process: \
          nondeterminism, look at parallel or iteration order first"
     );
-    println!(
-        "A cold {} activities: {} sections, {} ms",
-        n,
-        cold.len(),
-        cold_ms
-    );
-    lines.push(format!("A {:016x}", catalogue_digest(&cold)));
+    drop(again);
+    println!("A cold {n} activities: {cold_len} sections, {cold_ms} ms");
+    lines.push(format!("A {cold_digest:016x}"));
 
     // B: progressive cold-to-warm. Cold over the head, then the tail one at
     // a time, digest after every add.
@@ -219,27 +232,22 @@ pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
         .collect();
     let mut catalogue = fold(&mut cache, &[], &c.tracks[..split], &head_ids, c, &config);
     lines.push(format!("B_cold {:016x}", catalogue_digest(&catalogue)));
-    let mut add_ms: Vec<u128> = Vec::new();
+    let mut add_ms: Vec<u64> = Vec::new();
     for i in 0..shape.warm_adds {
         let pool = &c.tracks[..split + i + 1];
         let new_id = [c.tracks[split + i].0.as_str()];
         let existing = catalogue.clone();
         let t = Instant::now();
         catalogue = fold(&mut cache, &existing, pool, &new_id, c, &config);
-        add_ms.push(t.elapsed().as_millis());
+        add_ms.push(t.elapsed().as_millis() as u64);
         lines.push(format!(
             "B_add_{:02} {:016x}",
             i + 1,
             catalogue_digest(&catalogue)
         ));
     }
-    let mut sorted = add_ms.clone();
-    sorted.sort_unstable();
-    println!(
-        "B warm adds: mean {} ms, p95 {} ms",
-        add_ms.iter().sum::<u128>() / add_ms.len() as u128,
-        sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]
-    );
+    let (add_median_ms, add_p95_ms) = median_and_p95(&add_ms);
+    println!("B warm adds: median {add_median_ms} ms, p95 {add_p95_ms} ms");
 
     // C: bulk backfill, the second-user shape. Cold over the base, everything
     // else in one fold.
@@ -262,39 +270,30 @@ pub fn run(c: &Corpus, shape: Shape, golden_path: &Path) {
         .collect();
     let t = Instant::now();
     let bulk = fold(&mut cache, &base, &c.tracks, &rest_ids, c, &config);
+    let bulk_ms = t.elapsed().as_millis() as u64;
     println!(
-        "C bulk {} over {}: {} sections, {} ms",
+        "C bulk {} over {}: {} sections, {bulk_ms} ms",
         rest_ids.len(),
         shape.bulk_base,
-        bulk.len(),
-        t.elapsed().as_millis()
+        bulk.len()
     );
     lines.push(format!("C {:016x}", catalogue_digest(&bulk)));
 
-    let current = lines.join("\n") + "\n";
-    let rebase = std::env::var("TRACEMATCH_BITWISE_REBASE").is_ok_and(|v| v == "1");
-    match std::fs::read_to_string(golden_path) {
-        Ok(golden) if !rebase => {
-            let want: Vec<&str> = golden.lines().collect();
-            let got: Vec<&str> = current.lines().collect();
-            for (w, g) in want.iter().zip(got.iter()) {
-                assert_eq!(
-                    w, g,
-                    "bitwise divergence from the golden baseline. If this \
-                     change is INTENTIONAL, rerun with \
-                     TRACEMATCH_BITWISE_REBASE=1"
-                );
-            }
-            assert_eq!(want.len(), got.len(), "scenario count changed");
-            println!("golden baseline matched: {} digests", got.len());
-        }
-        _ => {
-            std::fs::write(golden_path, &current).expect("write golden baseline");
-            println!(
-                "golden baseline {} at {}",
-                if rebase { "rewritten" } else { "recorded" },
-                golden_path.display()
-            );
-        }
-    }
+    let measured = [
+        ("perf_cold_ms", cold_ms),
+        ("perf_add_median_ms", add_median_ms),
+        ("perf_add_p95_ms", add_p95_ms),
+        ("perf_bulk_ms", bulk_ms),
+        ("perf_peak_bytes", baseline::peak_rise_bytes()),
+    ];
+    baseline::check(golden_path, &lines, &measured, &band);
+}
+
+/// Median and p95 of a set of timings, both by nearest rank.
+pub fn median_and_p95(ms: &[u64]) -> (u64, u64) {
+    assert!(!ms.is_empty(), "no timings to summarise");
+    let mut sorted = ms.to_vec();
+    sorted.sort_unstable();
+    let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    (sorted[sorted.len() / 2], p95)
 }

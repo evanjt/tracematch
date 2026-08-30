@@ -21,3 +21,8 @@ B_add_18 4c9154ced4bee3f7
 B_add_19 4c9154ced4bee3f7
 B_add_20 959c153f679da0f5
 C 959c153f679da0f5
+perf_cold_ms 284
+perf_add_median_ms 86
+perf_add_p95_ms 134
+perf_bulk_ms 260
+perf_peak_bytes 17168078
