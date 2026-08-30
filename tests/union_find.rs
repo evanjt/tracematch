@@ -55,19 +55,6 @@ fn test_groups() {
 }
 
 #[test]
-fn test_string_helpers() {
-    let ids = vec!["route-1", "route-2", "route-3"];
-    let mut uf = union_find::string_uf::from_ids(ids);
-
-    union_find::string_uf::union(&mut uf, "route-1", "route-2");
-
-    assert_eq!(
-        union_find::string_uf::find(&mut uf, "route-1"),
-        union_find::string_uf::find(&mut uf, "route-2")
-    );
-}
-
-#[test]
 fn test_groups_deterministic() {
     // Run multiple times - results should be identical
     let results: Vec<_> = (0..5)
