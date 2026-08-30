@@ -1042,7 +1042,7 @@ fn build_coverage_grid(
     seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
-    lift_memo: &mut HashMap<String, Vec<(usize, usize)>>,
+    lift_memo: &mut LiftMemo,
 ) -> CoverageGrid {
     build_coverage_grid_from(None, tracks, seconds, cell_size_m, tun, lift_memo)
 }
@@ -1058,7 +1058,7 @@ fn build_coverage_grid_from(
     seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
-    lift_memo: &mut HashMap<String, Vec<(usize, usize)>>,
+    lift_memo: &mut LiftMemo,
 ) -> CoverageGrid {
     let ref_lat: f64 = {
         // Summed in sorted order: float addition is not permutation
@@ -1089,10 +1089,22 @@ fn build_coverage_grid_from(
         .iter()
         .enumerate()
         .map(|(i, (id, pts))| {
-            lift_memo
-                .entry((*id).to_string())
-                .or_insert_with(|| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
-                .clone()
+            // The filter `lift_spans_tuned` applies to its own argument,
+            // hoisted so the key describes the stream the call will read
+            // rather than the one it was handed.
+            let secs = seconds
+                .get(i)
+                .copied()
+                .filter(|s: &&[f64]| s.len() == pts.len());
+            let stream = secs.map(<[f64]>::len);
+            match lift_memo.get(*id) {
+                Some((scanned, spans)) if *scanned == stream => spans.clone(),
+                _ => {
+                    let spans = lift_spans_tuned(pts, secs, tun);
+                    lift_memo.insert((*id).to_string(), (stream, spans.clone()));
+                    spans
+                }
+            }
         })
         .collect();
     let lift = rescue_confirmed(candidates, tracks, tun);
@@ -6298,7 +6310,9 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 /// On-disk layout version of [`SectionEvidenceCache`]. Bump when the stored
 /// per-cluster shape changes so a persisted blob from an older build is
 /// recognised as stale and the engine cold-rebatches instead of trusting it.
-const EVIDENCE_CACHE_VERSION: u32 = 3;
+// 4: the lift-candidate memo is keyed by track and stream, not track alone,
+// so a cache written before that carries entries a timed fold must not read.
+const EVIDENCE_CACHE_VERSION: u32 = 4;
 
 /// Persisted per-(sport, geo-cluster) evidence backing
 /// [`detect_sections_unified_incremental_cached`]. The engine holds one across
@@ -6327,16 +6341,20 @@ pub struct SectionEvidenceCache {
 /// cache so a routine add pays only for the ground it touched. Every entry is
 /// a pure function of its key; track data is immutable per id (the engine
 /// drops the whole cache when a track's GPS changes) and the tunables are
-/// fixed for a cache's lifetime. Entries for supernode shapes that stop
+/// fixed for a cache's lifetime. A track's time stream is held to that same
+/// contract, but it is fetched separately and arrives after the points, so the
+/// one leaf that reads it keys on whether it had one ([`LiftKey`]) and not on
+/// the id alone. Entries for supernode shapes that stop
 /// occurring linger until the cache is dropped: the population is bounded by
 /// the distinct configurations the evidence has actually taken, and the
 /// engine-level cache invalidation is the reset.
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct LeafMemos {
-    /// Per-track lift candidate spans ([`lift_spans_tuned`]), keyed by
-    /// activity id. The cross-track descent rescue is recomputed per rebuild
-    /// (bbox-gated, and free while no member carries a candidate).
-    lift_candidates: HashMap<String, Vec<(usize, usize)>>,
+    /// Per-track lift candidate spans ([`lift_spans_tuned`]), stamped with the
+    /// stream the scan read (see [`LiftMemo`]). The cross-track descent rescue
+    /// is recomputed per rebuild (bbox-gated, and free while no member carries
+    /// a candidate).
+    lift_candidates: LiftMemo,
     /// Interned supernode cell sets: full-equality mapping from the sorted
     /// cell list to a stable small id, so per-track keys stay exact without
     /// hashing the whole cell list per track. Append-only between sweeps;
@@ -6408,6 +6426,25 @@ struct LeafMemos {
     /// spares a drawn line the point scan of every track in the cluster.
     track_bounds: HashMap<String, (f64, f64, f64, f64)>,
 }
+
+/// Per-track lift candidate spans, each stamped with the stream it was
+/// scanned from: the length where one covered every point, `None` where none
+/// did, which is the state [`lift_spans_tuned`] reduces a ragged one to
+/// itself. A track whose stamp disagrees is rescanned and replaces its entry,
+/// so the memo holds one row per track rather than one per stream it has seen.
+///
+/// Every other leaf here keys on the activity id alone, because a track's
+/// points are immutable per id and the holder drops the whole cache when they
+/// change. A stream is held to that same contract but does not arrive with the
+/// points: the ingest fetches streams in a second pass over the activities that
+/// landed, and an upgraded install backfills them later still. Without the
+/// stamp, the first fold after a stream arrives is answered from the untimed
+/// verdict, and the cache that holds it outlives the process. The stamp is a
+/// length and not a digest of the values because hashing every stream on every
+/// rebuild costs more than the scan it saves, and because a stream that is
+/// rewritten in place without dropping the cache would break this leaf exactly
+/// as rewriting a track's points breaks the others.
+type LiftMemo = HashMap<String, (Option<usize>, Vec<(usize, usize)>)>;
 
 /// Complete input fingerprint of one [`track_portion`] call: the activity,
 /// the supernode's interned cell set, the track's lift-free keep ranges,
@@ -7267,6 +7304,93 @@ mod tests {
         assert_eq!(fresh.keep, cold.keep);
         assert_eq!(fresh.keep, warm.keep);
         assert!(memo.contains_key("up") && memo.contains_key("flat"));
+    }
+
+    #[test]
+    fn a_time_stream_arriving_after_the_first_fold_is_not_answered_untimed() {
+        // Streams reach the engine after the points do: the ingest fetches
+        // them in a second pass, and an upgraded install backfills them later
+        // still. A memo keyed by track alone answers the second fold from the
+        // first fold's untimed verdict and keeps doing so for the life of the
+        // cache, which outlives the process.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 0.7);
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
+        let timed: Vec<&[f64]> = vec![secs.as_slice()];
+
+        let fresh_untimed =
+            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let fresh_timed = build_coverage_grid(
+            &tracks,
+            &timed,
+            100.0,
+            &Tunables::DEFAULT,
+            &mut HashMap::new(),
+        );
+        assert_ne!(
+            fresh_untimed.keep, fresh_timed.keep,
+            "the fixture must disagree timed and untimed or it tests nothing: \
+             steep and straight enough to be carried ground by geometry, timed \
+             at hiking pace"
+        );
+
+        let mut memo = HashMap::new();
+        build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        let warm = build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(
+            warm.keep, fresh_timed.keep,
+            "the stream arrived and the veto still ruled on the untimed track"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_goes_away_is_not_answered_from_the_timed_memo() {
+        // The other direction, which a corrupt or dropped row produces: a
+        // fold that no longer has the stream must not keep the timed verdict.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 0.7);
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
+        let timed: Vec<&[f64]> = vec![secs.as_slice()];
+
+        let fresh_untimed =
+            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let mut memo = HashMap::new();
+        build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
+        let warm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(warm.keep, fresh_untimed.keep);
+    }
+
+    #[test]
+    fn a_stream_that_does_not_cover_every_point_keys_as_no_stream() {
+        // `lift_spans_tuned` drops a stream whose length disagrees with the
+        // points, so that fold IS the untimed one and must share its entry
+        // rather than mint a second.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 0.7);
+        let short: Vec<&[f64]> = vec![&secs[..40]];
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
+
+        let mut memo = HashMap::new();
+        let untimed = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
+        let partial = build_coverage_grid(&tracks, &short, 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(untimed.keep, partial.keep);
+        assert_eq!(memo.len(), 1, "a dropped stream is not a second input");
+    }
+
+    #[test]
+    fn repeating_a_fold_with_the_same_stream_still_hits_the_memo() {
+        // The re-key must not defeat the memo it is keying: the same track
+        // under the same stream is one entry, however many folds ask for it.
+        let pts = climb(9.0e-5, 2.6, false, 80);
+        let secs = times_at(&pts, 0.7);
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
+        let timed: Vec<&[f64]> = vec![secs.as_slice()];
+
+        let mut memo = HashMap::new();
+        build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
+        build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
+        build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
+        assert_eq!(memo.len(), 1);
     }
 
     #[test]
