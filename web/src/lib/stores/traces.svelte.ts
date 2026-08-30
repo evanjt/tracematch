@@ -1,5 +1,11 @@
 import { get as idbGet, set as idbSet, del as idbDel, keys as idbKeys } from 'idb-keyval';
-import type { GpsPoint, RouteSignature, RouteGroup, FrequentSection } from '$lib/wasm/types';
+import type {
+  BoundaryRecord,
+  FrequentSection,
+  GpsPoint,
+  RouteGroup,
+  RouteSignature,
+} from '$lib/wasm/types';
 
 export interface StoredTrace {
   id: string;
@@ -15,8 +21,15 @@ export interface AnalysisResult {
   signatures: RouteSignature[];
   groups: RouteGroup[];
   sections: FrequentSection[];
+  boundaries: BoundaryRecord[];
   analyzedAt: number;
+  schemaVersion: number;
 }
+
+// A cached catalogue carries no detector identity of its own, so a run
+// from a removed detector is indistinguishable from a current one on the
+// next visit. Stamp it, and discard anything that does not match.
+export const ANALYSIS_SCHEMA_VERSION = 2;
 
 const TRACES_PREFIX = 'trace:';
 const ANALYSIS_KEY = 'analysis';
@@ -60,7 +73,12 @@ class TraceStore {
 
       console.time('[tracematch] idb:load-analysis');
       const saved = await idbGet(ANALYSIS_KEY);
-      if (saved) this.analysis = saved;
+      if (saved?.schemaVersion === ANALYSIS_SCHEMA_VERSION) {
+        this.analysis = saved;
+      } else if (saved) {
+        // Produced by a detector that no longer exists.
+        await idbDel(ANALYSIS_KEY);
+      }
       console.timeEnd('[tracematch] idb:load-analysis');
     } finally {
       this.loading = false;

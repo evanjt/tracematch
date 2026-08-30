@@ -10,28 +10,27 @@
  * populated at container start (see docker-compose.yml).
  */
 
-import type { FrequentSection, GpsPoint, RouteGroup, RouteSignature } from './types';
+import type {
+  BoundaryRecord,
+  FrequentSection,
+  GpsPoint,
+  RouteGroup,
+  RouteSignature,
+} from './types';
 import init, {
   createSignature,
   groupRoutesWithProgress,
-  detectSectionsWithProgress,
-  detectSectionsFlowGraph,
-  detectSectionsCorridor,
+  detectSectionsUnified,
 } from './pkg/tracematch_wasm.js';
 
 // Map raw phase strings from the Rust library to human-readable labels
 // for the progress overlay. Falls back to the raw string when unknown.
 //
-// The `building_rtrees` / `finding_overlaps` keys are retained from the
-// legacy pairwise pipeline so the Rust→JS protocol stays stable, but
-// section detection now uses density-grid clustering — the labels reflect
-// what the algorithm actually does (rasterise tracks into cells, then
-// assemble clusters into candidate sections).
+// Grouping is the only phase that reports progress. The unified
+// detector's batch entry point emits nothing, so detection is
+// indeterminate rather than counted.
 const PHASE_LABELS: Record<string, string> = {
   comparing_pairs: 'Comparing route pairs',
-  building_rtrees: 'Finding dense regions',
-  finding_overlaps: 'Assembling sections',
-  postprocessing: 'Post-processing sections',
 };
 
 function labelFor(phase: string): string {
@@ -53,7 +52,6 @@ export type AnalyseRequest = {
   requestId: number;
   traces: { id: string; points: GpsPoint[]; sportType: string }[];
   sectionConfig: string;
-  detectionMode?: 'density' | 'flow' | 'corridor';
 };
 
 export type WorkerResponse =
@@ -64,6 +62,7 @@ export type WorkerResponse =
       signatures: RouteSignature[];
       groups: RouteGroup[];
       sections: FrequentSection[];
+      boundaries: BoundaryRecord[];
     }
   | { type: 'analyse:err'; requestId: number; message: string };
 
@@ -116,32 +115,24 @@ async function handleAnalyse(req: AnalyseRequest) {
     console.log(`[worker] ${groups.length} groups`);
 
     let sections: FrequentSection[] = [];
+    let boundaries: BoundaryRecord[] = [];
     if (tracks.length >= 3) {
       progress(req.requestId, 'Serializing tracks for section detection', 0, 0);
       console.time('[worker] sections');
       const tracksJson = JSON.stringify(tracks);
       const sportTypesJson = JSON.stringify(sportTypes);
-      const groupsJson = JSON.stringify(groups);
       console.log(`[worker] tracks JSON: ${(tracksJson.length / 1024 / 1024).toFixed(1)} MB`);
-      progress(req.requestId, 'Preparing section detection', 0, 0);
 
-      if (req.detectionMode === 'flow') {
-        sections = detectSectionsFlowGraph(tracksJson, sportTypesJson, req.sectionConfig);
-      } else if (req.detectionMode === 'corridor') {
-        sections = detectSectionsCorridor(tracksJson, sportTypesJson, req.sectionConfig);
-      } else {
-        sections = detectSectionsWithProgress(
-          tracksJson,
-          sportTypesJson,
-          groupsJson,
-          req.sectionConfig,
-          (phase: string, current: number, total: number) => {
-            progress(req.requestId, labelFor(phase), current, total);
-          },
-        );
-      }
+      // The unified detector reports no progress, so this sits
+      // indeterminate until it returns. Seconds are empty: the GPX
+      // parser reads no <time>, and the lift veto falls back to
+      // geometry when the stream is absent.
+      progress(req.requestId, 'Detecting sections', 0, 0);
+      const detection = detectSectionsUnified(tracksJson, '[]', sportTypesJson, req.sectionConfig);
+      sections = detection.sections;
+      boundaries = detection.boundaries;
       console.timeEnd('[worker] sections');
-      console.log(`[worker] ${sections.length} sections detected`);
+      console.log(`[worker] ${sections.length} sections, ${boundaries.length} boundaries`);
     }
 
     progress(req.requestId, 'Finalizing results', 0, 0);
@@ -151,6 +142,7 @@ async function handleAnalyse(req: AnalyseRequest) {
       signatures,
       groups,
       sections,
+      boundaries,
     } satisfies WorkerResponse);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

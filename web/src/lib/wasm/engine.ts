@@ -1,4 +1,4 @@
-import type { GpsPoint, RouteSignature, RouteGroup, FrequentSection } from './types';
+import type { GpsPoint, RouteSignature, RouteGroup, FrequentSection, BoundaryRecord } from './types';
 import type { WorkerResponse } from './sectionWorker';
 
 // ---------------------------------------------------------------------------
@@ -13,7 +13,12 @@ let _worker: Worker | null = null;
 let _nextRequestId = 1;
 
 type PendingAnalyse = {
-  resolve: (result: { signatures: RouteSignature[]; groups: RouteGroup[]; sections: FrequentSection[] }) => void;
+  resolve: (result: {
+    signatures: RouteSignature[];
+    groups: RouteGroup[];
+    sections: FrequentSection[];
+    boundaries: BoundaryRecord[];
+  }) => void;
   reject: (err: Error) => void;
   onProgress?: (phase: string, current: number, total: number) => void;
 };
@@ -37,7 +42,12 @@ function getWorker(): Worker {
     if (msg.type === 'analyse:ok') {
       const handler = _pendingAnalyse.get(msg.requestId);
       _pendingAnalyse.delete(msg.requestId);
-      handler?.resolve({ signatures: msg.signatures, groups: msg.groups, sections: msg.sections });
+      handler?.resolve({
+        signatures: msg.signatures,
+        groups: msg.groups,
+        sections: msg.sections,
+        boundaries: msg.boundaries,
+      });
       return;
     }
 
@@ -67,8 +77,12 @@ export function runAnalysisAsync(
   traces: AnalysisTrace[],
   sectionConfig: string,
   onProgress?: (phase: string, current: number, total: number) => void,
-  detectionMode?: 'density' | 'flow' | 'corridor',
-): Promise<{ signatures: RouteSignature[]; groups: RouteGroup[]; sections: FrequentSection[] }> {
+): Promise<{
+  signatures: RouteSignature[];
+  groups: RouteGroup[];
+  sections: FrequentSection[];
+  boundaries: BoundaryRecord[];
+}> {
   return new Promise((resolve, reject) => {
     const worker = getWorker();
     const requestId = _nextRequestId++;
@@ -78,7 +92,6 @@ export function runAnalysisAsync(
       requestId,
       traces,
       sectionConfig,
-      detectionMode,
     });
   });
 }

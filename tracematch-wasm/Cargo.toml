@@ -15,3 +15,8 @@ serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
+
+# Own workspace root. The standalone tracematch checkout has no workspace,
+# but inside the veloq superproject an ancestor Cargo.toml claims this
+# directory, and cargo then refuses to build it here.
+[workspace]

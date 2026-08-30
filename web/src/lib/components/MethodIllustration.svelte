@@ -1,23 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { FrequentSection } from '../wasm/types';
+  import type { FrequentSection, UnifiedDetection } from '../wasm/types';
 
   let {
-    mode = 'corridor',
     proximity = 150,
     minTracks = 3,
-    minRoutes = 3,
     minSectionLength = 200,
   }: {
-    mode: 'density' | 'flow' | 'corridor';
     proximity?: number;
     minTracks?: number;
-    minRoutes?: number;
     minSectionLength?: number;
   } = $props();
 
-  const REF_LAT = 46.22;
-  const REF_LNG = 7.36;
+  // A round mid-latitude anchor. The traces below are synthetic, so this
+  // only sets the cos(lat) scale the projection works in.
+  const REF_LAT = 46.0;
+  const REF_LNG = 7.0;
   const LNG_SPAN = 0.04;
   const LAT_SPAN = 0.02;
 
@@ -32,9 +30,8 @@
   // to simulate realistic traffic volume for all detection methods.
   type Trace = { pts: [number, number][]; route: number };
 
-  // 8 route groups with multiple overlap zones (west, center, east junctions).
-  // Density grid responds to minRoutes 2-4, corridor to all params,
-  // flow graph detects junctions at default/strict proximity.
+  // 8 route groups with multiple overlap zones (west, centre, east junctions),
+  // enough shared traffic for the support floors to hold a chain together.
   const BASE_TRACES: { pts: [number, number][]; route: number }[] = [
     { pts: [[15,100],[60,92],[120,85],[200,80],[280,85],[340,92],[385,100]], route: 0 },
     { pts: [[15,101],[60,93],[120,86],[200,81],[215,55],[225,30],[230,10]], route: 1 },
@@ -92,10 +89,9 @@
     return { tracks, sportTypes };
   }
 
-  function buildConfig(overrides?: Partial<{ proximity: number; minTracks: number; minRoutes: number }>) {
+  function buildConfig(overrides?: Partial<{ proximity: number; minTracks: number }>) {
     const p = overrides?.proximity ?? proximity;
     const mt = overrides?.minTracks ?? minTracks;
-    const mr = overrides?.minRoutes ?? minRoutes;
     return JSON.stringify({
       proximityThreshold: p,
       minSectionLength,
@@ -111,13 +107,8 @@
         { name: 'long', minLength: 2000, maxLength: 50000, minActivities: Math.max(mt, 2) },
       ],
       preserveHierarchy: true,
-      jaccardThreshold: 0.5,
-      minRoutes: mr,
-      enableDensitySplits: false,
-      mergeDistanceMultiplier: 4.0,
-      minCellVisits: 3,
       divergenceThreshold: 0.10,
-      minCorridorTracks: mt,
+      poolSports: true,
     });
   }
 
@@ -130,25 +121,11 @@
 
     let sections: FrequentSection[] = [];
     try {
-      if (mode === 'corridor') {
-        sections = wasm.detectSectionsCorridor(tracksJson, sportTypesJson, buildConfig());
-      } else if (mode === 'flow') {
-        sections = wasm.detectSectionsFlowGraph(tracksJson, sportTypesJson, buildConfig());
-      } else {
-        // Relaxed match config for short illustration traces
-        const relaxedMatchConfig = JSON.stringify({
-          minRouteDistance: 100, endpointThreshold: 500, maxDistanceDiffRatio: 0.8,
-        });
-        const sigs: any[] = [];
-        for (const [id, pts] of tracks) {
-          const sig = wasm.createSignature(id, JSON.stringify(pts), relaxedMatchConfig);
-          if (sig) sigs.push(sig);
-        }
-        const groups = wasm.groupRoutes(JSON.stringify(sigs), relaxedMatchConfig);
-        sections = wasm.detectSectionsWithProgress(
-          tracksJson, sportTypesJson, JSON.stringify(groups), buildConfig(), () => {},
-        );
-      }
+      // No seconds: these traces are synthetic and carry no time.
+      const detection: UnifiedDetection = wasm.detectSectionsUnified(
+        tracksJson, '[]', sportTypesJson, buildConfig(),
+      );
+      sections = detection.sections;
     } catch (e) {
       console.warn('[MethodIllustration] detection error:', e);
       return [];
