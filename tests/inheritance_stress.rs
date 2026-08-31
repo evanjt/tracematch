@@ -19,7 +19,7 @@
 //!     runs and stable under input permutation.
 //!
 //! Pure tracematch, deterministic, synthetic only. No `synthetic` feature: every
-//! polyline is hand-built, so run with `--test b2_inheritance_stress` (which does
+//! polyline is hand-built, so run with `--test inheritance_stress` (which does
 //! not compile the corpus-backed suites).
 
 use tracematch::{
