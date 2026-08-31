@@ -198,6 +198,10 @@ fn boundary_reason_payloads_stay_snake_case() {
         reason_keys(BoundaryReason::PassEnd { requeued_cells: 1 }),
         vec!["kind", "requeued_cells"]
     );
+    assert_eq!(
+        reason_keys(BoundaryReason::DrawnPopulation { kept: 1, floor: 1 }),
+        vec!["floor", "kept", "kind"]
+    );
 }
 
 /// The variant tags themselves, which the site switches on.
@@ -236,6 +240,10 @@ fn boundary_reason_tags_match_the_sites_switch() {
     assert_eq!(
         tag(BoundaryReason::PassEnd { requeued_cells: 0 }),
         "pass_end"
+    );
+    assert_eq!(
+        tag(BoundaryReason::DrawnPopulation { kept: 0, floor: 0 }),
+        "drawn_population"
     );
 }
 

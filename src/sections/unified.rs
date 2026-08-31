@@ -255,6 +255,14 @@ pub enum BoundaryReason {
     /// at once. Rule 9's majority usage change measured as volume,
     /// where [`BoundaryReason::UsageChange`] measures it as pass class.
     TrafficCliff { thin: u32, thick: u32 },
+    /// The redraw onto one real pass admitted fewer of the candidate's
+    /// contributors than the floor that created it: the drawn line's
+    /// own population is under `min_activities`, so what the section
+    /// shows is not repeated ground. The section is dropped and its
+    /// cells go back to the orphan pool. Distinct from
+    /// [`BoundaryReason::LowSupport`], which cuts a thin stretch and
+    /// keeps the section on the remnant.
+    DrawnPopulation { kept: u32, floor: u32 },
     /// The section's one real pass ended here but its corridor's
     /// ground runs on. The ground beyond re-entered the candidate
     /// queue on its own merits; this record marks the seam between a
@@ -5294,6 +5302,26 @@ fn detect_for_cluster_with_grid(
                 ids.sort();
                 section.activity_ids = ids;
                 section.activity_portions = drawn_portions;
+            }
+            // Every floor the candidate cleared was measured on the
+            // pre-redraw evidence. The redraw swaps the consensus
+            // geometry for one real pass and rebuilds the population
+            // under a different admission rule, so the survivors can
+            // sit under the floor that created the section. Drop it
+            // before it claims its ground, or a section nobody will
+            // see still pushes its neighbours off.
+            if (section.activity_ids.len() as u32) < config.min_activities {
+                let mid = section.polyline[section.polyline.len() / 2];
+                records.push(BoundaryRecord {
+                    latitude: mid.latitude,
+                    longitude: mid.longitude,
+                    reason: BoundaryReason::DrawnPopulation {
+                        kept: section.activity_ids.len() as u32,
+                        floor: config.min_activities,
+                    },
+                });
+                orphaned.extend(node.cells.iter().copied());
+                continue;
             }
             info!(
                 "[Unified]   node cell0={:?} cells={} approx_len={:.0} portions={} → {} len={:.0} visits={}",
