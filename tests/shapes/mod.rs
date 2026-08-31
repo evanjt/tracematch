@@ -337,6 +337,34 @@ pub fn plain_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
         .collect()
 }
 
+/// A corridor whose thirds belong to different riders, joined through
+/// short overlaps so the traffic chain merges into one node: `through`
+/// riders cover all 2400 m, and three locals cover a 900 m third each.
+/// Every cell carries at least two riders and no third is minority
+/// ground, so the render is a through pass over the whole corridor, and
+/// no local covers half of it. The candidate qualifies on four
+/// contributors and the drawn line admits only the `through` riders.
+pub fn split_population_corridor(through: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    const LEGS: [(f64, f64); 3] = [(0.0, 900.0), (800.0, 1700.0), (1600.0, 2400.0)];
+    let mut out: Vec<(String, Vec<GpsPoint>)> = (0..through)
+        .map(|i| {
+            let path = densify(&[(0.0, 0.0), (2400.0, 0.0)]);
+            (
+                format!("through_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect();
+    for (i, &(x0, x1)) in LEGS.iter().enumerate() {
+        let path = densify(&[(x0, 0.0), (x1, 0.0)]);
+        out.push((
+            format!("local_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(through + i))),
+        ));
+    }
+    out
+}
+
 /// A long corridor no one traverses end to end: outing i covers a
 /// 1500 m window starting 110 m after outing i-1's, the way a valley
 /// path collects travellers who each join and leave at their own
