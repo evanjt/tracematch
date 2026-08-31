@@ -924,7 +924,7 @@ pub fn confirmed_lift_spans_tuned(
         .enumerate()
         .map(|(i, (_, pts))| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
         .collect();
-    rescue_confirmed(candidates, tracks, tun)
+    rescue_confirmed(candidates, tracks, tun, None)
 }
 
 /// The cross-track half of [`confirmed_lift_spans_tuned`]: drop any candidate
@@ -935,24 +935,33 @@ fn rescue_confirmed(
     candidates: Vec<Vec<(usize, usize)>>,
     tracks: &[(&str, &[GpsPoint])],
     tun: &Tunables,
+    bounds: Option<&mut BoundsMemo>,
 ) -> Vec<Vec<(usize, usize)>> {
+    // Before the boxes, not after: on a library with no elevation anywhere no
+    // track carries a candidate, and the pass owes nothing at all.
     if candidates.iter().all(|c| c.is_empty()) {
         return candidates;
     }
 
-    let bboxes: Vec<(f64, f64, f64, f64)> = tracks
-        .iter()
-        .map(|(_, pts)| {
-            let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-            for p in pts.iter() {
-                bb.0 = bb.0.min(p.latitude);
-                bb.1 = bb.1.max(p.latitude);
-                bb.2 = bb.2.min(p.longitude);
-                bb.3 = bb.3.max(p.longitude);
-            }
-            bb
-        })
-        .collect();
+    // A box is a pure function of the track's points, on the same contract as
+    // every other leaf: immutable per id, and the holder drops the whole cache
+    // when a track's GPS changes. Without the memo a warm add that touches one
+    // cluster re-walks every point of every track in it, which is the half of
+    // the veto that stayed invisible while the corpus was flat.
+    let bboxes: Vec<(f64, f64, f64, f64)> = match bounds {
+        Some(memo) => tracks
+            .iter()
+            .map(|(id, pts)| {
+                *memo
+                    .entry((*id).to_string())
+                    .or_insert_with(|| super::portions::track_bounds(pts))
+            })
+            .collect(),
+        None => tracks
+            .iter()
+            .map(|(_, pts)| super::portions::track_bounds(pts))
+            .collect(),
+    };
     let pad = tun.descent_match_m / 111_000.0 * 2.0;
 
     candidates
@@ -1042,9 +1051,9 @@ fn build_coverage_grid(
     seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
-    lift_memo: &mut LiftMemo,
+    leaves: &mut LeafMemos,
 ) -> CoverageGrid {
-    build_coverage_grid_from(None, tracks, seconds, cell_size_m, tun, lift_memo)
+    build_coverage_grid_from(None, tracks, seconds, cell_size_m, tun, leaves)
 }
 
 /// [`build_coverage_grid`] that folds only the tracks a previous grid has
@@ -1058,7 +1067,7 @@ fn build_coverage_grid_from(
     seconds: &[&[f64]],
     cell_size_m: f64,
     tun: &Tunables,
-    lift_memo: &mut LiftMemo,
+    leaves: &mut LeafMemos,
 ) -> CoverageGrid {
     let ref_lat: f64 = {
         // Summed in sorted order: float addition is not permutation
@@ -1097,17 +1106,19 @@ fn build_coverage_grid_from(
                 .copied()
                 .filter(|s: &&[f64]| s.len() == pts.len());
             let stream = secs.map(<[f64]>::len);
-            match lift_memo.get(*id) {
+            match leaves.lift_candidates.get(*id) {
                 Some((scanned, spans)) if *scanned == stream => spans.clone(),
                 _ => {
                     let spans = lift_spans_tuned(pts, secs, tun);
-                    lift_memo.insert((*id).to_string(), (stream, spans.clone()));
+                    leaves
+                        .lift_candidates
+                        .insert((*id).to_string(), (stream, spans.clone()));
                     spans
                 }
             }
         })
         .collect();
-    let lift = rescue_confirmed(candidates, tracks, tun);
+    let lift = rescue_confirmed(candidates, tracks, tun, Some(&mut leaves.track_bounds));
     let keep: Vec<Vec<(usize, usize)>> = tracks
         .iter()
         .enumerate()
@@ -3908,13 +3919,7 @@ fn detect_for_cluster(
     }
     let cell_size = cluster_cell_size(config);
     let mut leaves = LeafMemos::default();
-    let coverage = build_coverage_grid(
-        sport_tracks,
-        sport_seconds,
-        cell_size,
-        tun,
-        &mut leaves.lift_candidates,
-    );
+    let coverage = build_coverage_grid(sport_tracks, sport_seconds, cell_size, tun, &mut leaves);
     detect_for_cluster_with_grid(
         sport,
         sport_tracks,
@@ -6423,8 +6428,10 @@ struct LeafMemos {
     /// nothing, so a distant new activity cannot change the count.
     drawn: HashMap<DrawnKey, HashMap<String, Vec<SectionPortion>>>,
     /// Per-track raw bounding box, pure per track: the pre-filter that
-    /// spares a drawn line the point scan of every track in the cluster.
-    track_bounds: HashMap<String, (f64, f64, f64, f64)>,
+    /// spares a drawn line the point scan of every track in the cluster, and
+    /// the gate [`rescue_confirmed`] runs its cross-track descent search
+    /// behind.
+    track_bounds: BoundsMemo,
 }
 
 /// Per-track lift candidate spans, each stamped with the stream it was
@@ -6445,6 +6452,10 @@ struct LeafMemos {
 /// rewritten in place without dropping the cache would break this leaf exactly
 /// as rewriting a track's points breaks the others.
 type LiftMemo = HashMap<String, (Option<usize>, Vec<(usize, usize)>)>;
+
+/// Per-track raw bounding box by activity id: `(min_lat, max_lat, min_lng,
+/// max_lng)`, the same tuple [`super::portions::track_bounds`] returns.
+type BoundsMemo = HashMap<String, (f64, f64, f64, f64)>;
 
 /// Complete input fingerprint of one [`track_portion`] call: the activity,
 /// the supernode's interned cell set, the track's lift-free keep ranges,
@@ -7089,7 +7100,7 @@ fn recompute_cluster(
         &sport_seconds,
         cell_size,
         tun,
-        &mut leaves.lift_candidates,
+        leaves,
     );
     phase!("grid", t_grid);
     let ref_lat = coverage.ref_lat;
@@ -7202,8 +7213,20 @@ mod tests {
             .collect();
         let one: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice())];
         let two: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice()), ("b", b.as_slice())];
-        let g1 = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
-        let g2 = build_coverage_grid(&two, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let g1 = build_coverage_grid(
+            &one,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
+        let g2 = build_coverage_grid(
+            &two,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
         assert_eq!(
             g1.ref_lat, g2.ref_lat,
             "an add inside the band must not move the projection"
@@ -7251,13 +7274,7 @@ mod tests {
         let config = SectionConfig::default();
         let cell = cluster_cell_size(&config);
         let mut leaves = LeafMemos::default();
-        let coverage = build_coverage_grid(
-            &tracks,
-            &[],
-            cell,
-            &Tunables::DEFAULT,
-            &mut leaves.lift_candidates,
-        );
+        let coverage = build_coverage_grid(&tracks, &[], cell, &Tunables::DEFAULT, &mut leaves);
         let run = |leaves: &mut LeafMemos| {
             let mut idx = 0usize;
             let mut records = Vec::new();
@@ -7296,14 +7313,21 @@ mod tests {
             .map(|i| GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, 7.02, 500.0))
             .collect();
         let tracks: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice()), ("flat", &flat)];
-        let fresh =
-            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
-        let mut memo = HashMap::new();
+        let fresh = build_coverage_grid(
+            &tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
+        let mut memo = LeafMemos::default();
         let cold = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         let warm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         assert_eq!(fresh.keep, cold.keep);
         assert_eq!(fresh.keep, warm.keep);
-        assert!(memo.contains_key("up") && memo.contains_key("flat"));
+        assert!(
+            memo.lift_candidates.contains_key("up") && memo.lift_candidates.contains_key("flat")
+        );
     }
 
     #[test]
@@ -7318,14 +7342,19 @@ mod tests {
         let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
         let timed: Vec<&[f64]> = vec![secs.as_slice()];
 
-        let fresh_untimed =
-            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let fresh_untimed = build_coverage_grid(
+            &tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
         let fresh_timed = build_coverage_grid(
             &tracks,
             &timed,
             100.0,
             &Tunables::DEFAULT,
-            &mut HashMap::new(),
+            &mut LeafMemos::default(),
         );
         assert_ne!(
             fresh_untimed.keep, fresh_timed.keep,
@@ -7334,7 +7363,7 @@ mod tests {
              at hiking pace"
         );
 
-        let mut memo = HashMap::new();
+        let mut memo = LeafMemos::default();
         build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         let warm = build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
         assert_eq!(
@@ -7352,9 +7381,14 @@ mod tests {
         let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
         let timed: Vec<&[f64]> = vec![secs.as_slice()];
 
-        let fresh_untimed =
-            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
-        let mut memo = HashMap::new();
+        let fresh_untimed = build_coverage_grid(
+            &tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
+        let mut memo = LeafMemos::default();
         build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
         let warm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         assert_eq!(warm.keep, fresh_untimed.keep);
@@ -7370,11 +7404,15 @@ mod tests {
         let short: Vec<&[f64]> = vec![&secs[..40]];
         let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
 
-        let mut memo = HashMap::new();
+        let mut memo = LeafMemos::default();
         let untimed = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         let partial = build_coverage_grid(&tracks, &short, 100.0, &Tunables::DEFAULT, &mut memo);
         assert_eq!(untimed.keep, partial.keep);
-        assert_eq!(memo.len(), 1, "a dropped stream is not a second input");
+        assert_eq!(
+            memo.lift_candidates.len(),
+            1,
+            "a dropped stream is not a second input"
+        );
     }
 
     #[test]
@@ -7386,11 +7424,11 @@ mod tests {
         let tracks: Vec<(&str, &[GpsPoint])> = vec![("climb", pts.as_slice())];
         let timed: Vec<&[f64]> = vec![secs.as_slice()];
 
-        let mut memo = HashMap::new();
+        let mut memo = LeafMemos::default();
         build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
         build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
         build_coverage_grid(&tracks, &timed, 100.0, &Tunables::DEFAULT, &mut memo);
-        assert_eq!(memo.len(), 1);
+        assert_eq!(memo.lift_candidates.len(), 1);
     }
 
     #[test]
@@ -7403,7 +7441,7 @@ mod tests {
         down.reverse();
         let one: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice())];
         let both: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice()), ("down", &down)];
-        let mut memo = HashMap::new();
+        let mut memo = LeafMemos::default();
         let alone = build_coverage_grid(&one, &[], 100.0, &Tunables::DEFAULT, &mut memo);
         assert_ne!(
             alone.keep[0],
@@ -7415,6 +7453,106 @@ mod tests {
             rescued.keep[0],
             vec![(0usize, 79usize)],
             "a straight descent over the same line rescues the cached span"
+        );
+    }
+
+    #[test]
+    fn the_rescue_reads_its_track_boxes_from_the_memo() {
+        // The cross-track rescue rebuilt a bounding box per track on every
+        // fold, over the whole pool, unmemoised: a warm add that touched one
+        // cluster paid a full pass over that cluster's points. The box is pure
+        // per track, so it belongs in the leaves beside the candidate spans.
+        //
+        // Probed by poisoning: a stored box that puts the only descender in
+        // another hemisphere gates it out of the rescue, so the span it would
+        // have cleared stays carried ground. Fresh boxes cannot see the
+        // poison, which is what makes this discriminating.
+        let up = climb(9.0e-5, 5.0, false, 80);
+        let mut down = up.clone();
+        down.reverse();
+        let both: Vec<(&str, &[GpsPoint])> = vec![("up", up.as_slice()), ("down", &down)];
+
+        let mut leaves = LeafMemos::default();
+        let rescued = build_coverage_grid(&both, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert_eq!(
+            rescued.keep[0],
+            vec![(0usize, 79usize)],
+            "the fixture must rescue, or the poison below proves nothing"
+        );
+        assert_eq!(
+            leaves.track_bounds.get("down"),
+            Some(&super::super::portions::track_bounds(&down)),
+            "the rescue must leave its boxes in the leaves"
+        );
+
+        let mut poisoned = LeafMemos::default();
+        poisoned
+            .track_bounds
+            .insert("down".to_string(), (30.0, 30.1, 7.0, 7.1));
+        let gated = build_coverage_grid(&both, &[], 100.0, &Tunables::DEFAULT, &mut poisoned);
+        assert_ne!(
+            gated.keep[0],
+            vec![(0usize, 79usize)],
+            "the rescue recomputed the box instead of reading the memo"
+        );
+    }
+
+    #[test]
+    fn the_box_memo_does_not_change_what_the_veto_decides() {
+        // The memo may only ever change cost. Cold, warm and re-warmed folds
+        // must match a fold that has no memo at all, on ground where the veto
+        // both fires and is rescued.
+        let up = climb(9.0e-5, 5.0, false, 80);
+        let mut down = up.clone();
+        down.reverse();
+        let flat: Vec<GpsPoint> = (0..80)
+            .map(|i| GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, 7.02, 500.0))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![
+            ("up", up.as_slice()),
+            ("down", down.as_slice()),
+            ("flat", flat.as_slice()),
+        ];
+
+        let fresh = build_coverage_grid(
+            &tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
+        let mut leaves = LeafMemos::default();
+        let cold = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        let warm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        let rewarm = build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert_eq!(fresh.keep, cold.keep);
+        assert_eq!(fresh.keep, warm.keep);
+        assert_eq!(fresh.keep, rewarm.keep);
+        assert_eq!(
+            leaves.track_bounds.len(),
+            3,
+            "every track in the pool must be memoised, not only the candidates"
+        );
+    }
+
+    #[test]
+    fn a_pool_with_no_candidate_anywhere_builds_no_boxes() {
+        // The early exit is the reason this pass stayed invisible while the
+        // corpus was flat, and it has to stay in front of the boxes: a library
+        // with no elevation owes the rescue nothing, so it must not pay a pass
+        // over its points to find that out.
+        let a: Vec<GpsPoint> = (0..80)
+            .map(|i| GpsPoint::new(46.0 + 9.0e-5 * i as f64, 7.0))
+            .collect();
+        let b: Vec<GpsPoint> = (0..80)
+            .map(|i| GpsPoint::new(46.0 + 9.0e-5 * i as f64, 7.001))
+            .collect();
+        let tracks: Vec<(&str, &[GpsPoint])> = vec![("a", a.as_slice()), ("b", b.as_slice())];
+        let mut leaves = LeafMemos::default();
+        build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert!(
+            leaves.track_bounds.is_empty(),
+            "a flat pool built boxes for a rescue that had nothing to rescue"
         );
     }
 
@@ -7801,8 +7939,13 @@ mod tests {
             ("c", with_tail.as_slice()),
             ("x", cross.as_slice()),
         ];
-        let coverage =
-            build_coverage_grid(&tracks, &[], 100.0, &Tunables::DEFAULT, &mut HashMap::new());
+        let coverage = build_coverage_grid(
+            &tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        );
         let cell_set: HashSet<Cell> = with_tail
             .iter()
             .chain(braid.iter())
