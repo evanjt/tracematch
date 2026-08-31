@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { traceStore, ANALYSIS_SCHEMA_VERSION, type StoredTrace } from '$lib/stores/traces.svelte';
   import { parseGpx } from '$lib/parsers/gpx';
+  import { traceId } from '$lib/traceId';
   import { runAnalysisAsync } from '$lib/wasm/engine';
   import {
     fetchIndex,
@@ -822,7 +823,11 @@
             const text = await file.text();
             const parsed = parseGpx(text);
             const traces: StoredTrace[] = parsed.map((trace) => ({
-              id: crypto.randomUUID(),
+              // Derived from the points, so reading the same file twice
+              // replaces the trace instead of adding a second visit to the
+              // support floors. A multi-track GPX still yields one trace per
+              // block, each keyed to its own ground.
+              id: traceId(trace.points),
               name: trace.name,
               fileName: file.name,
               points: trace.points,
