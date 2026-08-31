@@ -1,7 +1,8 @@
 //! Contracts for the boundary records the detector emits beside its
 //! catalogue. `UsageChange`, `Fork`, and `LowSupport` are asserted in
 //! `unified_contracts.rs`; this file covers the remaining kinds
-//! (`Backoff`, `Trim`, and `NoSinglePass`), each on synthetic ground
+//! (`Backoff`, `Trim`, `NoSinglePass` and `DrawnPopulation`), each on
+//! synthetic ground
 //! built to provably produce it, and checks that the record explains
 //! what the catalogue shows.
 
@@ -393,5 +394,44 @@ fn a_distinct_populations_parallel_path_stands() {
             .iter()
             .any(|s| min_dist(&bank_mid, &s.polyline) < 40.0),
         "the distinct population's path must have its own line"
+    );
+}
+
+#[test]
+fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
+    // One rider covers the whole 2400 m corridor, three locals cover a
+    // third each. The candidate qualifies on four contributors and the
+    // render is the through pass, but no local covers half of it, so
+    // the drawn population is that rider alone.
+    let tracks = shapes::split_population_corridor(1);
+    let out = detect(&tracks);
+    assert!(
+        out.sections.is_empty(),
+        "a one-rider line must not stand: {:?}",
+        out.sections
+            .iter()
+            .map(|s| (&s.id, s.activity_ids.len()))
+            .collect::<Vec<_>>()
+    );
+
+    let rec = out
+        .boundaries
+        .iter()
+        .find(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. }))
+        .unwrap_or_else(|| panic!("no drawn-population record: {:?}", out.boundaries));
+    let BoundaryReason::DrawnPopulation { kept, floor } = rec.reason else {
+        unreachable!()
+    };
+    assert_eq!(kept, 1, "the through rider is the whole drawn population");
+    assert_eq!(
+        floor,
+        SectionConfig::default().min_activities,
+        "the record must name the floor it was measured against"
+    );
+    let mid = shapes::to_gps(1200.0, 0.0);
+    let at = GpsPoint::new(rec.latitude, rec.longitude);
+    assert!(
+        haversine_distance(&at, &mid) < 200.0,
+        "the record must sit on the dropped corridor"
     );
 }

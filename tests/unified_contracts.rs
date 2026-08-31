@@ -1603,6 +1603,79 @@ fn stub_contributors_are_not_claimed_by_the_drawn_line() {
     );
 }
 
+/// The redraw rebuilds the population under a different admission rule
+/// than the floors the candidate cleared, so the survivors can sit under
+/// the floor that created the section. A section below `min_activities`
+/// is not a section: it is dropped, and its ground goes back to the
+/// orphan pool.
+#[test]
+fn the_drawn_population_keeps_the_activity_floor() {
+    let tracks = shapes::split_population_corridor(1);
+    let config = config();
+
+    for s in detect(&tracks) {
+        assert!(
+            s.activity_ids.len() >= config.min_activities as usize,
+            "{} shows {} activities, under the floor of {}",
+            s.id,
+            s.activity_ids.len(),
+            config.min_activities
+        );
+    }
+}
+
+/// The floor is a floor, not a margin: a drawn population of exactly
+/// `min_activities` is a section and must survive.
+#[test]
+fn a_drawn_population_at_the_floor_is_kept() {
+    let tracks = shapes::split_population_corridor(2);
+
+    let main = detect(&tracks)
+        .into_iter()
+        .max_by(|a, b| {
+            a.distance_meters
+                .partial_cmp(&b.distance_meters)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("the corridor formed no section");
+    assert_eq!(
+        main.activity_ids.len(),
+        2,
+        "the drawn population is not the two through riders: {:?}",
+        main.activity_ids
+    );
+    assert!(
+        main.distance_meters > 2000.0,
+        "the through pass was not drawn end to end ({:.0} m)",
+        main.distance_meters
+    );
+}
+
+/// The floor applies to every corpus, not only the shape that found it,
+/// and the drop must not eat sections that were always populated.
+#[test]
+fn no_corpus_emits_a_section_under_the_activity_floor() {
+    let corpora: Vec<(&str, Tracks)> = vec![
+        ("oval_stem", shapes::oval_stem(6)),
+        ("lollipop", shapes::lollipop(6)),
+        ("cliff_tail", shapes::cliff_tail(10, 4)),
+        ("parallel_street", shapes::parallel_street(16, 5, 3)),
+        ("minority_braid", shapes::minority_braid(14, 5)),
+        ("grid_city", shapes::grid_city()),
+    ];
+    let floor = config().min_activities as usize;
+    for (name, tracks) in corpora {
+        for s in detect(&tracks) {
+            assert!(
+                s.activity_ids.len() >= floor,
+                "{name}/{}: {} activities, under the floor of {floor}",
+                s.id,
+                s.activity_ids.len()
+            );
+        }
+    }
+}
+
 // ------------------------------------ rule 7: ground is sport-agnostic
 
 /// Sports for a corpus: the first `runs` tracks are Run, the rest Ride.

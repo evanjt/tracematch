@@ -597,6 +597,7 @@
     trim:          { colour: '#4a9d8e', label: 'Trimmed' },
     no_single_pass:{ colour: '#a8748f', label: 'No single pass' },
     pass_end:      { colour: '#5c8fd6', label: 'Pass end' },
+    drawn_population: { colour: '#b06a3d', label: 'Drawn population' },
   };
 
   function boundaryDetail(reason: BoundaryReason): string {
@@ -617,6 +618,8 @@
         return `${reason.portions} portions, best penalty ${reason.best_penalty.toFixed(2)}`;
       case 'pass_end':
         return `${reason.requeued_cells} cells requeued`;
+      case 'drawn_population':
+        return `${reason.kept} on the drawn line, below a floor of ${reason.floor}`;
     }
   }
 
