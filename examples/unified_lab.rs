@@ -780,6 +780,7 @@ fn main() {
     let mut hyst_dissolve: Option<f64> = None;
     let mut hyst_recut: Option<f64> = None;
     let mut hyst_floor: Option<f64> = None;
+    let mut hyst_ratio: Option<f64> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -825,6 +826,10 @@ fn main() {
             }
             "--hyst-floor" => {
                 hyst_floor = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--hyst-ratio" => {
+                hyst_ratio = args.get(i + 1).and_then(|s| s.parse().ok());
                 i += 2;
             }
             "--sweep" => {
@@ -1416,12 +1421,14 @@ fn main() {
                 vis_idk_first: f64,
             }
 
-            // One replay at a given merge floor. Detection is already done, so
-            // this re-runs only the cheap hysteresis fold; both floors share the
-            // identical raw catalogues, so the raw churn is a shared baseline.
-            let run_replay = |floor: f64| -> ReplaySummary {
+            // One replay at a given merge floor and size ratio. Detection is
+            // already done, so this re-runs only the cheap hysteresis fold, and
+            // both arms share the identical raw catalogues, so the raw churn is
+            // a shared baseline.
+            let run_replay = |floor: f64, ratio: f64| -> ReplaySummary {
                 let mut params = hyst_params;
                 params.merge_mutual_floor = floor;
+                params.merge_size_ratio = ratio;
                 println!();
                 println!("--- merge_mutual_floor = {floor:.2} ---");
                 let mut state = HysteresisState::new(params);
@@ -1458,6 +1465,7 @@ fn main() {
                         &cands,
                         &IdentityParams {
                             merge_mutual_floor: floor,
+                            merge_size_ratio: ratio,
                         },
                     );
                     for decision in plan.decisions {
@@ -1683,11 +1691,15 @@ fn main() {
                 }
             };
 
-            let hi = hyst_floor.unwrap_or(0.4);
-            let off = run_replay(0.0);
-            let on = run_replay(hi);
+            // Neither knob has a corpus-confirmed value, so the on-arm takes
+            // whichever the caller named. --hyst-ratio alone sweeps the size
+            // guard with the floor left at its shipped 0.0.
+            let hi = hyst_floor.unwrap_or(if hyst_ratio.is_some() { 0.0 } else { 0.4 });
+            let hi_ratio = hyst_ratio.unwrap_or(0.0);
+            let off = run_replay(0.0, 0.0);
+            let on = run_replay(hi, hi_ratio);
             println!();
-            println!("=== merge_mutual_floor OFF (0.00) vs {hi:.2} ===");
+            println!("=== OFF (floor 0.00, ratio 0.00) vs floor {hi:.2}, ratio {hi_ratio:.2} ===");
             let row = |name: &str, a: String, b: String| {
                 println!("  {name:<24} {a:>12}  {b:>12}");
             };

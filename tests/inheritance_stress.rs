@@ -13,8 +13,10 @@
 //! (b) two long held neighbours fuse into one corridor,
 //! (c) the marginal-capture tangle: a candidate edged to a MARGINAL senior and
 //!     a DOMINANT junior. The agreement tier keeps an extent-agreeing match's
-//!     id at every floor; the hysteresis run and the opt-in
-//!     `merge_mutual_floor` cover the shapes without an exact match,
+//!     id at every floor, the hysteresis run and the opt-in
+//!     `merge_mutual_floor` cover the shapes without an exact match, and where
+//!     NEITHER prior agrees on the extent only the opt-in `merge_size_ratio`
+//!     stops the smaller one taking the corridor on age alone,
 //! (d) a 3-prior/3-candidate braid, asserting the plan is byte-identical across
 //!     runs and stable under input permutation.
 //!
@@ -228,6 +230,7 @@ fn corridor_fusion_senior_survives_junior_merges() {
         &[cand(z.clone(), 12)],
         &IdentityParams {
             merge_mutual_floor: 0.4,
+            ..IdentityParams::default()
         },
     );
     assert_eq!(
@@ -308,6 +311,7 @@ fn marginal_capture_corridor_keeps_its_exact_match_at_every_floor() {
             &[cand(long.clone(), 12)],
             &IdentityParams {
                 merge_mutual_floor: floor,
+                ..IdentityParams::default()
             },
         );
         println!(
@@ -332,6 +336,66 @@ fn marginal_capture_corridor_keeps_its_exact_match_at_every_floor() {
             "floor {floor}: the marginal senior folds into the corridor"
         );
     }
+}
+
+/// The (c3) variant with NO extent-agreeing prior, driven through the fold.
+/// Scenario: a marginal senior and a dominant junior both merely CONTAINED in
+/// one candidate, so the agreement tier cannot settle it and seniority alone
+/// hands the corridor to the smaller prior, tombstoning the section that
+/// actually described that ground. The size ratio is what separates them.
+/// Expected behaviour: with the ratio on, the dominant junior holds the
+/// corridor and is never tombstoned, and it holds through the debounce, not
+/// only on the first plan.
+#[test]
+fn marginal_capture_loses_the_corridor_to_the_dominant_junior_under_the_size_ratio() {
+    let long = north(46.0, 7.0, 120);
+    let short = long[..20].to_vec();
+    let most = long[..90].to_vec();
+
+    // Both mint in one step, so A takes the earlier ordinal and is the senior.
+    let run = |ratio: f64| -> (String, String, bool, bool) {
+        let mut state = HysteresisState::new(HysteresisParams {
+            merge_size_ratio: ratio,
+            ..HysteresisParams::default()
+        });
+        state.step(&[cand(short.clone(), 3), cand(most.clone(), 9)]);
+        let a = id_on_ground(&state, &short).expect("A visible");
+        let b = id_on_ground(&state, &most).expect("B visible");
+        assert_ne!(a, b, "ratio {ratio}: A and B are two sections");
+
+        // k + 2 steps of the fused corridor: past the debounce, so whoever won
+        // the plan has actually applied its re-cut and the loser has fired.
+        for _ in 0..(HysteresisParams::default().k + 2) {
+            state.step(&[cand(long.clone(), 12)]);
+        }
+        let a_holds_long = state
+            .ground_of(&a)
+            .is_some_and(|g| mutual_overlap(g, &long) >= 0.85);
+        (a.clone(), b.clone(), a_holds_long, state.is_tombstoned(&b))
+    };
+
+    println!("\n================ (c3) marginal capture through the fold ================");
+    let (a, b, a_holds_long, b_tombstoned) = run(0.0);
+    println!(
+        "default (ratio 0.0): A={a} holds the corridor = {a_holds_long}; B={b} tombstoned = {b_tombstoned}"
+    );
+    assert!(
+        a_holds_long && b_tombstoned,
+        "the shipped default is the capture: the marginal senior takes the corridor and the dominant junior dies"
+    );
+
+    let (a, b, a_holds_long, b_tombstoned) = run(0.4);
+    println!(
+        "ratio 0.4:           A={a} holds the corridor = {a_holds_long}; B={b} tombstoned = {b_tombstoned}"
+    );
+    assert!(
+        !a_holds_long,
+        "with the ratio the marginal senior must not end up holding the long corridor"
+    );
+    assert!(
+        !b_tombstoned,
+        "and the prior that described that ground must not be tombstoned"
+    );
 }
 
 /// The (c2) variant WITH an alternative home for the senior, driven through a
