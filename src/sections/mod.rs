@@ -195,78 +195,6 @@ impl std::str::FromStr for ScaleName {
     }
 }
 
-/// Scale preset for multi-scale section detection
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScalePreset {
-    /// Scale name
-    pub name: ScaleName,
-    /// Minimum section length for this scale (meters)
-    pub min_length: f64,
-    /// Maximum section length for this scale (meters)
-    pub max_length: f64,
-    /// Minimum activities required at this scale (can be lower for short sections)
-    pub min_activities: u32,
-}
-
-impl ScalePreset {
-    pub fn short() -> Self {
-        Self {
-            name: ScaleName::Short,
-            min_length: 100.0,
-            max_length: 500.0,
-            min_activities: 2,
-        }
-    }
-
-    pub fn medium() -> Self {
-        Self {
-            name: ScaleName::Medium,
-            min_length: 500.0,
-            max_length: 2000.0,
-            min_activities: 2,
-        }
-    }
-
-    pub fn long() -> Self {
-        Self {
-            name: ScaleName::Long,
-            min_length: 2000.0,
-            max_length: 5000.0,
-            min_activities: 3,
-        }
-    }
-
-    /// Extra long sections: 5km-50km (long cycling climbs, rail trails).
-    pub fn extra_long() -> Self {
-        Self {
-            name: ScaleName::ExtraLong,
-            min_length: 5_000.0,
-            max_length: 50_000.0,
-            min_activities: 3,
-        }
-    }
-
-    /// Ultra long sections: 50km-200km (century routes, multi-day corridors).
-    pub fn ultra_long() -> Self {
-        Self {
-            name: ScaleName::UltraLong,
-            min_length: 50_000.0,
-            max_length: 200_000.0,
-            min_activities: 3,
-        }
-    }
-
-    pub fn default_presets() -> Vec<Self> {
-        vec![
-            Self::short(),
-            Self::medium(),
-            Self::long(),
-            Self::extra_long(),
-        ]
-    }
-}
-
 /// Configuration for section detection
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,8 +215,6 @@ pub struct SectionConfig {
     pub detection_mode: DetectionMode,
     /// Include potential sections with only 1-2 activities as suggestions
     pub include_potentials: bool,
-    /// Scale presets for multi-scale detection (empty = single-scale with min/max_section_length)
-    pub scale_presets: Vec<ScalePreset>,
     /// Preserve hierarchical sections (don't deduplicate short sections inside longer ones)
     pub preserve_hierarchy: bool,
     /// Retained for stored configs. Two adjacent hot cells merge
@@ -374,7 +300,6 @@ impl Default for SectionConfig {
             sample_points: 50,
             detection_mode: DetectionMode::Discovery,
             include_potentials: true,
-            scale_presets: ScalePreset::default_presets(),
             preserve_hierarchy: false,
             jaccard_threshold: default_jaccard_threshold(),
             min_routes: default_min_routes(),
@@ -394,7 +319,6 @@ impl SectionConfig {
         Self {
             detection_mode: DetectionMode::Discovery,
             include_potentials: true,
-            scale_presets: ScalePreset::default_presets(),
             preserve_hierarchy: true,
             ..Default::default()
         }
@@ -406,7 +330,6 @@ impl SectionConfig {
             detection_mode: DetectionMode::Conservative,
             include_potentials: false,
             min_activities: 4,
-            scale_presets: vec![ScalePreset::medium(), ScalePreset::long()],
             preserve_hierarchy: false,
             ..Default::default()
         }
@@ -417,7 +340,6 @@ impl SectionConfig {
         Self {
             detection_mode: DetectionMode::Legacy,
             include_potentials: false,
-            scale_presets: vec![], // Empty = use min/max_section_length directly
             preserve_hierarchy: false,
             min_activities: 3,
             ..Default::default()
