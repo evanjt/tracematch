@@ -117,6 +117,14 @@ pub fn digest_lines(golden: &str) -> Vec<&str> {
     golden.lines().filter(|l| !l.starts_with(PREFIX)).collect()
 }
 
+/// Whether the golden's digest lines are not `digests`, so what it recorded
+/// was measured on other input. A cost compared across that is a corpus
+/// change read as a regression, and the caller re-derives instead.
+pub fn digests_differ(golden: &str, digests: &[String]) -> bool {
+    let recorded = digest_lines(golden);
+    recorded.len() != digests.len() || recorded.iter().zip(digests).any(|(r, d)| r != d)
+}
+
 /// `measured` as golden lines.
 pub fn lines(measured: &[(&str, u64)]) -> Vec<String> {
     measured
