@@ -923,6 +923,14 @@ impl HysteresisState {
         self.step_assign(next).0
     }
 
+    /// [`step_assign`](Self::step_assign) with no caller-side loss to report.
+    pub fn step_assign(
+        &mut self,
+        next: &[CandidateSection],
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.step_assign_guarded(next, &|_, _| false)
+    }
+
     /// [`step`](Self::step) that also returns, parallel to `next`, the visible
     /// stable id each candidate resolved to and its [`CandidateFate`]. Every
     /// candidate maps to exactly one visible id (a carry/split/merge target
@@ -934,9 +942,16 @@ impl HysteresisState {
     /// candidate's polyline, and the caller's payload must follow it. The pure
     /// layer's `s_<n>` id is the join key; the caller keeps the opaque
     /// `s_<ts>__<rand>` id it persists on the side.
-    pub fn step_assign(
+    ///
+    /// `loses(id, j)` is the caller's half of the agreement floor: whether
+    /// adopting candidate `j` under held id `id` would lose evidence the pure
+    /// layer cannot see, a member whose track no longer qualifies on the new
+    /// line. Asked only for a carry whose extents agree and whose passes
+    /// hold; a `true` makes it a material re-cut like a visit loss.
+    pub fn step_assign_guarded(
         &mut self,
         next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
         // An armed step runs at k = 1: the first decisive plan applies.
         let k = if std::mem::take(&mut self.decisive) {
@@ -1017,7 +1032,7 @@ impl HysteresisState {
         for (id, held) in old_visible {
             let carried_j = carried.get(id.as_str()).copied();
             let action = if let Some(j) = carried_j {
-                self.apply_carry(&id, &held, &next[j], k, &mut out)
+                self.apply_carry(&id, &held, &next[j], k, &mut out, || loses(&id, j))
             } else if let Some(reason) = retired.get(id.as_str()) {
                 self.apply_retire(&id, &held, reason, k, &mut out)
             } else {
@@ -1121,9 +1136,9 @@ impl HysteresisState {
     }
 
     /// Decide a carried section: fold visits immediately; adopt geometry now
-    /// when the extents agree and the batch counts no fewer passes over the
-    /// new line, otherwise debounce the re-cut and keep the old geometry
-    /// until it sustains `k`.
+    /// when the extents agree, the batch counts no fewer passes over the new
+    /// line and the caller reports no loss of its own, otherwise debounce
+    /// the re-cut and keep the old geometry until it sustains `k`.
     ///
     /// The visit floor is what makes agreement a free update. The overlap
     /// tolerance admits a line that grew by a lane-width's worth at each
@@ -1138,10 +1153,12 @@ impl HysteresisState {
         cand: &CandidateSection,
         k: u8,
         out: &mut StepOutcome,
+        loses: impl FnOnce() -> bool,
     ) -> HeldAction {
         let visits = cand.visit_count.max(held.visit_count);
         if mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement
             && cand.visit_count >= held.visit_count
+            && !loses()
         {
             // Extents agree and nothing is lost: adopt the batch geometry,
             // clear any debounce.
@@ -1963,6 +1980,39 @@ mod tests {
         assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
         assert_eq!(out.recut_applied, 0);
         assert!(state.pending_ids().is_empty());
+    }
+
+    /// The pure layer counts passes, the caller holds members. A caller that
+    /// reports an agreeing adopt would drop a member gets the same debounce
+    /// a visit loss gets: frozen, fired after k with a re-cut, never silent.
+    #[test]
+    fn a_guarded_agreement_is_a_re_cut_while_the_guard_holds() {
+        let p = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let moved: Vec<GpsPoint> = p[3..].to_vec();
+        let loses = |_: &str, _: usize| true;
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, r) = state.step_assign_guarded(&[cand(moved.clone(), 25)], &loses);
+            assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+            assert_eq!(out.recut_applied, 0);
+            assert_eq!(state.ground_of(&id), Some(p.as_slice()));
+        }
+        let (out, r) = state.step_assign_guarded(&[cand(moved.clone(), 25)], &loses);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 1);
+        assert_eq!(state.ground_of(&id), Some(moved.as_slice()));
+        // The guard is asked about the held id and the candidate's index.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let record = |id: &str, j: usize| {
+            asked.borrow_mut().push((id.to_string(), j));
+            false
+        };
+        let (out, r) = state.step_assign_guarded(&[cand(moved.clone(), 26)], &record);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 0);
+        assert_eq!(asked.borrow().as_slice(), &[(id.clone(), 0)]);
     }
 
     /// The same extent with the same or more visits stays a free update,
