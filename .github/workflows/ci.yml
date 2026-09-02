@@ -40,6 +40,11 @@ jobs:
       # from `tracematch::synthetic`, and only that feature compiles the module in.
       - name: Test (synthetic)
         run: cargo test --features synthetic
+      # The 2.0.0 tag failed at `cargo publish` because the tracked lockfile
+      # was stale, and nothing before the tag had asked. A dry run packages
+      # the crate the way the release does and refuses the same lockfile.
+      - name: Publish (dry run)
+        run: cargo publish --dry-run --locked
 
   # tracematch-wasm is its own workspace with its own lockfile, so the jobs
   # above never touch it. Only the Pages deploy built it before, and Pages
