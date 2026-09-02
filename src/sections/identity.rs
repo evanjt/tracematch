@@ -1109,9 +1109,28 @@ impl HysteresisState {
         self.tombstones.remove(id);
     }
 
+    /// Lower a visible id's held visit count after the caller removed `n`
+    /// passes from it: an activity deleted from the library. Without this the
+    /// next batch reads fewer passes on an unchanged line, which is the
+    /// signature of a re-cut, and the ledger would narrate one that never
+    /// happened. Unknown ids and over-drops are no-ops and saturate.
+    pub fn drop_visits(&mut self, id: &str, n: u32) {
+        if let Some(held) = self.visible.get_mut(id) {
+            held.visit_count = held.visit_count.saturating_sub(n);
+        }
+    }
+
     /// Decide a carried section: fold visits immediately; adopt geometry now
-    /// when the extents agree, otherwise debounce the re-cut and keep the old
-    /// geometry until it sustains `k`.
+    /// when the extents agree and the batch counts no fewer passes over the
+    /// new line, otherwise debounce the re-cut and keep the old geometry
+    /// until it sustains `k`.
+    ///
+    /// The visit floor is what makes agreement a free update. The overlap
+    /// tolerance admits a line that grew by a lane-width's worth at each
+    /// end, and a longer line is covered by fewer of the old passes, so an
+    /// "agreeing" adopt can shed a sixth of a section's history on one add.
+    /// A pass count is evidence attributed to the drawn line; a line that
+    /// loses evidence is a different cut, whatever the overlap says.
     fn apply_carry(
         &self,
         id: &str,
@@ -1121,14 +1140,16 @@ impl HysteresisState {
         out: &mut StepOutcome,
     ) -> HeldAction {
         let visits = cand.visit_count.max(held.visit_count);
-        let adopted = HeldSection {
-            polyline: cand.polyline.clone(),
-            visit_count: visits,
-            first_seen: held.first_seen,
-        };
-        if mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement {
-            // Extents agree: adopt the batch geometry, clear any debounce.
-            return HeldAction::Keep(adopted);
+        if mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement
+            && cand.visit_count >= held.visit_count
+        {
+            // Extents agree and nothing is lost: adopt the batch geometry,
+            // clear any debounce.
+            return HeldAction::Keep(HeldSection {
+                polyline: cand.polyline.clone(),
+                visit_count: visits,
+                first_seen: held.first_seen,
+            });
         }
         // Material re-cut: debounce, folding visits but freezing geometry. The
         // dissolve streak rides along untouched, so a marginal capture cannot
@@ -1138,7 +1159,14 @@ impl HysteresisState {
         if streak >= k {
             out.recut_applied += 1;
             out.recut_ids.push(id.to_string());
-            HeldAction::Keep(adopted)
+            // The count follows the geometry it fired with. Holding the old
+            // maximum would read the settled line as a fresh loss on the
+            // next step, and re-fire every k steps for ever.
+            HeldAction::Keep(HeldSection {
+                polyline: cand.polyline.clone(),
+                visit_count: cand.visit_count,
+                first_seen: held.first_seen,
+            })
         } else {
             let frozen = HeldSection {
                 polyline: held.polyline.clone(),
@@ -1896,6 +1924,83 @@ mod tests {
                 "id {id} must survive a single add"
             );
         }
+    }
+
+    /// An extent inside the agreement tolerance is not a free update when
+    /// the batch counts fewer passes over it: the tolerance lets a 225 m
+    /// line grow 100 m at 0.85 overlap, and a line most of the old traffic
+    /// does not fully cover sheds that traffic. That is history leaving
+    /// the visible view on one add, which is exactly what the debounce
+    /// exists to stop. The change is held as a re-cut, fires after k, and
+    /// the count then follows the geometry so a settled line never re-fires.
+    #[test]
+    fn an_agreeing_extent_that_loses_visits_is_a_re_cut() {
+        let p = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+
+        let longer = line(46.0, 7.0, 108);
+        assert!(mutual_overlap(&p, &longer) >= RECUT_AGREEMENT);
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, r) = state.step_assign(&[cand(longer.clone(), 15)]);
+            assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+            assert_eq!(out.recut_applied, 0);
+            assert_eq!(state.ground_of(&id), Some(p.as_slice()));
+            assert_eq!(state.visible[&id].visit_count, 20);
+        }
+        let (out, r) = state.step_assign(&[cand(longer.clone(), 15)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 1);
+        assert_eq!(state.ground_of(&id), Some(longer.as_slice()));
+        assert_eq!(
+            state.visible[&id].visit_count, 15,
+            "a fired re-cut takes the new line's count, or the next step re-fires"
+        );
+
+        // Settled: the same line at the same count is an agreement again.
+        let (out, r) = state.step_assign(&[cand(longer.clone(), 15)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 0);
+        assert!(state.pending_ids().is_empty());
+    }
+
+    /// The same extent with the same or more visits stays a free update,
+    /// and one more visit on a slightly moved line never debounces.
+    #[test]
+    fn an_agreeing_extent_that_keeps_its_visits_adopts_at_once() {
+        let p = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let (out, r) = state.step_assign(&[cand(p[..95].to_vec(), 20)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 0);
+        assert_eq!(state.ground_of(&id), Some(&p[..95]));
+        let (_, r) = state.step_assign(&[cand(p[..97].to_vec(), 21)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(state.visible[&id].visit_count, 21);
+    }
+
+    /// A removed activity lowers the batch count on an unchanged line.
+    /// The caller reports the drop, so the next step reads as agreement
+    /// rather than a re-cut the ledger would narrate for nothing.
+    #[test]
+    fn a_reported_visit_drop_is_not_a_re_cut() {
+        let p = line(46.0, 7.0, 100);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        state.drop_visits(&id, 3);
+        assert_eq!(state.visible[&id].visit_count, 17);
+        let (out, r) = state.step_assign(&[cand(p.clone(), 17)]);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_applied, 0);
+        assert!(state.pending_ids().is_empty());
+        // Unknown ids and over-drops are harmless.
+        state.drop_visits("nobody", 5);
+        state.drop_visits(&id, 100);
+        assert_eq!(state.visible[&id].visit_count, 0);
     }
 
     #[test]
