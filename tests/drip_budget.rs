@@ -2,10 +2,22 @@
 //! corpus, each of the last activities is added on its own and timed. The
 //! median must fit the instant tier a sync pays per downloaded activity.
 //!
-//! The cold fold itself has no hard budget, so it is bounded the other way:
-//! recorded as a baseline beside the corpus and compared with a band, which
-//! catches a cold-path regression without inventing a target for it. Rebase
-//! with `TRACEMATCH_BITWISE_REBASE=1`, the same switch the digests use.
+//! Two numbers judge it and they judge different things. The run is compared
+//! with the baseline recorded beside the corpus, banded, which is the only
+//! comparison a wall clock can survive: a run reads 700 or 900 on the same
+//! code depending on what else the machine is doing, so a hard bound on the
+//! run reports the machine. The recorded baseline is what the ceiling bounds,
+//! and it is deterministic: it moves only when the corpus changes or a rebase
+//! is asked for, and neither may carry it past `BUDGET_MS`. So a slowdown
+//! fails the band, a rebase that tries to absorb one fails the ceiling, and
+//! neither verdict depends on the run's noise.
+//!
+//! The baseline is re-derived when the corpus changes shape. The golden
+//! records the track and point counts it was measured on, and a run over a
+//! different corpus re-records rather than comparing, so growth is reported
+//! as growth and never as a regression. The cold fold has no ceiling and is
+//! bounded by the band alone. Rebase by hand with
+//! `TRACEMATCH_BITWISE_REBASE=1`, the same switch the digests use.
 //!
 //! Local-only: gated behind `real-corpus`, corpus resolved via
 //! `TRACEMATCH_CORPUS`.
@@ -24,16 +36,19 @@ use tracematch::{SectionConfig, SectionEvidenceCache};
 const CORPUS: &str = "fullcorpus";
 const BASELINE: &str = "_drip_baseline.txt";
 const WARM_ADDS: usize = 50;
-/// The per-add ceiling, measured on a corpus shaped like the app's data.
+/// The ceiling on the recorded warm-add median, in milliseconds.
 ///
-/// It was 500 while the corpus loaded flat, unelevated tracks. Elevation
-/// raises every candidate the lift veto then has to confirm, and the app has
-/// stored elevation with every track all along, so 500 was guarding a fold the
-/// app does not run: the same 50 adds measure 335 ms flat and 752-787 ms
-/// elevated. Per-point time is free on top of that, inside the run to run
-/// spread. 900 is the corrected measurement with room for the spread, not a
-/// target: `Q55`, 2026-08-30, which also raised `B71` for the pass that
-/// accounts for most of the difference.
+/// It bounds the baseline, not the run. A run is judged by `BAND` against the
+/// baseline, and the baseline may not be recorded or rebased past this, which
+/// is the stop on the ratchet: a regression cannot be absorbed by rebasing,
+/// and corpus growth re-derives the baseline only while it still fits.
+///
+/// 900 is not a measurement. The baseline was 730 when `Q55` set this over
+/// the elevated corpus and 702 once `B154` pinned the build profile, so the
+/// headroom is real and the number states what the sync is prepared to pay
+/// per activity on a corpus of this size. It is re-derived on one occasion
+/// only: when a production per-activity budget is set (`Q2` deferred one),
+/// this becomes that number.
 const BUDGET_MS: u64 = 900;
 
 /// One machine holds this corpus, so the clock only has to absorb run-to-run
@@ -59,6 +74,25 @@ fn a_warm_add_stays_inside_the_budget() {
         seconds,
     };
     let config = SectionConfig::default();
+
+    // A golden recorded on another corpus is re-derived, not compared.
+    let path = corpus::dir(CORPUS).join(BASELINE);
+    let points: usize = c.tracks.iter().map(|(_, t)| t.len()).sum();
+    let shape = format!("C {} {points}", c.tracks.len());
+    let mut golden = std::fs::read_to_string(&path).ok();
+    if let Some(existing) = golden.as_deref()
+        && baseline::digests_differ(existing, std::slice::from_ref(&shape))
+    {
+        println!(
+            "corpus changed shape, was {:?}, now {shape:?}: re-deriving the baseline",
+            baseline::digest_lines(existing)
+        );
+        std::fs::remove_file(&path).expect("remove stale golden baseline");
+        golden = None;
+    }
+    let recording =
+        golden.is_none() || std::env::var("TRACEMATCH_BITWISE_REBASE").is_ok_and(|v| v == "1");
+
     let split = c.tracks.len() - WARM_ADDS;
     let head_ids: Vec<&str> = c.tracks[..split]
         .iter()
@@ -92,9 +126,22 @@ fn a_warm_add_stays_inside_the_budget() {
         add_ms.iter().max().copied().unwrap_or_default(),
         catalogue.len()
     );
-    assert!(
-        median <= BUDGET_MS,
-        "warm-add median {median} ms is over the {BUDGET_MS} ms budget"
+
+    // The ceiling judges the number that will be the baseline after this run:
+    // the recorded one, or this run's when it is about to be recorded. Its
+    // verdict is printed before the band's so a failing run reports both.
+    let recorded = match (&golden, recording) {
+        (Some(golden), false) => baseline::recorded(golden)
+            .into_iter()
+            .find(|(name, _)| name == "perf_add_median_ms")
+            .map(|(_, value)| value)
+            .expect("the baseline records perf_add_median_ms"),
+        _ => median,
+    };
+    let over_ceiling = recorded > BUDGET_MS;
+    println!(
+        "recorded warm-add median {recorded} ms against the {BUDGET_MS} ms ceiling: {}",
+        if over_ceiling { "OVER" } else { "within" }
     );
 
     let measured = [
@@ -103,5 +150,11 @@ fn a_warm_add_stays_inside_the_budget() {
         ("perf_add_p95_ms", p95),
         ("perf_peak_bytes", baseline::peak_rise_bytes()),
     ];
-    baseline::check(&corpus::dir(CORPUS).join(BASELINE), &[], &measured, &BAND);
+    baseline::check(&path, &[shape], &measured, &BAND);
+    assert!(
+        !over_ceiling,
+        "the recorded warm-add median {recorded} ms is past the {BUDGET_MS} ms ceiling. \
+         The band cannot absorb this by rebasing: make the add cheaper, or raise the \
+         ceiling with the reasoning beside it"
+    );
 }

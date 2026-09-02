@@ -8,7 +8,9 @@ mod bitwise;
 
 use std::sync::Mutex;
 
-use bitwise::baseline::{Band, anchor_peak, peak_bytes, peak_rise_bytes, recorded, regressions};
+use bitwise::baseline::{
+    Band, anchor_peak, digests_differ, peak_bytes, peak_rise_bytes, recorded, regressions,
+};
 
 /// The peak is process-wide, so the two cases that read it take turns. The
 /// rest of this file allocates nothing that would move it.
@@ -207,4 +209,40 @@ fn an_anchored_peak_measures_the_rise_not_the_heap_already_held() {
     );
     drop(held);
     drop(added);
+}
+
+#[test]
+fn a_golden_recorded_on_the_same_corpus_is_current() {
+    let digests = ["A 0123456789abcdef".to_string()];
+    assert!(!digests_differ(GOLDEN, &digests));
+}
+
+#[test]
+fn a_golden_recorded_on_a_different_corpus_is_stale() {
+    // The corpus grew, so every cost the golden holds was measured on data
+    // that no longer exists. Comparing against it would call growth a
+    // regression.
+    let digests = ["A fedcba9876543210".to_string()];
+    assert!(digests_differ(GOLDEN, &digests));
+}
+
+#[test]
+fn a_golden_with_no_shape_line_is_stale_against_one_that_has() {
+    let costs_only = "perf_cold_ms 1000\nperf_add_median_ms 700\n";
+    let digests = ["C 1201 3000000".to_string()];
+    assert!(digests_differ(costs_only, &digests));
+    // And an unshaped gate against an unshaped golden has nothing to differ on.
+    assert!(!digests_differ(costs_only, &[]));
+}
+
+#[test]
+fn the_cost_lines_never_make_a_golden_stale() {
+    let slower = "\
+A 0123456789abcdef
+perf_cold_ms 9000
+perf_add_p95_ms 80
+perf_peak_bytes 900000000
+";
+    let digests = ["A 0123456789abcdef".to_string()];
+    assert!(!digests_differ(slower, &digests));
 }
