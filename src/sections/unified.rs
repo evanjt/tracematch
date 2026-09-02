@@ -2676,12 +2676,11 @@ fn opportunity(leaves: &mut LeafMemos, node: &Supernode, coverage: &CoverageGrid
             n + joined
         }
         _ => {
-            let mut tracks: HashSet<u32> = HashSet::new();
-            for c in &seen {
-                if let Some(ts) = coverage.cell_tracks.get(c) {
-                    tracks.extend(ts.iter().copied());
-                }
-            }
+            let tracks: HashSet<u32> = seen
+                .iter()
+                .filter_map(|c| coverage.cell_tracks.get(c))
+                .flat_map(|ts| ts.iter().copied())
+                .collect();
             tracks.len()
         }
     };
