@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    detect_sections_unified_incremental_cached,
     detect_sections_unified_incremental_cached_with_policy,
 };
 
@@ -364,7 +363,7 @@ fn default_policy_delta_is_internally_consistent() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let prior = catalogue.clone();
-        let res = detect_sections_unified_incremental_cached(
+        let res = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -372,6 +371,7 @@ fn default_policy_delta_is_internally_consistent() {
             &[],
             &sports,
             &cfg,
+            &SectionUpdatePolicy::default(),
         );
         assert!(res.held.is_empty(), "default policy holds nothing back");
         assert_eq!(
@@ -416,7 +416,7 @@ fn split_loser_carries_its_parent_link_on_the_fold() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let prior = catalogue.clone();
-        let res = detect_sections_unified_incremental_cached(
+        let res = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -424,6 +424,7 @@ fn split_loser_carries_its_parent_link_on_the_fold() {
             &[],
             &sports,
             &cfg,
+            &SectionUpdatePolicy::default(),
         );
 
         assert_eq!(

@@ -98,7 +98,11 @@ fn the_corpus_this_gate_folds_can_exercise_the_lift_veto() {
         .iter()
         .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
-    let untimed = tracematch::sections::confirmed_lift_spans(&view, &[]);
+    let untimed = tracematch::sections::confirmed_lift_spans_tuned(
+        &view,
+        &[],
+        &tracematch::Tunables::DEFAULT,
+    );
     let untimed_spans: usize = untimed.iter().map(Vec::len).sum();
     let (spans, points) = bitwise::lift_reach(&c);
     println!(

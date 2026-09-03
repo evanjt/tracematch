@@ -904,7 +904,7 @@ fn lift_ground_forms_no_section_but_the_piste_does() {
         .collect();
     eprintln!(
         "  confirmed lift spans: {:?}",
-        tracematch::confirmed_lift_spans(&view, &[])
+        tracematch::confirmed_lift_spans_tuned(&view, &[], &tracematch::Tunables::DEFAULT)
     );
     assert_catalogue_invariants(&tracks, &sections);
     let lift_line = metre_samples(&[(0.0, 0.0), (0.0, 900.0)], 25.0);

@@ -581,7 +581,10 @@ fn assert_cached_tracks_naive_and_batch(
     cfg: &SectionConfig,
     label: &str,
 ) {
-    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy,
+        detect_sections_unified_incremental_cached_with_policy,
+    };
 
     let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
     let mut cache = SectionEvidenceCache::new();
@@ -592,7 +595,7 @@ fn assert_cached_tracks_naive_and_batch(
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
 
-        let cached = detect_sections_unified_incremental_cached(
+        let cached = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,
@@ -600,6 +603,7 @@ fn assert_cached_tracks_naive_and_batch(
             &[],
             sports,
             cfg,
+            &SectionUpdatePolicy::default(),
         );
         cached_cat = cached.catalogue;
 
@@ -762,7 +766,10 @@ fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Tracks, HashMap
 /// sub-linear needs incremental discovery, deliberately out of this optimisation.)
 #[test]
 fn gate_cached_incremental_cost_is_flat() {
-    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy,
+        detect_sections_unified_incremental_cached_with_policy,
+    };
 
     let cfg = SectionConfig::default();
     let n_clusters = 9;
@@ -787,7 +794,7 @@ fn gate_cached_incremental_cost_is_flat() {
             let (id, pts) = it.next().unwrap();
             pool.push((id.clone(), pts.clone()));
             let new_ids = [pool.last().unwrap().0.as_str()];
-            let res = detect_sections_unified_incremental_cached(
+            let res = detect_sections_unified_incremental_cached_with_policy(
                 &mut cache,
                 &cached_cat,
                 &pool,
@@ -795,6 +802,7 @@ fn gate_cached_incremental_cost_is_flat() {
                 &[],
                 &sports,
                 &cfg,
+                &SectionUpdatePolicy::default(),
             );
             cached_cat = res.catalogue;
         }
@@ -866,7 +874,10 @@ fn gate_cached_incremental_cost_is_flat() {
 /// B1b. Printed so the O(N) shape stays visible next to the multi-cluster gate.
 #[test]
 fn cached_single_cluster_cost_curve_is_linear() {
-    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy,
+        detect_sections_unified_incremental_cached_with_policy,
+    };
 
     let cfg = SectionConfig::default();
     let corpus = corpus_with_bucket_a(36); // one home cluster, ~40 activities
@@ -881,7 +892,7 @@ fn cached_single_cluster_cost_curve_is_linear() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let t0 = Instant::now();
-        let res = detect_sections_unified_incremental_cached(
+        let res = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,
@@ -889,6 +900,7 @@ fn cached_single_cluster_cost_curve_is_linear() {
             &[],
             &sports,
             &cfg,
+            &SectionUpdatePolicy::default(),
         );
         per_add.push((pool.len(), t0.elapsed().as_micros()));
         cached_cat = res.catalogue;
@@ -936,7 +948,10 @@ fn cached_single_cluster_cost_curve_is_linear() {
 /// for the old bug (every activity lands in the one cluster).
 #[test]
 fn gate_cached_cold_cache_cost_is_linear() {
-    use tracematch::{SectionEvidenceCache, detect_sections_unified_incremental_cached};
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy,
+        detect_sections_unified_incremental_cached_with_policy,
+    };
 
     let cfg = SectionConfig::default();
     let corpus = corpus_with_bucket_a(80);
@@ -950,7 +965,7 @@ fn gate_cached_cold_cache_cost_is_linear() {
         let new_ids: Vec<&str> = prefix.iter().map(|(id, _)| id.as_str()).collect();
         let mut cache = SectionEvidenceCache::new();
         let t0 = Instant::now();
-        let _ = detect_sections_unified_incremental_cached(
+        let _ = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &[],
             &prefix,
@@ -958,6 +973,7 @@ fn gate_cached_cold_cache_cost_is_linear() {
             &[],
             &sports,
             &cfg,
+            &SectionUpdatePolicy::default(),
         );
         let cached = t0.elapsed().as_micros();
         let t1 = Instant::now();
