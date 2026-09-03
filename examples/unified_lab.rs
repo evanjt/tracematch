@@ -880,8 +880,10 @@ Options:
   --hyst-k N              hysteresis k
   --hyst-dissolve F       hysteresis dissolve pressure
   --hyst-recut F          hysteresis recut agreement
-  --hyst-floor F          hysteresis size floor
-  --hyst-ratio F          hysteresis size ratio
+  --hyst-floor F[,F..]    merge mutual floor arms (default 0.4 alone)
+  --hyst-ratio F[,F..]    merge size ratio arms (default off)
+                          The replay runs the off arm (0, 0) and then every
+                          floor with every ratio, one row each.
   -h, --help              print this and exit";
 
 #[derive(Debug, Default)]
@@ -898,8 +900,8 @@ struct LabArgs {
     hyst_k: Option<u8>,
     hyst_dissolve: Option<f64>,
     hyst_recut: Option<f64>,
-    hyst_floor: Option<f64>,
-    hyst_ratio: Option<f64>,
+    hyst_floor: Option<Vec<f64>>,
+    hyst_ratio: Option<Vec<f64>>,
 }
 
 /// `Ok(None)` is `--help`, which prints the usage and exits zero. An unknown
@@ -921,6 +923,16 @@ fn parse_args(args: &[String]) -> Result<Option<LabArgs>, String> {
         let raw = value(args, i)?;
         raw.parse::<f64>()
             .map_err(|_| format!("{} needs a number, got {raw}", args[i]))
+    };
+    let numbers = |args: &[String], i: usize| -> Result<Vec<f64>, String> {
+        let raw = value(args, i)?;
+        raw.split(',')
+            .map(|part| {
+                part.trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("{} needs numbers, got {raw}", args[i]))
+            })
+            .collect()
     };
     while i < args.len() {
         match args[i].as_str() {
@@ -974,11 +986,11 @@ fn parse_args(args: &[String]) -> Result<Option<LabArgs>, String> {
                 i += 2;
             }
             "--hyst-floor" => {
-                parsed.hyst_floor = Some(number(args, i)?);
+                parsed.hyst_floor = Some(numbers(args, i)?);
                 i += 2;
             }
             "--hyst-ratio" => {
-                parsed.hyst_ratio = Some(number(args, i)?);
+                parsed.hyst_ratio = Some(numbers(args, i)?);
                 i += 2;
             }
             other if other.starts_with('-') => {
@@ -1651,6 +1663,21 @@ fn main() {
                 /// batch had already superseded, so a mint on its ground is
                 /// the duplicate the first-divergent-step window admits.
                 phantom_mints: usize,
+                /// Merge-inherits where the senior that took the candidate is
+                /// shorter than a prior that retired into it: the small-senior
+                /// capture the size ratio exists to stop.
+                captures: usize,
+            }
+
+            /// One merge-inherit, for the per-cell table: who took the
+            /// candidate, how big each party is, and how much they overlap.
+            struct MergeRow {
+                window: &'static str,
+                senior_id: String,
+                senior_m: f64,
+                cand_m: f64,
+                mutual: f64,
+                losers: Vec<(String, f64)>,
             }
 
             // One replay at a given merge floor and size ratio. Detection is
@@ -1669,6 +1696,7 @@ fn main() {
                     (0usize, 0usize, 0usize, 0usize);
                 let (mut t_mint, mut t_diss, mut t_recut) = (0usize, 0usize, 0usize);
                 let mut phantom_mints = 0usize;
+                let mut merges: Vec<MergeRow> = Vec::new();
                 for (label, n_acts, sections, _) in runs.iter() {
                     let cands: Vec<CandidateSection> = sections
                         .iter()
@@ -1701,11 +1729,45 @@ fn main() {
                             merge_size_ratio: ratio,
                         },
                     );
-                    for decision in plan.decisions {
+                    let prior_by_id: HashMap<&str, &PriorSection> =
+                        prior.iter().map(|p| (p.id.as_str(), p)).collect();
+                    let metres =
+                        |pts: &[GpsPoint]| tracematch::matching::calculate_route_distance(pts);
+                    for (j, decision) in plan.decisions.iter().enumerate() {
                         match decision {
                             Decision::Carry { .. } => n_carry += 1,
                             Decision::SplitInherit { .. } => n_split += 1,
-                            Decision::MergeInherit { .. } => n_merge += 1,
+                            Decision::MergeInherit { id } => {
+                                n_merge += 1;
+                                let Some(senior) = prior_by_id.get(id.as_str()) else {
+                                    continue;
+                                };
+                                let losers: Vec<(String, f64)> = plan
+                                    .retired
+                                    .iter()
+                                    .filter(|r| {
+                                        matches!(&r.reason,
+                                            tracematch::RetireReason::MergedInto { id: into }
+                                            if into == id)
+                                    })
+                                    .filter_map(|r| {
+                                        prior_by_id
+                                            .get(r.id.as_str())
+                                            .map(|p| (r.id.clone(), metres(&p.polyline)))
+                                    })
+                                    .collect();
+                                merges.push(MergeRow {
+                                    window: label,
+                                    senior_id: id.clone(),
+                                    senior_m: metres(&senior.polyline),
+                                    cand_m: metres(&cands[j].polyline),
+                                    mutual: tracematch::mutual_overlap(
+                                        &senior.polyline,
+                                        &cands[j].polyline,
+                                    ),
+                                    losers,
+                                });
+                            }
                             Decision::Mint { .. } => n_mint += 1,
                         }
                     }
@@ -1939,6 +2001,53 @@ fn main() {
                     settle_dissolved,
                     settled_retention,
                 );
+                let captures = merges
+                    .iter()
+                    .filter(|m| m.losers.iter().any(|(_, lm)| *lm > m.senior_m))
+                    .count();
+                println!(
+                    "  merge-inherits {}: {} where the senior is shorter than a prior it absorbed",
+                    merges.len(),
+                    captures,
+                );
+                if let Some(ref out) = out_dir {
+                    std::fs::create_dir_all(out).ok();
+                    let path = out.join(format!("merges_f{floor:.2}_r{ratio:.2}.tsv"));
+                    let mut text = String::from(
+                        "window\tsenior_id\tsenior_m\tcand_m\tsenior_over_cand\tmutual\t\
+                         largest_loser_m\tloser_over_senior\tlosers\n",
+                    );
+                    for m in &merges {
+                        let largest = m.losers.iter().map(|(_, lm)| *lm).fold(0.0_f64, f64::max);
+                        let losers: Vec<String> = m
+                            .losers
+                            .iter()
+                            .map(|(id, lm)| format!("{id}:{lm:.0}"))
+                            .collect();
+                        text.push_str(&format!(
+                            "{}\t{}\t{:.0}\t{:.0}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{}\n",
+                            m.window,
+                            m.senior_id,
+                            m.senior_m,
+                            m.cand_m,
+                            if m.cand_m > 0.0 {
+                                m.senior_m / m.cand_m
+                            } else {
+                                0.0
+                            },
+                            m.mutual,
+                            largest,
+                            if m.senior_m > 0.0 {
+                                largest / m.senior_m
+                            } else {
+                                0.0
+                            },
+                            losers.join(";"),
+                        ));
+                    }
+                    std::fs::write(&path, text).ok();
+                    println!("  merges → {}", path.display());
+                }
                 ReplaySummary {
                     floor,
                     ratio,
@@ -1953,84 +2062,76 @@ fn main() {
                     visible_churn,
                     vis_idk_first: identity_retention(&vis[0], &vis[vlast]) * 100.0,
                     phantom_mints,
+                    captures,
                 }
             };
 
-            // Neither knob has a corpus-confirmed value, so the on-arm takes
-            // whichever the caller named. --hyst-ratio alone sweeps the size
-            // guard with the floor left at its shipped 0.0.
-            let hi = hyst_floor.unwrap_or(if hyst_ratio.is_some() { 0.0 } else { 0.4 });
-            let hi_ratio = hyst_ratio.unwrap_or(0.0);
-            let off = run_replay(0.0, 0.0);
-            let on = run_replay(hi, hi_ratio);
+            // Neither knob has a corpus-confirmed value. With nothing named the
+            // on-arm is the floor at 0.4, the original two-arm comparison; a
+            // list on either flag runs the off arm and then every floor with
+            // every ratio, one row each, so a grid reads off one invocation.
+            let floors = hyst_floor
+                .clone()
+                .unwrap_or_else(|| vec![if hyst_ratio.is_some() { 0.0 } else { 0.4 }]);
+            let ratios = hyst_ratio.clone().unwrap_or_else(|| vec![0.0]);
+            let mut arms: Vec<(f64, f64)> = vec![(0.0, 0.0)];
+            for &f in &floors {
+                for &r in &ratios {
+                    if !arms.iter().any(|(af, ar)| af == &f && ar == &r) {
+                        arms.push((f, r));
+                    }
+                }
+            }
+            let results: Vec<ReplaySummary> = arms.iter().map(|&(f, r)| run_replay(f, r)).collect();
             println!();
-            println!("=== OFF (floor 0.00, ratio 0.00) vs floor {hi:.2}, ratio {hi_ratio:.2} ===");
-            let row = |name: &str, a: String, b: String| {
-                println!("  {name:<24} {a:>12}  {b:>12}");
-            };
-            row("metric", "floor 0.00".into(), format!("floor {hi:.2}"));
-            row(
-                "final visible",
-                off.final_visible.to_string(),
-                on.final_visible.to_string(),
+            println!("=== replay arms: off, then every floor with every ratio ===");
+            println!(
+                "  {:>5} {:>5} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>5} {:>6} {:>6} {:>6} {:>8} {:>8}",
+                "floor",
+                "ratio",
+                "visible",
+                "overlap",
+                "minted",
+                "dissol",
+                "recut",
+                "merge",
+                "mint",
+                "vchurn",
+                "rchurn",
+                "idkeep",
+                "phantom",
+                "capture",
             );
-            row(
-                "overlapping (dup)",
-                off.final_overlaps.to_string(),
-                on.final_overlaps.to_string(),
-            );
-            row(
-                "total minted",
-                off.total_minted.to_string(),
-                on.total_minted.to_string(),
-            );
-            row(
-                "total dissolved",
-                off.total_dissolved.to_string(),
-                on.total_dissolved.to_string(),
-            );
-            row(
-                "total re-cut",
-                off.total_recut.to_string(),
-                on.total_recut.to_string(),
-            );
-            row(
-                "merge-inherit",
-                off.merge_inherit.to_string(),
-                on.merge_inherit.to_string(),
-            );
-            row("mint decisions", off.mint.to_string(), on.mint.to_string());
-            row(
-                "visible churn",
-                off.visible_churn.to_string(),
-                on.visible_churn.to_string(),
-            );
-            row(
-                "raw churn",
-                off.raw_churn.to_string(),
-                on.raw_churn.to_string(),
-            );
-            row(
-                "90d->full vis id-keep",
-                format!("{:.0}%", off.vis_idk_first),
-                format!("{:.0}%", on.vis_idk_first),
-            );
-            row(
-                "phantom mints",
-                off.phantom_mints.to_string(),
-                on.phantom_mints.to_string(),
-            );
+            for r in &results {
+                println!(
+                    "  {:>5.2} {:>5.2} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5.0}% {:>8} {:>8}",
+                    r.floor,
+                    r.ratio,
+                    r.final_visible,
+                    r.final_overlaps,
+                    r.total_minted,
+                    r.total_dissolved,
+                    r.total_recut,
+                    r.merge_inherit,
+                    r.mint,
+                    r.visible_churn,
+                    r.raw_churn,
+                    r.vis_idk_first,
+                    r.phantom_mints,
+                    r.captures,
+                );
+            }
             if let Some(ref out) = out_dir {
                 std::fs::create_dir_all(out).ok();
                 let path = out.join("replay.tsv");
                 let mut text = String::from(
                     "floor\tratio\tfinal_visible\toverlapping\tminted\tdissolved\trecut\t\
                      merge_inherit\tmint\tvisible_churn\traw_churn\tvis_idkeep_pct\t\
-                     phantom_mints\n",
+                     phantom_mints\tcaptures\n",
                 );
-                for r in [&off, &on] {
+                for r in &results {
                     text.push_str(&format!(
-                        "{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\n",
+                        "{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\t{}\n",
                         r.floor,
                         r.ratio,
                         r.final_visible,
@@ -2044,6 +2145,7 @@ fn main() {
                         r.raw_churn,
                         r.vis_idk_first,
                         r.phantom_mints,
+                        r.captures,
                     ));
                 }
                 std::fs::write(&path, text).ok();
