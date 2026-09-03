@@ -598,6 +598,8 @@
     no_single_pass:{ colour: '#a8748f', label: 'No single pass' },
     pass_end:      { colour: '#5c8fd6', label: 'Pass end' },
     drawn_population: { colour: '#b06a3d', label: 'Drawn population' },
+    seam_clip:     { colour: '#3d9dbf', label: 'Seam clip' },
+    drawn_empty:   { colour: '#c04a6b', label: 'Drawn empty' },
   };
 
   function boundaryDetail(reason: BoundaryReason): string {
@@ -620,6 +622,10 @@
         return `${reason.requeued_cells} cells requeued`;
       case 'drawn_population':
         return `${reason.kept} on the drawn line, below a floor of ${reason.floor}`;
+      case 'seam_clip':
+        return `${reason.section_id} clipped ${Math.round(reason.clipped_metres)} m, kept ${Math.round(reason.kept_metres)} m`;
+      case 'drawn_empty':
+        return `${reason.section_id}: none of ${reason.contributors} contributors traverse the drawn line`;
     }
   }
 

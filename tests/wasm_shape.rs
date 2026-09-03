@@ -202,6 +202,21 @@ fn boundary_reason_payloads_stay_snake_case() {
         reason_keys(BoundaryReason::DrawnPopulation { kept: 1, floor: 1 }),
         vec!["floor", "kept", "kind"]
     );
+    assert_eq!(
+        reason_keys(BoundaryReason::SeamClip {
+            section_id: "s".into(),
+            clipped_metres: 1.0,
+            kept_metres: 1.0,
+        }),
+        vec!["clipped_metres", "kept_metres", "kind", "section_id"]
+    );
+    assert_eq!(
+        reason_keys(BoundaryReason::DrawnEmpty {
+            section_id: "s".into(),
+            contributors: 1,
+        }),
+        vec!["contributors", "kind", "section_id"]
+    );
 }
 
 /// The variant tags themselves, which the site switches on.
@@ -244,6 +259,21 @@ fn boundary_reason_tags_match_the_sites_switch() {
     assert_eq!(
         tag(BoundaryReason::DrawnPopulation { kept: 0, floor: 0 }),
         "drawn_population"
+    );
+    assert_eq!(
+        tag(BoundaryReason::SeamClip {
+            section_id: String::new(),
+            clipped_metres: 0.0,
+            kept_metres: 0.0,
+        }),
+        "seam_clip"
+    );
+    assert_eq!(
+        tag(BoundaryReason::DrawnEmpty {
+            section_id: String::new(),
+            contributors: 0,
+        }),
+        "drawn_empty"
     );
 }
 

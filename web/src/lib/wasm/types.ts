@@ -125,7 +125,9 @@ export type BoundaryReason =
   | { kind: 'low_support'; floor: number; dropped_cells: number }
   | { kind: 'traffic_cliff'; thin: number; thick: number }
   | { kind: 'pass_end'; requeued_cells: number }
-  | { kind: 'drawn_population'; kept: number; floor: number };
+  | { kind: 'drawn_population'; kept: number; floor: number }
+  | { kind: 'seam_clip'; section_id: string; clipped_metres: number; kept_metres: number }
+  | { kind: 'drawn_empty'; section_id: string; contributors: number };
 
 // A geolocated reason for a boundary, in place of a log line.
 export interface BoundaryRecord {

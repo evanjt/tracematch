@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use tracematch::{
-    CandidateSection, Decision, FrequentSection, GpsPoint, HysteresisParams, HysteresisState,
-    IdentityParams, MatchConfig, PriorSection, RouteSignature, SectionConfig, Tunables,
-    geo_utils::haversine_distance, matching::resample_route, plan_identity_tuned,
+    BoundaryReason, BoundaryRecord, CandidateFate, CandidateSection, Decision, FrequentSection,
+    GpsPoint, HysteresisParams, HysteresisState, IdentityParams, MatchConfig, PriorSection,
+    RouteSignature, SectionConfig, Tunables, geo_utils::haversine_distance,
+    matching::resample_route, plan_identity_tuned, required_visits_for_length,
 };
 
 #[path = "common/corpus.rs"]
@@ -495,6 +496,102 @@ fn analyse(
     }
 }
 
+// ----------------------------------------------------------------- tables
+
+/// One row per emitted section, tab separated, for a script to read: the
+/// numbers the floor and seam questions ask for, taken from the same
+/// detection the GeoJSON beside it was drawn from.
+///
+/// `required_visits` is `required_visits_for_length` at the section's
+/// emitted length over the whole corpus. The detector measures the creating
+/// floor against the tracks with opportunity near the candidate, which is
+/// at most the corpus, so this column is the floor's upper bound where the
+/// two disagree. `occasion_days` counts distinct calendar days over
+/// `activity_ids`, an undated activity counting alone, as `has_support`
+/// counts them. `activity_floor` is the redraw's `min_activities` test and
+/// `support_floor` the occasion-day test the candidate cleared to exist,
+/// each 1 where the emitted section would pass it.
+fn write_sections_table(
+    path: &Path,
+    sections: &[FrequentSection],
+    boundaries: &[BoundaryRecord],
+    start_epochs: &HashMap<String, i64>,
+    n_tracks: usize,
+    min_activities: u32,
+) {
+    let mut clipped: HashMap<&str, f64> = HashMap::new();
+    let mut drawn_empty: HashMap<&str, u32> = HashMap::new();
+    for r in boundaries {
+        match &r.reason {
+            BoundaryReason::SeamClip {
+                section_id,
+                clipped_metres,
+                ..
+            } => {
+                *clipped.entry(section_id.as_str()).or_default() += clipped_metres;
+            }
+            BoundaryReason::DrawnEmpty {
+                section_id,
+                contributors,
+            } => {
+                drawn_empty.insert(section_id.as_str(), *contributors);
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::from(
+        "id\tmetres\tactivities\tvisits\trequired_visits\toccasion_days\tactivity_floor\t\
+         support_floor\tseam_clipped_m\tdrawn_empty\trep\n",
+    );
+    for s in sections {
+        let mut days: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut undated = 0usize;
+        for id in &s.activity_ids {
+            match start_epochs.get(id) {
+                Some(e) => {
+                    days.insert(e.div_euclid(86_400));
+                }
+                None => undated += 1,
+            }
+        }
+        let occasion_days = days.len() + undated;
+        let required = required_visits_for_length(s.distance_meters, n_tracks);
+        let activity_floor = s.activity_ids.len() as u32 >= min_activities;
+        let support_floor = occasion_days as u32 >= required.max(min_activities);
+        out.push_str(&format!(
+            "{}\t{:.0}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\t{}\n",
+            s.id,
+            s.distance_meters,
+            s.activity_ids.len(),
+            s.visit_count,
+            required,
+            occasion_days,
+            u8::from(activity_floor),
+            u8::from(support_floor),
+            clipped.get(s.id.as_str()).copied().unwrap_or(0.0),
+            u8::from(drawn_empty.contains_key(s.id.as_str())),
+            s.representative_activity_id,
+        ));
+    }
+    std::fs::write(path, out).ok();
+}
+
+/// The sections the redraw dropped under `min_activities`, one row each,
+/// which is the other half of the floor count: what the emitted table
+/// cannot show because it was never emitted.
+fn write_dropped_table(path: &Path, boundaries: &[BoundaryRecord]) {
+    let mut out = String::from("lat\tlon\tkept\tfloor\n");
+    for r in boundaries {
+        if let BoundaryReason::DrawnPopulation { kept, floor } = r.reason {
+            out.push_str(&format!(
+                "{:.6}\t{:.6}\t{kept}\t{floor}\n",
+                r.latitude, r.longitude
+            ));
+        }
+    }
+    std::fs::write(path, out).ok();
+}
+
 // ---------------------------------------------------------------- geojson
 
 fn geojson_for_sections(
@@ -765,7 +862,7 @@ Usage: unified_lab [CORPUS_DIR] [OPTIONS]
   CORPUS_DIR              GPX corpus root (default: citycorpus)
 
 Options:
-  --out DIR               write GeoJSON, sweep tables and reports here
+  --out DIR               write GeoJSON, per-section tables and reports here
   --sport NAME            only this sport (default: every sport found)
   --method NAME           only this matching method
   --divergence F          route-split divergence override
@@ -1296,6 +1393,33 @@ fn main() {
                     )
                     .ok();
                     println!("            geojson → {}", path.display());
+                    if method == "unified" {
+                        let brs = unified_boundaries.borrow();
+                        let stem = format!("{}_{}", sport.to_lowercase(), method);
+                        let table = out.join(format!("{stem}_sections.tsv"));
+                        write_sections_table(
+                            &table,
+                            &sections,
+                            &brs,
+                            &start_epochs,
+                            tracks.len(),
+                            section_config.min_activities,
+                        );
+                        let dropped = out.join(format!("{stem}_dropped.tsv"));
+                        write_dropped_table(&dropped, &brs);
+                        println!(
+                            "            sections → {} ({} rows), dropped → {} ({} rows)",
+                            table.display(),
+                            sections.len(),
+                            dropped.display(),
+                            brs.iter()
+                                .filter(|r| matches!(
+                                    r.reason,
+                                    BoundaryReason::DrawnPopulation { .. }
+                                ))
+                                .count()
+                        );
+                    }
                 }
                 reports.push(report);
             }
@@ -1502,6 +1626,8 @@ fn main() {
             };
 
             struct ReplaySummary {
+                floor: f64,
+                ratio: f64,
                 final_visible: usize,
                 final_overlaps: usize,
                 total_minted: usize,
@@ -1512,6 +1638,12 @@ fn main() {
                 raw_churn: usize,
                 visible_churn: usize,
                 vis_idk_first: f64,
+                /// Mints whose ground lies mostly inside the pre-step
+                /// footprint of a prior that entered its re-cut debounce on
+                /// that same step. That prior competed on a footprint the
+                /// batch had already superseded, so a mint on its ground is
+                /// the duplicate the first-divergent-step window admits.
+                phantom_mints: usize,
             }
 
             // One replay at a given merge floor and size ratio. Detection is
@@ -1529,6 +1661,7 @@ fn main() {
                 let (mut n_carry, mut n_split, mut n_merge, mut n_mint) =
                     (0usize, 0usize, 0usize, 0usize);
                 let (mut t_mint, mut t_diss, mut t_recut) = (0usize, 0usize, 0usize);
+                let mut phantom_mints = 0usize;
                 for (label, n_acts, sections, _) in runs.iter() {
                     let cands: Vec<CandidateSection> = sections
                         .iter()
@@ -1569,13 +1702,40 @@ fn main() {
                             Decision::Mint { .. } => n_mint += 1,
                         }
                     }
-                    let o = state.step(&cands);
+                    let recut_before = state.pending_recut_ids();
+                    let (o, resolutions) = state.step_assign(&cands);
                     t_mint += o.minted;
                     t_diss += o.dissolved;
                     t_recut += o.recut_applied;
+                    // Priors whose re-cut debounce began on this step competed
+                    // on the footprint `prior` holds, which the batch had
+                    // already redrawn.
+                    let diverged: Vec<&[GpsPoint]> = state
+                        .pending_recut_ids()
+                        .into_iter()
+                        .filter(|id| !recut_before.contains(id))
+                        .filter_map(|id| {
+                            prior
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(|p| p.polyline.as_slice())
+                        })
+                        .collect();
+                    let phantoms = cands
+                        .iter()
+                        .zip(&resolutions)
+                        .filter(|(_, r)| matches!(r.fate, CandidateFate::Minted))
+                        .filter(|(c, _)| {
+                            diverged
+                                .iter()
+                                .any(|g| containment(&c.polyline, g, 60.0) >= 0.5)
+                        })
+                        .count();
+                    phantom_mints += phantoms;
                     println!(
                         "  {:<4} {:>5} acts  raw {:>3} -> visible {:>3}   minted {:>2}  restored {:>2}  \
-                         dissolved {:>2}  re-cut {:>2}  debouncing {:>2}",
+                         dissolved {:>2}  re-cut {:>2}  debouncing {:>2}  first-divergent {:>2}  \
+                         phantom mints {:>2}",
                         label,
                         n_acts,
                         o.raw_count,
@@ -1585,6 +1745,8 @@ fn main() {
                         o.dissolved,
                         o.recut_applied,
                         o.debouncing,
+                        diverged.len(),
+                        phantoms,
                     );
                     vis.push(state.visible_grounds());
                 }
@@ -1771,6 +1933,8 @@ fn main() {
                     settled_retention,
                 );
                 ReplaySummary {
+                    floor,
+                    ratio,
                     final_visible: fin.len(),
                     final_overlaps,
                     total_minted: t_mint,
@@ -1781,6 +1945,7 @@ fn main() {
                     raw_churn,
                     visible_churn,
                     vis_idk_first: identity_retention(&vis[0], &vis[vlast]) * 100.0,
+                    phantom_mints,
                 }
             };
 
@@ -1843,6 +2008,40 @@ fn main() {
                 format!("{:.0}%", off.vis_idk_first),
                 format!("{:.0}%", on.vis_idk_first),
             );
+            row(
+                "phantom mints",
+                off.phantom_mints.to_string(),
+                on.phantom_mints.to_string(),
+            );
+            if let Some(ref out) = out_dir {
+                std::fs::create_dir_all(out).ok();
+                let path = out.join("replay.tsv");
+                let mut text = String::from(
+                    "floor\tratio\tfinal_visible\toverlapping\tminted\tdissolved\trecut\t\
+                     merge_inherit\tmint\tvisible_churn\traw_churn\tvis_idkeep_pct\t\
+                     phantom_mints\n",
+                );
+                for r in [&off, &on] {
+                    text.push_str(&format!(
+                        "{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\n",
+                        r.floor,
+                        r.ratio,
+                        r.final_visible,
+                        r.final_overlaps,
+                        r.total_minted,
+                        r.total_dissolved,
+                        r.total_recut,
+                        r.merge_inherit,
+                        r.mint,
+                        r.visible_churn,
+                        r.raw_churn,
+                        r.vis_idk_first,
+                        r.phantom_mints,
+                    ));
+                }
+                std::fs::write(&path, text).ok();
+                println!("  replay → {}", path.display());
+            }
         }
     }
 
