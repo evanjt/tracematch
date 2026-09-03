@@ -39,14 +39,14 @@ run "workspace" cargo test --workspace
 run "veloqrs synthetic" cargo test -p veloqrs --features synthetic
 run "tracematch" cargo test -p tracematch
 
-printf '\n=== tracematch examples\n'
-if ! cargo build -p tracematch --examples; then
-    failed=$((failed + 1))
-fi
+run "tracematch examples" cargo test -p tracematch --examples
 
 if [ -n "${LAB_CORPUS_DIR:-}" ]; then
     printf '\n=== lab\n'
-    if ! cargo run -p tracematch --release --example unified_lab; then
+    LAB_OUT_DIR="${LAB_OUT_DIR:-$RUN_DIR/target/battery/lab}"
+    mkdir -p "$LAB_OUT_DIR"
+    if ! cargo run -p tracematch --release --example unified_lab -- \
+        "$LAB_CORPUS_DIR" --out "$LAB_OUT_DIR"; then
         failed=$((failed + 1))
     fi
 else
