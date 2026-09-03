@@ -10,8 +10,8 @@
 //!         ~/projects/personal/intervals/tracematch/citycorpus \
 //!         --out ~/projects/personal/intervals/tracematch/unified-lab
 //!
-//! Optional flags:
-//!     --sport Run          only this sport (default: all sports found)
+//! `--help` prints every flag. An unknown flag is rejected, so a typo
+//! cannot run the default configuration and report it as the requested one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -759,6 +759,140 @@ impl log::Log for StderrLog {
 }
 static STDERR_LOG: StderrLog = StderrLog;
 
+const USAGE: &str = "\
+Usage: unified_lab [CORPUS_DIR] [OPTIONS]
+
+  CORPUS_DIR              GPX corpus root (default: citycorpus)
+
+Options:
+  --out DIR               write GeoJSON, sweep tables and reports here
+  --sport NAME            only this sport (default: every sport found)
+  --method NAME           only this matching method
+  --divergence F          route-split divergence override
+  --stability             run the jackknife stability pass
+  --windows               run the loading-window pass
+  --replay-identity       replay identity + hysteresis (implies --windows)
+  --sweep                 run the constants plateau sweep
+  --hyst-k N              hysteresis k
+  --hyst-dissolve F       hysteresis dissolve pressure
+  --hyst-recut F          hysteresis recut agreement
+  --hyst-floor F          hysteresis size floor
+  --hyst-ratio F          hysteresis size ratio
+  -h, --help              print this and exit";
+
+#[derive(Debug, Default)]
+struct LabArgs {
+    dir: PathBuf,
+    out_dir: Option<PathBuf>,
+    only_sport: Option<String>,
+    only_method: Option<String>,
+    divergence: Option<f64>,
+    stability: bool,
+    windows: bool,
+    sweep: bool,
+    replay_identity: bool,
+    hyst_k: Option<u8>,
+    hyst_dissolve: Option<f64>,
+    hyst_recut: Option<f64>,
+    hyst_floor: Option<f64>,
+    hyst_ratio: Option<f64>,
+}
+
+/// `Ok(None)` is `--help`, which prints the usage and exits zero. An unknown
+/// flag is an error rather than a silent skip, because the run that follows a
+/// typo is the default configuration reported as the requested one.
+fn parse_args(args: &[String]) -> Result<Option<LabArgs>, String> {
+    let mut parsed = LabArgs {
+        dir: PathBuf::from("citycorpus"),
+        ..LabArgs::default()
+    };
+    let mut positional_taken = false;
+    let mut i = 0;
+    let value = |args: &[String], i: usize| -> Result<String, String> {
+        args.get(i + 1)
+            .cloned()
+            .ok_or_else(|| format!("{} needs a value", args[i]))
+    };
+    let number = |args: &[String], i: usize| -> Result<f64, String> {
+        let raw = value(args, i)?;
+        raw.parse::<f64>()
+            .map_err(|_| format!("{} needs a number, got {raw}", args[i]))
+    };
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--out" => {
+                parsed.out_dir = Some(PathBuf::from(value(args, i)?));
+                i += 2;
+            }
+            "--sport" => {
+                parsed.only_sport = Some(value(args, i)?);
+                i += 2;
+            }
+            "--method" => {
+                parsed.only_method = Some(value(args, i)?);
+                i += 2;
+            }
+            "--divergence" => {
+                parsed.divergence = Some(number(args, i)?);
+                i += 2;
+            }
+            "--stability" => {
+                parsed.stability = true;
+                i += 1;
+            }
+            "--windows" => {
+                parsed.windows = true;
+                i += 1;
+            }
+            "--replay-identity" => {
+                parsed.replay_identity = true;
+                i += 1;
+            }
+            "--sweep" => {
+                parsed.sweep = true;
+                i += 1;
+            }
+            "--hyst-k" => {
+                let raw = value(args, i)?;
+                parsed.hyst_k = Some(
+                    raw.parse::<u8>()
+                        .map_err(|_| format!("--hyst-k needs a whole number, got {raw}"))?,
+                );
+                i += 2;
+            }
+            "--hyst-dissolve" => {
+                parsed.hyst_dissolve = Some(number(args, i)?);
+                i += 2;
+            }
+            "--hyst-recut" => {
+                parsed.hyst_recut = Some(number(args, i)?);
+                i += 2;
+            }
+            "--hyst-floor" => {
+                parsed.hyst_floor = Some(number(args, i)?);
+                i += 2;
+            }
+            "--hyst-ratio" => {
+                parsed.hyst_ratio = Some(number(args, i)?);
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option {other}"));
+            }
+            other => {
+                if positional_taken {
+                    return Err(format!("unexpected argument {other}"));
+                }
+                parsed.dir = PathBuf::from(other);
+                positional_taken = true;
+                i += 1;
+            }
+        }
+    }
+    Ok(Some(parsed))
+}
+
 fn main() {
     log::set_logger(&STDERR_LOG).ok();
     log::set_max_level(if std::env::var("LAB_DEBUG").is_ok() {
@@ -767,78 +901,33 @@ fn main() {
         log::LevelFilter::Info
     });
     let args: Vec<String> = std::env::args().collect();
-    let dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("citycorpus"));
-    let mut out_dir: Option<PathBuf> = None;
-    let mut only_sport: Option<String> = None;
-    let mut only_method: Option<String> = None;
-    let mut divergence: Option<f64> = None;
-    let mut stability = false;
-    let mut windows = false;
-    let mut sweep = false;
-    let mut replay_identity = false;
-    let mut hyst_k: Option<u8> = None;
-    let mut hyst_dissolve: Option<f64> = None;
-    let mut hyst_recut: Option<f64> = None;
-    let mut hyst_floor: Option<f64> = None;
-    let mut hyst_ratio: Option<f64> = None;
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--out" => {
-                out_dir = args.get(i + 1).map(PathBuf::from);
-                i += 2;
-            }
-            "--sport" => {
-                only_sport = args.get(i + 1).cloned();
-                i += 2;
-            }
-            "--method" => {
-                only_method = args.get(i + 1).cloned();
-                i += 2;
-            }
-            "--divergence" => {
-                divergence = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--stability" => {
-                stability = true;
-                i += 1;
-            }
-            "--windows" => {
-                windows = true;
-                i += 1;
-            }
-            "--replay-identity" => {
-                replay_identity = true;
-                i += 1;
-            }
-            "--hyst-k" => {
-                hyst_k = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--hyst-dissolve" => {
-                hyst_dissolve = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--hyst-recut" => {
-                hyst_recut = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--hyst-floor" => {
-                hyst_floor = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--hyst-ratio" => {
-                hyst_ratio = args.get(i + 1).and_then(|s| s.parse().ok());
-                i += 2;
-            }
-            "--sweep" => {
-                sweep = true;
-                i += 1;
-            }
-            _ => i += 1,
+    let LabArgs {
+        dir,
+        out_dir,
+        only_sport,
+        only_method,
+        divergence,
+        stability,
+        mut windows,
+        sweep,
+        replay_identity,
+        hyst_k,
+        hyst_dissolve,
+        hyst_recut,
+        hyst_floor,
+        hyst_ratio,
+    } = match parse_args(&args[1..]) {
+        Ok(Some(parsed)) => parsed,
+        Ok(None) => {
+            println!("{USAGE}");
+            return;
         }
-    }
+        Err(message) => {
+            eprintln!("{message}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
     // Identity replay reuses the loading-window detections, so it implies the
     // window pass. Params default to the identity.rs plateau values; the CLI
     // overrides let a tuning run pass explicit values without touching defaults.
@@ -2231,4 +2320,53 @@ fn main() {
 
     println!();
     println!("Peak RSS: {:.0} MB", peak_rss_mb());
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_misspelt_flag_is_rejected_rather_than_skipped() {
+        let err = parse_args(&args(&["--sweeep"])).unwrap_err();
+        assert!(err.contains("--sweeep"), "{err}");
+    }
+
+    #[test]
+    fn help_asks_for_the_usage_rather_than_a_run() {
+        assert!(parse_args(&args(&["--help"])).unwrap().is_none());
+        assert!(parse_args(&args(&["-h"])).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_positional_corpus_and_out_are_both_read() {
+        let parsed = parse_args(&args(&["/corpus", "--out", "/out", "--sweep"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.dir, PathBuf::from("/corpus"));
+        assert_eq!(parsed.out_dir, Some(PathBuf::from("/out")));
+        assert!(parsed.sweep);
+    }
+
+    #[test]
+    fn no_arguments_keeps_the_documented_default_corpus() {
+        let parsed = parse_args(&[]).unwrap().unwrap();
+        assert_eq!(parsed.dir, PathBuf::from("citycorpus"));
+        assert_eq!(parsed.out_dir, None);
+    }
+
+    #[test]
+    fn a_flag_missing_its_value_is_rejected() {
+        assert!(parse_args(&args(&["--out"])).is_err());
+        assert!(parse_args(&args(&["--divergence", "wide"])).is_err());
+    }
+
+    #[test]
+    fn a_second_positional_is_rejected() {
+        assert!(parse_args(&args(&["/corpus", "/other"])).is_err());
+    }
 }
