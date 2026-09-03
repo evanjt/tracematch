@@ -911,17 +911,10 @@ pub fn lift_spans_tuned(
 /// paths are anything but straight. A candidate span is therefore
 /// rescued when any track descends most of its rise along its line with
 /// a near-straight path of its own.
-pub fn confirmed_lift_spans(
-    tracks: &[(&str, &[GpsPoint])],
-    seconds: &[&[f64]],
-) -> Vec<Vec<(usize, usize)>> {
-    confirmed_lift_spans_tuned(tracks, seconds, &Tunables::DEFAULT)
-}
-
-/// [`confirmed_lift_spans`] with explicit [`Tunables`], for the lab's
-/// sweeps. `seconds` holds each track's per-point time offsets,
-/// parallel to `tracks`; pass `&[]` (or an empty slice per untimed
-/// track) where time is unavailable.
+///
+/// `seconds` holds each track's per-point time offsets, parallel to
+/// `tracks`; pass `&[]` (or an empty slice per untimed track) where time
+/// is unavailable. [`Tunables`] is explicit, for the lab's sweeps.
 pub fn confirmed_lift_spans_tuned(
     tracks: &[(&str, &[GpsPoint])],
     seconds: &[&[f64]],
@@ -6716,34 +6709,12 @@ impl ClusterEvidence {
 /// activity that bridges two clusters merges them and rebuilds the union (the
 /// one genuinely global event, bounded by the merged size). The add cost is
 /// therefore O(touched cluster), not O(whole pool) as the naive re-batch is.
-pub fn detect_sections_unified_incremental_cached(
-    cache: &mut SectionEvidenceCache,
-    existing: &[FrequentSection],
-    pool: &[(String, Vec<GpsPoint>)],
-    new_activity_ids: &[&str],
-    seconds: &[&[f64]],
-    sport_types: &HashMap<String, String>,
-    config: &SectionConfig,
-) -> UnifiedIncrementalResult {
-    detect_sections_unified_incremental_cached_with_policy(
-        cache,
-        existing,
-        pool,
-        new_activity_ids,
-        seconds,
-        sport_types,
-        config,
-        &SectionUpdatePolicy::default(),
-    )
-}
-
-/// [`detect_sections_unified_incremental_cached`] with control over what
-/// the fold may do to geometry the caller already holds.
 ///
-/// Discovery is unchanged, pins never alter which ground the evidence
-/// supports, only which cut is emitted for ground already spoken for, so
-/// the catalogue under the default policy is identical to the plain
-/// entry point, and the batch-parity gates hold for both.
+/// `policy` controls what the fold may do to geometry the caller already
+/// holds. Discovery is unchanged, pins never alter which ground the
+/// evidence supports, only which cut is emitted for ground already spoken
+/// for, so the catalogue under `SectionUpdatePolicy::default()` is the one
+/// the batch-parity gates measure.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_sections_unified_incremental_cached_with_policy(
     cache: &mut SectionEvidenceCache,
@@ -7703,7 +7674,7 @@ mod tests {
         down.reverse();
         let tracks: Vec<(&str, &[GpsPoint])> =
             vec![("up", up.as_slice()), ("down", down.as_slice())];
-        let confirmed = confirmed_lift_spans(&tracks, &[]);
+        let confirmed = confirmed_lift_spans_tuned(&tracks, &[], &Tunables::DEFAULT);
         assert!(confirmed.iter().all(|c| c.is_empty()));
     }
 
@@ -7720,7 +7691,7 @@ mod tests {
             .collect();
         let tracks: Vec<(&str, &[GpsPoint])> =
             vec![("up", up.as_slice()), ("down", down.as_slice())];
-        let confirmed = confirmed_lift_spans(&tracks, &[]);
+        let confirmed = confirmed_lift_spans_tuned(&tracks, &[], &Tunables::DEFAULT);
         assert_eq!(confirmed[0].len(), 1);
     }
 

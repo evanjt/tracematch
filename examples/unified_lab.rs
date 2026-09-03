@@ -1036,7 +1036,11 @@ fn main() {
             .map(|a| (a.id.as_str(), a.points.as_slice()))
             .collect();
         let secs_view: Vec<&[f64]> = activities.iter().map(|a| a.seconds.as_slice()).collect();
-        let confirmed = tracematch::confirmed_lift_spans(&track_view, &secs_view);
+        let confirmed = tracematch::confirmed_lift_spans_tuned(
+            &track_view,
+            &secs_view,
+            &tracematch::Tunables::DEFAULT,
+        );
         let mut feats: Vec<serde_json::Value> = Vec::new();
         for (a, spans) in activities.iter().zip(&confirmed) {
             for &(s, e) in spans {

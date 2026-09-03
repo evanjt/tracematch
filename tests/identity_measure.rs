@@ -160,7 +160,7 @@ fn drip_measure(corpus: &LifecycleCorpus) -> MeasureRun {
         let new_ids = [pool.last().unwrap().0.as_str()];
 
         // Raw batch catalogue for this pool (the batch truth the fold damps).
-        let result = detect_sections_unified_incremental_cached(
+        let result = detect_sections_unified_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,
@@ -168,6 +168,7 @@ fn drip_measure(corpus: &LifecycleCorpus) -> MeasureRun {
             &[],
             &sports,
             &cfg,
+            &SectionUpdatePolicy::default(),
         );
         cached_cat = result.catalogue;
 

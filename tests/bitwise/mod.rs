@@ -25,8 +25,8 @@ use baseline::Band;
 
 use tracematch::sections::FrequentSection;
 use tracematch::{
-    GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    sections::{confirmed_lift_spans, detect_sections_unified_incremental_dated},
+    GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy, Tunables,
+    sections::{confirmed_lift_spans_tuned, detect_sections_unified_incremental_dated},
 };
 
 pub struct Corpus {
@@ -172,7 +172,7 @@ pub fn lift_reach(c: &Corpus) -> (usize, usize) {
         .iter()
         .map(|(id, pts)| (id.as_str(), pts.as_slice()))
         .collect();
-    let spans = confirmed_lift_spans(&view, &seconds_view(&c.tracks, c));
+    let spans = confirmed_lift_spans_tuned(&view, &seconds_view(&c.tracks, c), &Tunables::DEFAULT);
     (
         spans.iter().map(Vec::len).sum(),
         spans

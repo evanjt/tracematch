@@ -91,9 +91,8 @@ pub use naming::{
 pub use unified::{
     BoundaryReason, BoundaryRecord, SectionEvidenceCache, SectionGeometryChange, SectionMergedAway,
     SectionUpdatePolicy, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans, confirmed_lift_spans_tuned, detect_sections_unified,
-    detect_sections_unified_dated, detect_sections_unified_explained,
-    detect_sections_unified_incremental, detect_sections_unified_incremental_cached,
+    confirmed_lift_spans_tuned, detect_sections_unified, detect_sections_unified_dated,
+    detect_sections_unified_explained, detect_sections_unified_incremental,
     detect_sections_unified_incremental_cached_with_policy,
     detect_sections_unified_incremental_dated, detect_sections_unified_incremental_observed,
     detect_sections_unified_tuned, lift_spans, lift_spans_tuned, self_pass_penalty,
@@ -104,48 +103,6 @@ pub use optimized::{
     SectionMatch, find_all_section_spans_in_route, find_sections_in_route,
     recalculate_section_polyline,
 };
-
-/// Detection mode for section detection
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum DetectionMode {
-    /// Lower thresholds, more sections detected
-    #[default]
-    Discovery,
-    /// Higher thresholds, fewer but more confident sections
-    Conservative,
-    /// Single-scale backward-compatible mode
-    Legacy,
-}
-
-impl DetectionMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DetectionMode::Discovery => "discovery",
-            DetectionMode::Conservative => "conservative",
-            DetectionMode::Legacy => "legacy",
-        }
-    }
-}
-
-impl std::fmt::Display for DetectionMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for DetectionMode {
-    type Err = ();
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "discovery" => Ok(DetectionMode::Discovery),
-            "conservative" => Ok(DetectionMode::Conservative),
-            "legacy" => Ok(DetectionMode::Legacy),
-            _ => Ok(DetectionMode::Discovery),
-        }
-    }
-}
 
 /// Scale name for multi-scale section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -207,55 +164,10 @@ pub struct SectionConfig {
     pub max_section_length: f64,
     /// Minimum number of activities that must share an overlap
     pub min_activities: u32,
-    /// Tolerance for clustering similar overlaps (meters)
-    pub cluster_tolerance: f64,
-    /// Number of sample points for AMD comparison (not for output!)
-    pub sample_points: u32,
-    /// Detection mode
-    pub detection_mode: DetectionMode,
-    /// Include potential sections with only 1-2 activities as suggestions
-    pub include_potentials: bool,
-    /// Preserve hierarchical sections (don't deduplicate short sections inside longer ones)
-    pub preserve_hierarchy: bool,
-    /// Retained for stored configs. Two adjacent hot cells merge
-    /// iff containment-of-minimum ≥ this threshold:
-    /// `|intersection| / min(|A|, |B|)`. Lower (≈0.3) → longer
-    /// continuous sections; higher (≈0.8) → more granular pieces
-    /// that split at any track divergence. Default 0.5.
-    #[serde(default = "default_jaccard_threshold")]
-    pub jaccard_threshold: f64,
-    /// Minimum number of *distinct routes* (not activities) that must
-    /// converge in a region for it to qualify as a section. The
-    /// "alphabet overlap" criterion: a section is the intersection of
-    /// many routes, not the repetition of one. Default 3.
-    #[serde(default = "default_min_routes")]
-    pub min_routes: u32,
-    /// Allow `split_high_variance_sections` postprocess step to fire.
-    /// This step extracts dense "core" portions of sections as
-    /// separate sections, useful for activity-based density input,
-    /// noisy/over-fragmenting for route-intersection input. Off by
-    /// default to avoid the 1.5× section-count multiplier.
-    #[serde(default)]
-    pub enable_density_splits: bool,
-    /// Multiplier on `proximity_threshold` for the `merge_nearby_sections`
-    /// postprocess step. Higher → more aggressive merging of nearby
-    /// fragments into single sections. Default 4.0 (200 m at the
-    /// default 150 m proximity).
-    #[serde(default = "default_merge_distance_multiplier")]
-    pub merge_distance_multiplier: f64,
-    /// Retained for stored configs. Minimum cell visits for a cell to count
-    /// as road network. Default 5.
-    #[serde(default = "default_min_cell_visits")]
-    pub min_cell_visits: u32,
     /// Fraction of outgoing traffic an exit must carry to count as
     /// "significant" for divergence-point detection. Default 0.15 (15%).
     #[serde(default = "default_divergence_threshold")]
     pub divergence_threshold: f64,
-    /// Minimum unique tracks per cell for corridor detection. Cells with
-    /// fewer unique visitors are not "hot" and won't participate in
-    /// support floors. Higher = fewer, more confident sections. Default 3.
-    #[serde(default = "default_min_corridor_tracks")]
-    pub min_corridor_tracks: u32,
     /// Detect over one pool rather than one per sport, so a road two
     /// sports share carries the traversals of both. Unified only. The
     /// sport label is derived from the traversals after the cut.
@@ -263,23 +175,8 @@ pub struct SectionConfig {
     pub pool_sports: bool,
 }
 
-fn default_jaccard_threshold() -> f64 {
-    0.5
-}
-fn default_min_routes() -> u32 {
-    3
-}
-fn default_merge_distance_multiplier() -> f64 {
-    4.0
-}
-fn default_min_cell_visits() -> u32 {
-    50
-}
 fn default_divergence_threshold() -> f64 {
     0.15
-}
-fn default_min_corridor_tracks() -> u32 {
-    2
 }
 fn default_pool_sports() -> bool {
     true
@@ -290,59 +187,13 @@ impl Default for SectionConfig {
         Self {
             // Tuned for consumer fitness data: GPS noise is higher than research-grade tracks
             // and per-user activity counts are sparse, so defaults are deliberately permissive.
-            // Override via SectionConfig { ..Default::default() } or conservative()/discovery()
-            // for stricter scenarios.
+            // Override via SectionConfig { ..Default::default() } for stricter scenarios.
             proximity_threshold: 200.0,
             min_section_length: 150.0,
             max_section_length: 200_000.0,
             min_activities: 2,
-            cluster_tolerance: 80.0,
-            sample_points: 50,
-            detection_mode: DetectionMode::Discovery,
-            include_potentials: true,
-            preserve_hierarchy: false,
-            jaccard_threshold: default_jaccard_threshold(),
-            min_routes: default_min_routes(),
-            enable_density_splits: false,
-            merge_distance_multiplier: default_merge_distance_multiplier(),
-            min_cell_visits: default_min_cell_visits(),
             divergence_threshold: default_divergence_threshold(),
-            min_corridor_tracks: default_min_corridor_tracks(),
             pool_sports: default_pool_sports(),
-        }
-    }
-}
-
-impl SectionConfig {
-    /// Create a discovery-mode config (lower thresholds, more sections)
-    pub fn discovery() -> Self {
-        Self {
-            detection_mode: DetectionMode::Discovery,
-            include_potentials: true,
-            preserve_hierarchy: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a conservative config (higher thresholds, fewer sections)
-    pub fn conservative() -> Self {
-        Self {
-            detection_mode: DetectionMode::Conservative,
-            include_potentials: false,
-            min_activities: 4,
-            preserve_hierarchy: false,
-            ..Default::default()
-        }
-    }
-
-    /// Create a legacy single-scale config (for backward compatibility)
-    pub fn legacy() -> Self {
-        Self {
-            detection_mode: DetectionMode::Legacy,
-            include_potentials: false,
-            preserve_hierarchy: false,
-            min_activities: 3,
-            ..Default::default()
         }
     }
 }
