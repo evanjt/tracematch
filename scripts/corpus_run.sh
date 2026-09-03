@@ -216,6 +216,7 @@ summarise() {
     if [ -f "$replay" ]; then
       awk -F'\t' 'NR == 2 {
         printf "phantom_mints\t%d\n", $13
+        printf "captures\t%d\n", $14
         printf "final_visible\t%d\n", $3
         printf "overlapping\t%d\n", $4
       }' "$replay"
