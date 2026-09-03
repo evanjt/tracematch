@@ -134,9 +134,6 @@ if [ -n "$RANGE" ]; then
     END_NAMES+=("$sha")
     END_DIRS+=("$wt")
   done
-  # One target directory for both ends: cargo fingerprints the sources, so
-  # the second build only pays for what changed.
-  export CARGO_TARGET_DIR="$OUT/target"
 else
   END_NAMES+=("tree")
   END_DIRS+=("$RUN_DIR")
@@ -153,6 +150,18 @@ trap cleanup EXIT
 
 failed=0
 
+# A worktree end builds into its own target directory. Two ends sharing one
+# ran the first end's lab binary for the second: cargo judged it fresh, and
+# the run reported the wrong revision's output under the right name.
+target_dir() {
+  local build="$1"
+  if [ "$build" = "$RUN_DIR" ]; then
+    echo ""
+  else
+    echo "CARGO_TARGET_DIR=$build/target"
+  fi
+}
+
 # Run the lab once. $1 build dir, $2 output dir, then the environment for
 # it as VAR=value words. Fails the run when the lab exits non-zero.
 run_lab() {
@@ -162,7 +171,8 @@ run_lab() {
   local pkg=()
   if [ "$build" = "$RUN_DIR" ]; then pkg=("${PKG[@]}"); fi
   # shellcheck disable=SC2086
-  if ! (cd "$build" && env "$@" cargo run "${pkg[@]}" --release --example unified_lab -- \
+  if ! (cd "$build" && env "$@" $(target_dir "$build") \
+      cargo run "${pkg[@]}" --release --example unified_lab -- \
       "$CORPUS" --sport All --replay-identity --out "$out" $LAB_ARGS) \
       > "$out/lab.log" 2>&1; then
     echo "  lab failed, see $out/lab.log" >&2
@@ -266,7 +276,7 @@ run_gate() {
   local build="${END_DIRS[-1]}"
   local pkg=()
   if [ "$build" = "$RUN_DIR" ]; then pkg=("${PKG[@]}"); fi
-  (cd "$build" && env "$@" TRACEMATCH_BITWISE_RECORD="$record" \
+  (cd "$build" && env "$@" $(target_dir "$build") TRACEMATCH_BITWISE_RECORD="$record" \
       cargo test "${pkg[@]}" --release --features "$feature" --test "$target" -- --nocapture) \
       > "$dir/$label.log" 2>&1
   local status=$?
