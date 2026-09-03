@@ -21,6 +21,17 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 /// Distinguishes a cost line from a digest line in the golden.
 pub const PREFIX: &str = "perf_";
 
+/// A line the gate never compares: the record of who moved the golden and
+/// why, written by `scripts/corpus_run.sh --rebase`. Carried forward by a
+/// rebase, so the file keeps its own history.
+pub const COMMENT: &str = "#";
+
+/// Set to a path, the gate also writes what it measured there, in golden
+/// form, whether or not the golden matched. A run can then diff the two
+/// files and decide about a rebase with the whole divergence in front of it
+/// rather than the first mismatching line an assertion names.
+pub const RECORD_ENV: &str = "TRACEMATCH_BITWISE_RECORD";
+
 // ---------------------------------------------------------------------------
 // Peak heap. Declared by each gate binary that includes this module, never by
 // the library, so only the gates pay the two atomics per allocation. The
@@ -112,9 +123,29 @@ pub fn recorded(golden: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
-/// The golden's lines that are not costs: the digests, untouched.
+/// The golden's lines that are not costs or comments: the digests, untouched.
 pub fn digest_lines(golden: &str) -> Vec<&str> {
-    golden.lines().filter(|l| !l.starts_with(PREFIX)).collect()
+    golden
+        .lines()
+        .filter(|l| !l.starts_with(PREFIX) && !l.starts_with(COMMENT) && !l.trim().is_empty())
+        .collect()
+}
+
+/// The golden's comment lines, in order.
+pub fn comment_lines(golden: &str) -> Vec<&str> {
+    golden.lines().filter(|l| l.starts_with(COMMENT)).collect()
+}
+
+/// A golden's text: its history first, then the digests, then the costs.
+pub fn compose(comments: &[&str], digests: &[String], costs: &[String]) -> String {
+    comments
+        .iter()
+        .map(|c| c.to_string())
+        .chain(digests.iter().cloned())
+        .chain(costs.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 /// Whether the golden's digest lines are not `digests`, so what it recorded
@@ -186,6 +217,26 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
     let existing = std::fs::read_to_string(path).ok();
     let rebase = std::env::var("TRACEMATCH_BITWISE_REBASE").is_ok_and(|v| v == "1");
 
+    let costs = if timed {
+        lines(measured)
+    } else {
+        existing
+            .as_deref()
+            .map(|g| lines(&borrowed(&recorded(g))))
+            .unwrap_or_default()
+    };
+    let comments: Vec<&str> = existing.as_deref().map(comment_lines).unwrap_or_default();
+    if let Ok(record) = std::env::var(RECORD_ENV)
+        && !record.trim().is_empty()
+    {
+        let record = Path::new(&record);
+        if let Some(dir) = record.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        std::fs::write(record, compose(&comments, digests, &costs)).expect("write bitwise record");
+        println!("measured golden recorded at {}", record.display());
+    }
+
     if let Some(golden) = existing.as_deref()
         && !rebase
     {
@@ -219,22 +270,7 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
         return;
     }
 
-    let costs = if timed {
-        lines(measured)
-    } else {
-        existing
-            .as_deref()
-            .map(|g| lines(&borrowed(&recorded(g))))
-            .unwrap_or_default()
-    };
-    let body = digests
-        .iter()
-        .cloned()
-        .chain(costs)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(path, &body).expect("write golden baseline");
+    std::fs::write(path, compose(&comments, digests, &costs)).expect("write golden baseline");
     println!(
         "golden baseline {} at {}",
         if rebase { "rewritten" } else { "recorded" },

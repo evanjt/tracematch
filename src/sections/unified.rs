@@ -268,6 +268,25 @@ pub enum BoundaryReason {
     /// queue on its own merits; this record marks the seam between a
     /// section and the next link of its chain.
     PassEnd { requeued_cells: u32 },
+    /// The seam pass clipped an overrunning end of this section's drawn
+    /// line back to where it meets a busier neighbour. Display only: the
+    /// counts were taken against the line before the clip, so this is
+    /// the record of how far the line the user sees differs from the
+    /// line the population was measured on.
+    SeamClip {
+        section_id: String,
+        clipped_metres: f64,
+        kept_metres: f64,
+    },
+    /// The redraw onto one real pass found no contributor whose pass
+    /// covers the drawn line, so the section was emitted on the
+    /// population the cluster gave it rather than the line's own. The
+    /// contributors are real; what is missing is a traversal of the
+    /// line the section shows.
+    DrawnEmpty {
+        section_id: String,
+        contributors: u32,
+    },
 }
 
 /// A detection outcome that carries its explanations.
@@ -5294,6 +5313,16 @@ fn detect_for_cluster_with_grid(
                 ids.sort();
                 section.activity_ids = ids;
                 section.activity_portions = drawn_portions;
+            } else {
+                let mid = section.polyline[section.polyline.len() / 2];
+                records.push(BoundaryRecord {
+                    latitude: mid.latitude,
+                    longitude: mid.longitude,
+                    reason: BoundaryReason::DrawnEmpty {
+                        section_id: section.id.clone(),
+                        contributors: section.activity_ids.len() as u32,
+                    },
+                });
             }
             // Every floor the candidate cleared was measured on the
             // pre-redraw evidence. The redraw swaps the consensus
@@ -5499,7 +5528,12 @@ fn detect_for_cluster_with_grid(
     );
     phase!("unify", t_chains);
     let t_seam = web_time::Instant::now();
-    reconcile_seam_overruns(&mut sections, coverage.ref_lat, config.min_section_length);
+    reconcile_seam_overruns(
+        &mut sections,
+        coverage.ref_lat,
+        config.min_section_length,
+        records,
+    );
     phase!("seam", t_seam);
     phase!("chains", t_chains);
     let t_enrich = web_time::Instant::now();
@@ -5527,7 +5561,12 @@ fn detect_for_cluster_with_grid(
 const SEAM_TOL_M: f64 = 25.0;
 const SEAM_RUN_M: f64 = 60.0;
 
-fn reconcile_seam_overruns(sections: &mut [FrequentSection], ref_lat: f64, min_len: f64) {
+fn reconcile_seam_overruns(
+    sections: &mut [FrequentSection],
+    ref_lat: f64,
+    min_len: f64,
+    records: &mut Vec<BoundaryRecord>,
+) {
     if sections.len() < 2 {
         return;
     }
@@ -5634,6 +5673,18 @@ fn reconcile_seam_overruns(sections: &mut [FrequentSection], ref_lat: f64, min_l
             continue;
         }
         kept_range[i] = (s, e);
+        // Recorded at the meet the clip snapped to, the lead's if both
+        // ends clipped, with the whole clip in one record.
+        let meet = if s > 0 { line[s] } else { line[e - 1] };
+        records.push(BoundaryRecord {
+            latitude: meet.latitude,
+            longitude: meet.longitude,
+            reason: BoundaryReason::SeamClip {
+                section_id: sections[i].id.clone(),
+                clipped_metres: (total - kept_m).max(0.0),
+                kept_metres: kept_m,
+            },
+        });
         sections[i].polyline = kept.to_vec();
         sections[i].distance_meters = kept_m;
         // The clip is relative to the line, so the range shifts with it.
@@ -7160,7 +7211,7 @@ fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
 /// thresholds to avoid drowning in noise, but the bonus is intentionally
 /// modest so a user with 500 activities doesn't have all their valid
 /// sections filtered away.
-fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
+pub fn required_visits_for_length(distance_meters: f64, total_activities: usize) -> u32 {
     // Softened from the 43a39da bonus of (0 / +1 / +2): the +2 tier was
     // filtering out genuine sections for users with many activities. The
     // base thresholds (2-6) already encode noise rejection per length tier.
@@ -8174,11 +8225,37 @@ mod seam_tests {
         let mut quiet = east_line(800.0, 1000.0, 10.0);
         quiet.extend(east_line(1010.0, 1780.0, 40.0));
         let mut sections = vec![sec("s_busy", 73, busy.clone()), sec("s_quiet", 65, quiet)];
-        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        let mut records = Vec::new();
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0, &mut records);
         assert_eq!(
             sections[0].polyline.len(),
             busy.len(),
             "the busier line must keep its full render"
+        );
+        let [record] = records.as_slice() else {
+            panic!("one clip, one record, got {}", records.len());
+        };
+        let BoundaryReason::SeamClip {
+            section_id,
+            clipped_metres,
+            kept_metres,
+        } = &record.reason
+        else {
+            panic!("the seam pass records a SeamClip, got {:?}", record.reason);
+        };
+        assert_eq!(section_id, "s_quiet");
+        // The 200 m lane plus the 31 m jump onto the diverging leg.
+        assert!(
+            (225.0..=237.0).contains(clipped_metres),
+            "the overrun is the clip, got {clipped_metres:.0}"
+        );
+        assert!(
+            (kept_metres - sections[1].distance_meters).abs() < 1e-6,
+            "kept metres is the line that remains"
+        );
+        assert!(
+            (record.longitude - sections[1].polyline[0].longitude).abs() < 1e-9,
+            "the record sits at the meet the line now starts from"
         );
         let q0 = &sections[1].polyline[0];
         let m_lng = 111_320.0 * 46.0f64.to_radians().cos();
@@ -8196,9 +8273,11 @@ mod seam_tests {
         let a = east_line(0.0, 1000.0, 0.0);
         let b = east_line(990.0, 1990.0, 8.0);
         let mut sections = vec![sec("s_a", 40, a.clone()), sec("s_b", 30, b.clone())];
-        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        let mut records = Vec::new();
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0, &mut records);
         assert_eq!(sections[0].polyline.len(), a.len());
         assert_eq!(sections[1].polyline.len(), b.len());
+        assert!(records.is_empty(), "no clip, no record: {records:?}");
     }
 
     #[test]
@@ -8226,7 +8305,7 @@ mod seam_tests {
             .collect();
         let ring_len = ring.len();
         let mut sections = vec![sec("s_path", 68, path), sec("s_ring", 9, ring)];
-        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0, &mut Vec::new());
         assert_eq!(
             sections[1].polyline.len(),
             ring_len,
@@ -8241,7 +8320,7 @@ mod seam_tests {
         let a = east_line(0.0, 1000.0, 0.0);
         let b = east_line(0.0, 1000.0, 40.0);
         let mut sections = vec![sec("s_a", 40, a.clone()), sec("s_b", 30, b.clone())];
-        reconcile_seam_overruns(&mut sections, 46.0, 150.0);
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0, &mut Vec::new());
         assert_eq!(sections[0].polyline.len(), a.len());
         assert_eq!(sections[1].polyline.len(), b.len());
     }

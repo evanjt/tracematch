@@ -9,7 +9,8 @@ mod bitwise;
 use std::sync::Mutex;
 
 use bitwise::baseline::{
-    Band, anchor_peak, digests_differ, peak_bytes, peak_rise_bytes, recorded, regressions,
+    Band, anchor_peak, comment_lines, compose, digest_lines, digests_differ, peak_bytes,
+    peak_rise_bytes, recorded, regressions,
 };
 
 /// The peak is process-wide, so the two cases that read it take turns. The
@@ -245,4 +246,47 @@ perf_peak_bytes 900000000
 ";
     let digests = ["A 0123456789abcdef".to_string()];
     assert!(!digests_differ(slower, &digests));
+}
+
+/// Scenario: a rebase wrote a dated line saying which range moved the golden.
+///
+/// Expected behaviour: the line is neither a digest nor a cost, so it can
+/// never make the golden stale or fail a band, and a rebase carries it
+/// forward ahead of the new digests so the file keeps its own history.
+#[test]
+fn a_comment_line_is_history_not_a_digest() {
+    let golden = "\
+# rebased 2026-09-03 by corpus_run.sh, range 295e4d7..1234abc
+A 0123456789abcdef
+perf_cold_ms 1000
+";
+    assert_eq!(digest_lines(golden), vec!["A 0123456789abcdef"]);
+    assert_eq!(recorded(golden), vec![("perf_cold_ms".to_string(), 1000)]);
+    assert!(!digests_differ(golden, &["A 0123456789abcdef".to_string()]));
+    assert_eq!(
+        comment_lines(golden),
+        vec!["# rebased 2026-09-03 by corpus_run.sh, range 295e4d7..1234abc"]
+    );
+}
+
+#[test]
+fn a_rebase_keeps_the_history_ahead_of_the_new_digests() {
+    let comments = ["# first", "# second"];
+    let digests = ["A fedcba9876543210".to_string()];
+    let costs = ["perf_cold_ms 900".to_string()];
+    assert_eq!(
+        compose(&comments, &digests, &costs),
+        "# first\n# second\nA fedcba9876543210\nperf_cold_ms 900\n"
+    );
+    // The composed text reads back as it was composed.
+    let text = compose(&comments, &digests, &costs);
+    assert_eq!(comment_lines(&text), comments);
+    assert_eq!(digest_lines(&text), vec!["A fedcba9876543210"]);
+    assert_eq!(recorded(&text), vec![("perf_cold_ms".to_string(), 900)]);
+}
+
+#[test]
+fn a_blank_line_in_a_golden_is_not_a_digest() {
+    let golden = "A 0123456789abcdef\n\nperf_cold_ms 1000\n";
+    assert_eq!(digest_lines(golden), vec!["A 0123456789abcdef"]);
 }

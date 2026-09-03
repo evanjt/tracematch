@@ -1317,6 +1317,19 @@ impl HysteresisState {
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
+
+    /// Visible ids whose debounce is a re-cut, sorted: the batch has
+    /// drawn their ground materially differently and the held geometry
+    /// is frozen until the change sustains. An id's first step in this
+    /// list is the step it competed on a footprint the batch had already
+    /// superseded, which is the window a duplicate can be minted in.
+    pub fn pending_recut_ids(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter(|(_, p)| p.target.is_some())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
