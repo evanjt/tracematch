@@ -195,15 +195,17 @@ summarise() {
   {
     awk -F'\t' 'NR > 1 {
         n++
-        if ($7 == 0) under_activity++
-        if ($8 == 0) under_support++
-        if ($9 > 0) { clipped++; clip_m += $9 }
-        if ($10 == 1) drawn_empty++
+        if ($8 == 0) under_activity++
+        if ($9 == 0) under_support++
+        if ($10 == 0) under_support_base++
+        if ($11 > 0) { clipped++; clip_m += $11 }
+        if ($12 == 1) drawn_empty++
       }
       END {
         printf "sections\t%d\n", n
         printf "under_activity_floor\t%d\n", under_activity
         printf "under_support_floor\t%d\n", under_support
+        printf "under_support_floor_base\t%d\n", under_support_base
         printf "seam_clipped\t%d\n", clipped
         printf "seam_clipped_metres\t%.0f\n", clip_m
         printf "drawn_empty\t%d\n", drawn_empty

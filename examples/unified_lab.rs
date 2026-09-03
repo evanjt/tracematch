@@ -503,10 +503,12 @@ fn analyse(
 /// detection the GeoJSON beside it was drawn from.
 ///
 /// `required_visits` is `required_visits_for_length` at the section's
-/// emitted length over the whole corpus. The detector measures the creating
-/// floor against the tracks with opportunity near the candidate, which is
-/// at most the corpus, so this column is the floor's upper bound where the
-/// two disagree. `occasion_days` counts distinct calendar days over
+/// emitted length over the whole corpus, and `required_visits_base` the
+/// same with no corpus bonus. The detector measures the creating floor
+/// against the tracks with opportunity near the candidate, which is at
+/// most the corpus and usually under the bonus threshold, so the floor a
+/// section actually cleared sits between the two columns.
+/// `occasion_days` counts distinct calendar days over
 /// `activity_ids`, an undated activity counting alone, as `has_support`
 /// counts them. `activity_floor` is the redraw's `min_activities` test and
 /// `support_floor` the occasion-day test the candidate cleared to exist,
@@ -540,8 +542,9 @@ fn write_sections_table(
         }
     }
     let mut out = String::from(
-        "id\tmetres\tactivities\tvisits\trequired_visits\toccasion_days\tactivity_floor\t\
-         support_floor\tseam_clipped_m\tdrawn_empty\trep\n",
+        "id\tmetres\tactivities\tvisits\trequired_visits\trequired_visits_base\t\
+         occasion_days\tactivity_floor\tsupport_floor\tsupport_floor_base\tseam_clipped_m\t\
+         drawn_empty\trep\n",
     );
     for s in sections {
         let mut days: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -556,18 +559,22 @@ fn write_sections_table(
         }
         let occasion_days = days.len() + undated;
         let required = required_visits_for_length(s.distance_meters, n_tracks);
+        let required_base = required_visits_for_length(s.distance_meters, 0);
         let activity_floor = s.activity_ids.len() as u32 >= min_activities;
         let support_floor = occasion_days as u32 >= required.max(min_activities);
+        let support_floor_base = occasion_days as u32 >= required_base.max(min_activities);
         out.push_str(&format!(
-            "{}\t{:.0}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\t{}\n",
+            "{}\t{:.0}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\t{}\n",
             s.id,
             s.distance_meters,
             s.activity_ids.len(),
             s.visit_count,
             required,
+            required_base,
             occasion_days,
             u8::from(activity_floor),
             u8::from(support_floor),
+            u8::from(support_floor_base),
             clipped.get(s.id.as_str()).copied().unwrap_or(0.0),
             u8::from(drawn_empty.contains_key(s.id.as_str())),
             s.representative_activity_id,
