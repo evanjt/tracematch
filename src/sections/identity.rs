@@ -355,17 +355,13 @@ pub struct IdentityParams {
     /// marginal-capture stress scenario (`tests/inheritance_stress.rs`).
     pub merge_mutual_floor: f64,
     /// Least share of a candidate's metres a CONTAINED prior must carry to keep
-    /// the containment tier. At the default 0.0 every contained prior keeps it,
-    /// so a 100 m prior lying inside a 10 km candidate out-ranks a prior
-    /// covering most of it, purely on age. Above 0.0 a prior under the ratio
-    /// drops to the bare same-corridor tier: it still competes, and still
-    /// carries its own ground where that ground is detected, it just cannot
-    /// take a candidate away from a prior that dominates it. Unlike the floor,
-    /// which removes the prior from the candidate's competition entirely, this
-    /// only reorders. Where a ratio demotes every contained prior, the longest
+    /// the containment tier, 0.3. A prior under it drops to the bare
+    /// same-corridor tier, so it still competes and still carries its own
+    /// ground, it just cannot take a candidate from a prior that dominates it
+    /// on age alone. Where the ratio demotes every contained prior, the longest
     /// of them takes the candidate: the guard measures against the candidate,
-    /// so age alone would otherwise hand it back to the shortest. No value has
-    /// been confirmed on a corpus, so it ships off.
+    /// so age alone would otherwise hand it back to the shortest. 0.0 turns it
+    /// off.
     pub merge_size_ratio: f64,
 }
 
@@ -373,7 +369,7 @@ impl Default for IdentityParams {
     fn default() -> Self {
         Self {
             merge_mutual_floor: 0.0,
-            merge_size_ratio: 0.0,
+            merge_size_ratio: 0.3,
         }
     }
 }
@@ -745,9 +741,8 @@ pub struct HysteresisParams {
     /// 0.0 keeps the shipped behaviour; a non-zero floor is the opt-in
     /// marginal-capture fix.
     pub merge_mutual_floor: f64,
-    /// Passed through to [`plan_identity_tuned`]'s [`IdentityParams`]. Default
-    /// 0.0 keeps the shipped behaviour; above 0.0 a contained prior carrying
-    /// less than this share of a candidate's metres loses the containment tier.
+    /// Passed through to [`plan_identity_tuned`]'s [`IdentityParams`] at the
+    /// same 0.3.
     pub merge_size_ratio: f64,
 }
 
@@ -758,7 +753,7 @@ impl Default for HysteresisParams {
             dissolve_pressure_hi: DISSOLVE_PRESSURE_HI,
             recut_agreement: RECUT_AGREEMENT,
             merge_mutual_floor: 0.0,
-            merge_size_ratio: 0.0,
+            merge_size_ratio: 0.3,
         }
     }
 }
@@ -1593,20 +1588,29 @@ mod tests {
     fn merge_floor_lets_the_dominant_junior_win_over_a_marginal_senior() {
         // A (senior) is a short section marginally inside the long candidate Z;
         // B (junior) dominantly covers Z without agreeing on its extent, so
-        // neither prior reaches the 1:1 agreement tier. At the default 0.0
-        // floor seniority wins, so A captures Z. Above A's marginal overlap
-        // the dominant junior B wins instead, and A folds into B.
+        // neither prior reaches the 1:1 agreement tier. With BOTH guards off
+        // seniority wins, so A captures Z. Above A's marginal overlap the
+        // dominant junior B wins instead, and A folds into B. Both arms name
+        // the size ratio explicitly, so this isolates the floor from the ratio
+        // that now ships on.
         let long = line(46.0, 7.0, 120);
         let short = long[..20].to_vec();
         let most = long[..90].to_vec();
         let prior = vec![prior("s_A", short, 1, 3), prior("s_B", most, 2, 9)];
         let next = vec![cand(long, 12)];
 
-        let default_plan = plan_identity(&prior, &next);
+        let default_plan = plan_identity_tuned(
+            &prior,
+            &next,
+            &IdentityParams {
+                merge_size_ratio: 0.0,
+                ..IdentityParams::default()
+            },
+        );
         assert_eq!(
             default_plan.decisions,
             vec![Decision::MergeInherit { id: "s_A".into() }],
-            "default: the marginal senior captures the corridor"
+            "both guards off: the marginal senior captures the corridor"
         );
 
         let floored = plan_identity_tuned(
@@ -1614,13 +1618,13 @@ mod tests {
             &next,
             &IdentityParams {
                 merge_mutual_floor: 0.4,
-                ..IdentityParams::default()
+                merge_size_ratio: 0.0,
             },
         );
         assert_eq!(
             floored.decisions,
             vec![Decision::MergeInherit { id: "s_B".into() }],
-            "with the floor: the dominant junior keeps the corridor"
+            "with the floor alone: the dominant junior keeps the corridor"
         );
         assert_eq!(
             floored.retired,
@@ -1633,11 +1637,11 @@ mod tests {
 
     #[test]
     fn merge_size_ratio_lets_the_dominant_junior_win_over_a_marginal_senior() {
-        // The B27 shape. A (senior) is ~210 m marginally inside the ~1316 m
+        // A (senior) is ~210 m marginally inside the ~1316 m
         // candidate Z; B (junior) carries ~984 m of it. Neither reaches the
-        // agreement tier, both are contained, so at the shipped defaults A
-        // captures Z on age alone and the section that described that ground
-        // dies. Under a size ratio A loses the containment tier and B keeps it.
+        // agreement tier, both are contained, so with the ratio off A captures
+        // Z on age alone and the section that described that ground dies.
+        // Under the ratio A loses the containment tier and B keeps it.
         let long = line(46.0, 7.0, 120);
         let short = long[..20].to_vec();
         let most = long[..90].to_vec();
@@ -1648,9 +1652,17 @@ mod tests {
         let next = vec![cand(long.clone(), 12)];
 
         assert_eq!(
-            plan_identity(&prior, &next).decisions,
+            plan_identity_tuned(
+                &prior,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 0.0,
+                    ..IdentityParams::default()
+                }
+            )
+            .decisions,
             vec![Decision::MergeInherit { id: "s_A".into() }],
-            "shipped default: the marginal senior captures the corridor"
+            "ratio off: the marginal senior captures the corridor"
         );
 
         let guarded = plan_identity_tuned(
@@ -1682,7 +1694,7 @@ mod tests {
             &next,
             &IdentityParams {
                 merge_mutual_floor: 0.4,
-                ..IdentityParams::default()
+                merge_size_ratio: 0.0,
             },
         );
         assert_eq!(
@@ -1780,11 +1792,19 @@ mod tests {
             "dwarfs of equal metres still resolve by seniority"
         );
 
-        // The guard off is the shipped default and must be untouched: age wins.
+        // With the guard off nothing is dwarfed, so age alone decides.
         assert_eq!(
-            plan_identity(&prior, &next).decisions,
+            plan_identity_tuned(
+                &prior,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 0.0,
+                    ..IdentityParams::default()
+                },
+            )
+            .decisions,
             vec![Decision::MergeInherit { id: "s_A".into() }],
-            "guard off: the shipped default is still age first"
+            "guard off: age first"
         );
     }
 
@@ -1848,9 +1868,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_size_ratio_at_zero_changes_no_plan() {
-        // The shipped value. Every construction above must be byte-identical
-        // to the untuned plan, so the knob is inert until a corpus sets it.
+    fn merge_size_ratio_at_the_shipped_value_is_the_untuned_plan() {
+        // 0.3 is what ships, so naming it must be byte-identical to the untuned
+        // plan, and turning the knob off must not be.
         let long = line(46.0, 7.0, 120);
         let short = long[..20].to_vec();
         let most = long[..90].to_vec();
@@ -1861,11 +1881,78 @@ mod tests {
                 &prior,
                 &next,
                 &IdentityParams {
-                    merge_size_ratio: 0.0,
+                    merge_size_ratio: 0.3,
                     ..IdentityParams::default()
                 }
             ),
             plan_identity(&prior, &next)
+        );
+        assert_ne!(
+            plan_identity_tuned(
+                &prior,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 0.0,
+                    ..IdentityParams::default()
+                }
+            ),
+            plan_identity(&prior, &next),
+            "and 0.0 is the off arm, not the default"
+        );
+    }
+
+    #[test]
+    fn the_shipped_ratio_denies_a_marginal_senior_the_corridor() {
+        // A is ~210 m of a ~1316 m candidate and the senior; B carries ~984 m
+        // of it. Neither agrees on the extent, so containment and age would
+        // hand the corridor to A. The shipped ratio demotes A instead.
+        let long = line(46.0, 7.0, 120);
+        let short = long[..20].to_vec();
+        let most = long[..90].to_vec();
+        let prior = vec![prior("s_A", short, 1, 3), prior("s_B", most, 2, 9)];
+        let next = vec![cand(long, 12)];
+
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "the dominant junior keeps the corridor at the shipped ratio"
+        );
+        assert_eq!(
+            plan.retired,
+            vec![Retirement {
+                id: "s_A".into(),
+                reason: RetireReason::MergedInto { id: "s_B".into() },
+            }],
+            "and the marginal senior retires INTO it, not dissolved"
+        );
+    }
+
+    #[test]
+    fn the_shipped_ratio_cuts_at_three_tenths_of_the_candidate() {
+        // The boundary. `line` steps 1e-4 deg of latitude, ~11 m a point, so a
+        // prefix of n points carries n - 1 of the candidate's 119 steps. 37
+        // points is 0.302 of it and keeps the containment tier, 35 points is
+        // 0.286 and loses it.
+        let long = line(46.0, 7.0, 120);
+        let above = long[..37].to_vec();
+        let below = long[..35].to_vec();
+
+        let senior_below = vec![
+            prior("s_A", below.clone(), 1, 3),
+            prior("s_B", above.clone(), 2, 3),
+        ];
+        assert_eq!(
+            plan_identity(&senior_below, &[cand(long.clone(), 12)]).decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "a senior under the ratio loses the corridor to the prior above it"
+        );
+
+        let senior_above = vec![prior("s_A", above, 1, 3), prior("s_B", below, 2, 3)];
+        assert_eq!(
+            plan_identity(&senior_above, &[cand(long, 12)]).decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }],
+            "a senior above the ratio still wins on age"
         );
     }
 
