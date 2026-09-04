@@ -2066,10 +2066,10 @@ fn main() {
                 }
             };
 
-            // Neither knob has a corpus-confirmed value. With nothing named the
-            // on-arm is the floor at 0.4, the original two-arm comparison; a
-            // list on either flag runs the off arm and then every floor with
-            // every ratio, one row each, so a grid reads off one invocation.
+            // Sweep arms, not what ships: `(0.0, 0.0)` is always the off arm to
+            // compare against. With nothing named the on-arm is the floor at
+            // 0.4; a list on either flag runs every floor with every ratio, one
+            // row each, so a grid reads off one invocation.
             let floors = hyst_floor
                 .clone()
                 .unwrap_or_else(|| vec![if hyst_ratio.is_some() { 0.0 } else { 0.4 }]);
