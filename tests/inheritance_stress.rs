@@ -398,6 +398,56 @@ fn marginal_capture_loses_the_corridor_to_the_dominant_junior_under_the_size_rat
     );
 }
 
+/// The (c4) variant where the ratio is set high enough to dwarf BOTH contained
+/// priors, driven through the fold.
+/// Scenario: neither prior carries the ratio's share of the fused corridor, so
+/// both fall to the bare same-corridor tier and the guard has no containment
+/// left to discriminate on.
+/// Expected behaviour: the corridor still goes to the longer prior. A ratio
+/// raised past both priors must not hand the ground back to the shortest one,
+/// which is the capture the guard exists to stop.
+#[test]
+fn a_ratio_that_dwarfs_every_prior_still_keeps_the_corridor_off_the_shortest() {
+    let long = north(46.0, 7.0, 120);
+    let short = long[..24].to_vec();
+    let mid = long[..60].to_vec();
+
+    let run = |ratio: f64| -> (String, String, bool, bool) {
+        let mut state = HysteresisState::new(HysteresisParams {
+            merge_size_ratio: ratio,
+            ..HysteresisParams::default()
+        });
+        state.step(&[cand(short.clone(), 3), cand(mid.clone(), 9)]);
+        let a = id_on_ground(&state, &short).expect("A visible");
+        let b = id_on_ground(&state, &mid).expect("B visible");
+        assert_ne!(a, b, "ratio {ratio}: A and B are two sections");
+
+        for _ in 0..(HysteresisParams::default().k + 2) {
+            state.step(&[cand(long.clone(), 12)]);
+        }
+        let a_holds_long = state
+            .ground_of(&a)
+            .is_some_and(|g| mutual_overlap(g, &long) >= 0.85);
+        (a.clone(), b.clone(), a_holds_long, state.is_tombstoned(&b))
+    };
+
+    println!("\n================ (c4) every prior dwarfed ================");
+    for ratio in [0.6, 1.0] {
+        let (a, b, a_holds_long, b_tombstoned) = run(ratio);
+        println!(
+            "ratio {ratio}: A={a} holds the corridor = {a_holds_long}; B={b} tombstoned = {b_tombstoned}"
+        );
+        assert!(
+            !a_holds_long,
+            "ratio {ratio}: the shortest prior must not end up holding the long corridor"
+        );
+        assert!(
+            !b_tombstoned,
+            "ratio {ratio}: the longer prior must not be tombstoned"
+        );
+    }
+}
+
 /// The (c2) variant WITH an alternative home for the senior, driven through a
 /// full hysteresis run. Historically this shape accreted duplicate corridors
 /// at floor 0.0 (the displaced sections were held by the debounce while Z
