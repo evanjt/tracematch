@@ -624,3 +624,37 @@ fn mn_braid_plan_is_deterministic_and_permutation_stable() {
         "the permuted plan must also be deterministic"
     );
 }
+
+/// The (c3) shape driven through the fold at the SHIPPED defaults, with no
+/// tuned arm. Scenario: the marginal senior and the dominant junior both merely
+/// contained in one corridor, which is the capture this whole knob exists for.
+/// Expected behaviour: what ships denies it, so the assertion is about the
+/// default and not about a value the lab can set.
+#[test]
+fn the_shipped_defaults_deny_the_marginal_capture_through_the_fold() {
+    let long = north(46.0, 7.0, 120);
+    let short = long[..20].to_vec();
+    let most = long[..90].to_vec();
+
+    let mut state = HysteresisState::default();
+    state.step(&[cand(short.clone(), 3), cand(most.clone(), 9)]);
+    let a = id_on_ground(&state, &short).expect("A visible");
+    let b = id_on_ground(&state, &most).expect("B visible");
+    assert_ne!(a, b, "A and B are two sections");
+
+    for _ in 0..(HysteresisParams::default().k + 2) {
+        state.step(&[cand(long.clone(), 12)]);
+    }
+
+    let a_holds_long = state
+        .ground_of(&a)
+        .is_some_and(|g| mutual_overlap(g, &long) >= 0.85);
+    assert!(
+        !a_holds_long,
+        "the marginal senior must not end up holding the long corridor at the shipped defaults"
+    );
+    assert!(
+        !state.is_tombstoned(&b),
+        "and the prior that described that ground must not be tombstoned"
+    );
+}
