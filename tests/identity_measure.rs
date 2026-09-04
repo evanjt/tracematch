@@ -32,7 +32,8 @@ use std::collections::BTreeSet;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::{
     CandidateSection, FrequentSection, GpsPoint, HysteresisState, SectionConfig,
-    SectionEvidenceCache, detect_sections_unified_incremental_cached, shares_ground,
+    SectionEvidenceCache, SectionUpdatePolicy,
+    detect_sections_unified_incremental_cached_with_policy, shares_ground,
 };
 
 // ============================================================================
