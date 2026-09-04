@@ -362,7 +362,10 @@ pub struct IdentityParams {
     /// carries its own ground where that ground is detected, it just cannot
     /// take a candidate away from a prior that dominates it. Unlike the floor,
     /// which removes the prior from the candidate's competition entirely, this
-    /// only reorders. No value has been confirmed on a corpus, so it ships off.
+    /// only reorders. Where a ratio demotes every contained prior, the longest
+    /// of them takes the candidate: the guard measures against the candidate,
+    /// so age alone would otherwise hand it back to the shortest. No value has
+    /// been confirmed on a corpus, so it ships off.
     pub merge_size_ratio: f64,
 }
 
@@ -514,6 +517,11 @@ pub fn plan_identity_memo(
     let dwarfed = |i: usize, j: usize| -> bool {
         guarded && c_metres[j] > 0.0 && p_metres[i] < params.merge_size_ratio * c_metres[j]
     };
+    // A contained prior the guard has just demoted. It measures the prior
+    // against the candidate, so a ratio above every contained prior demotes
+    // them all into one tier where age alone would hand the candidate to the
+    // shortest, which is the capture the guard exists to stop.
+    let demoted = |i: usize, j: usize| -> bool { contained[i][j] && dwarfed(i, j) };
 
     // Each candidate nominates a prior in three tiers. First a prior whose
     // extent AGREES with the candidate (mutual overlap at or above
@@ -553,6 +561,8 @@ pub fn plan_identity_memo(
                         std::cmp::Ordering::Equal => {
                             if tier_of(i) == 2 && mo[i][j] != mo[b][j] {
                                 mo[i][j] > mo[b][j]
+                            } else if demoted(i, j) && demoted(b, j) && p_metres[i] != p_metres[b] {
+                                p_metres[i] > p_metres[b]
                             } else {
                                 more_senior(&prior[i], &prior[b])
                             }
@@ -1678,6 +1688,103 @@ mod tests {
         assert_eq!(
             floor_only.decisions, guarded.decisions,
             "the two knobs agree on this shape, by different mechanisms"
+        );
+    }
+
+    #[test]
+    fn merge_size_ratio_hands_a_two_dwarf_tie_to_the_longer_prior_not_the_older() {
+        // Scenario: both contained priors are under the ratio, so both drop to
+        // the bare same-corridor tier and the tie-break there used to be age
+        // alone, handing the candidate back to the shortest prior. That is the
+        // outcome the ratio exists to stop, so a tie of dwarfs ranks on metres
+        // first.
+        let make = prior;
+        let long = line(46.0, 7.0, 120);
+        let short = long[..30].to_vec();
+        let mid = long[..52].to_vec();
+        let prior = vec![make("s_A", short, 1, 3), make("s_B", mid, 2, 9)];
+        let next = vec![cand(long.clone(), 12)];
+
+        // 0.3 dwarfs only A, so containment already settles it. The guard must
+        // not have moved this case.
+        assert_eq!(
+            plan_identity_tuned(
+                &prior,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 0.3,
+                    ..IdentityParams::default()
+                },
+            )
+            .decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "one dwarf: the undwarfed prior keeps the containment tier"
+        );
+
+        // 0.5 dwarfs both. Age alone would give the candidate back to the
+        // 30-point senior over the 52-point junior.
+        let both = plan_identity_tuned(
+            &prior,
+            &next,
+            &IdentityParams {
+                merge_size_ratio: 0.5,
+                ..IdentityParams::default()
+            },
+        );
+        assert_eq!(
+            both.decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "both dwarfed: the longer prior takes the candidate, not the older"
+        );
+        assert_eq!(
+            both.retired,
+            vec![Retirement {
+                id: "s_A".into(),
+                reason: RetireReason::MergedInto { id: "s_B".into() },
+            }],
+            "and the shorter senior retires INTO it"
+        );
+
+        // A ratio of 1.0 dwarfs everything short of the whole candidate, so
+        // the guard must not invert past its own extreme.
+        assert_eq!(
+            plan_identity_tuned(
+                &prior,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 1.0,
+                    ..IdentityParams::default()
+                },
+            )
+            .decisions,
+            vec![Decision::MergeInherit { id: "s_B".into() }],
+            "every prior dwarfed: still the longer one"
+        );
+
+        // Equal metres leaves nothing for the metres term to say, so seniority
+        // decides, which is the rule the tie-break falls back to.
+        let twin_a = long[..30].to_vec();
+        let twin_b = long[90..].to_vec();
+        let twins = vec![make("s_C", twin_a, 1, 3), make("s_D", twin_b, 2, 9)];
+        assert_eq!(
+            plan_identity_tuned(
+                &twins,
+                &next,
+                &IdentityParams {
+                    merge_size_ratio: 0.5,
+                    ..IdentityParams::default()
+                },
+            )
+            .decisions,
+            vec![Decision::MergeInherit { id: "s_C".into() }],
+            "dwarfs of equal metres still resolve by seniority"
+        );
+
+        // The guard off is the shipped default and must be untouched: age wins.
+        assert_eq!(
+            plan_identity(&prior, &next).decisions,
+            vec![Decision::MergeInherit { id: "s_A".into() }],
+            "guard off: the shipped default is still age first"
         );
     }
 
