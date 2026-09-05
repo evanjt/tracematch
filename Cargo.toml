@@ -29,6 +29,30 @@ public-corpus = []
 # Phase timers on stderr for the lab and the drip gate. Never on by default.
 profile = []
 
+# Cargo honours a profile only at a workspace root, so this one applies when the
+# crate is built standalone: its own CI, the wasm build and the web lab. Inside
+# the veloq workspace the root declares the same settings and this one is
+# ignored, which cargo says out loud on every build there: "profiles for the non
+# root package will be ignored". That warning is the cost of pinning the
+# standalone build and is not a reason to delete this. The two must agree, and
+# a test in veloqrs asserts they do.
+#
+# codegen-units is the one that bites. At the default 16, whether rstar's
+# generic AABB distance methods inline into the section fold's nearest-neighbour
+# queries depends on how the partitioner happens to split the crate, and an
+# unrelated edit anywhere can flip it. That is worth ~200 ms on the warm-add
+# median, a third of the per-activity budget. The corpus baselines are recorded
+# from this checkout and judged from the workspace one, so a profile here that
+# disagrees with the root reports the build rather than the detector.
+#
+# opt-level is left at cargo's own release default of 3. Asking for "s" cost
+# 2,297 ms against 700 ms on the same median, so the size it buys is not
+# affordable on a path a sync pays per downloaded activity.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = false
+
 [dependencies]
 geo = "0.29"
 rstar = "0.12"
@@ -73,6 +97,10 @@ required-features = ["synthetic"]
 [[bench]]
 name = "grouping_incremental"
 harness = false
+required-features = ["synthetic"]
+
+[[test]]
+name = "fold_corridor_convergence"
 required-features = ["synthetic"]
 
 [[test]]

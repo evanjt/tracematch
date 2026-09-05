@@ -303,6 +303,30 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
     {
         let want = digest_lines(golden);
         let got: Vec<&str> = digests.iter().map(|s| s.as_str()).collect();
+
+        // Labels first, and every line before any digest is compared. Each line
+        // is `<label> <digest>`, and zipping them positionally compares whatever
+        // happens to sit at the same index: a golden written by a harness that
+        // emitted one line this one does not offsets every comparison after it
+        // and reports the offset as a bitwise divergence. That is a golden to
+        // re-record, not output that moved, and the two must not read alike.
+        let labels = |lines: &[&str]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+                .collect()
+        };
+        let want_labels = labels(&want);
+        let got_labels = labels(&got);
+        assert_eq!(
+            want_labels, got_labels,
+            "the golden's scenarios are not this harness's. It was written by a \
+             different version of the gate, so nothing below can be compared \
+             against it and no digest here says the output moved. Re-record it \
+             from a run of this harness, which is a golden to replace rather \
+             than a rebase to justify."
+        );
+
         for (w, g) in want.iter().zip(got.iter()) {
             assert_eq!(
                 w, g,
@@ -313,7 +337,6 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
                  {REBASE_ENV}=\"<why it moved>\""
             );
         }
-        assert_eq!(want.len(), got.len(), "scenario count changed");
         if !want.is_empty() {
             println!("golden baseline matched: {} digests", got.len());
         }
