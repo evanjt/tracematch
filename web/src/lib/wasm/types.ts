@@ -76,7 +76,6 @@ export interface FrequentSection {
   representativeRange?: [number, number];
   activityIds: string[];
   activityPortions: SectionPortion[];
-  routeIds: string[];
   visitCount: number;
   distanceMeters: number;
   // A Rust HashMap, so serde-wasm-bindgen emits a JS Map, not an object.

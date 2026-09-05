@@ -104,7 +104,6 @@ fn frequent_section_serialises_the_keys_the_site_reads() {
             "rank",
             "representativeActivityId",
             "representativeRange",
-            "routeIds",
             "scale",
             "sportType",
             "stability",
