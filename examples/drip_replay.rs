@@ -1,7 +1,7 @@
 //! Chronological one-at-a-time drip replay over a real GPX corpus.
 //!
 //! Answers the drip-vs-bulk skepticism empirically: feed activities in
-//! date order through [`detect_sections_unified_incremental_cached`],
+//! date order through [`tracematch::detect_sections_unified_incremental_cached_with_policy`],
 //! record each fold's added/dissolved/changed counts and the geometry
 //! deltas, then run one [`detect_sections_unified`] batch over the same
 //! pool and compare the final catalogues on count, endpoints and length.

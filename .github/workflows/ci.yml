@@ -33,6 +33,10 @@ jobs:
       # them, and one drifted out of sync for three months unnoticed.
       - name: Check (no default features)
         run: cargo check -p tracematch --no-default-features
+      - name: Docs
+        run: cargo doc --no-deps --features synthetic
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Test
         run: cargo test
       # fold_foundation, identity_measure and fold_resume are invisible to the
