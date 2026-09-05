@@ -117,10 +117,6 @@ fn catalogue_digest(sections: &[tracematch::FrequentSection]) -> u64 {
             f.f64v(ap.distance_meters);
             f.strv(&format!("{:?}", ap.direction));
         }
-        f.u64v(s.route_ids.len() as u64);
-        for id in &s.route_ids {
-            f.strv(id);
-        }
         f.u64v(s.visit_count as u64);
         f.f64v(s.distance_meters);
         let mut trace_ids: Vec<&String> = s.activity_traces.keys().collect();

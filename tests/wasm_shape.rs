@@ -59,7 +59,6 @@ fn frequent_section_serialises_the_keys_the_site_reads() {
         representative_range: Some((0, 1)),
         activity_ids: vec!["a1".into()],
         activity_portions: Vec::new(),
-        route_ids: Vec::new(),
         visit_count: 1,
         distance_meters: 100.0,
         activity_traces: HashMap::new(),

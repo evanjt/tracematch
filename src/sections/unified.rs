@@ -4001,7 +4001,6 @@ fn consensus_leaf(
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
     track_map: &HashMap<&str, &[GpsPoint]>,
-    activity_to_route: &HashMap<&str, &str>,
     config: &SectionConfig,
 ) -> Option<FrequentSection> {
     let anchor = portions[0];
@@ -4045,16 +4044,7 @@ fn consensus_leaf(
         overlaps,
         activity_ids,
     };
-    process_cluster(
-        0,
-        cluster,
-        sport,
-        track_map,
-        activity_to_route,
-        config,
-        None,
-    )
-    .map(|mut sec| {
+    process_cluster(0, cluster, sport, track_map, config, None).map(|mut sec| {
         sec.id = String::new();
         sec
     })
@@ -4232,8 +4222,6 @@ fn detect_for_cluster_with_grid(
             (*id, b)
         })
         .collect();
-    let activity_to_route: HashMap<&str, &str> = HashMap::new();
-
     let mut sections: Vec<FrequentSection> = Vec::new();
 
     // Candidates that could stand as sections, scored by the real usage
@@ -4320,16 +4308,8 @@ fn detect_for_cluster_with_grid(
                     coverage.ref_lat,
                     cell_size,
                 );
-                let cons = (!leaves_ro.consensus.contains_key(&ckey)).then(|| {
-                    consensus_leaf(
-                        portions,
-                        sport,
-                        sport_tracks,
-                        &track_map,
-                        &activity_to_route,
-                        config,
-                    )
-                });
+                let cons = (!leaves_ro.consensus.contains_key(&ckey))
+                    .then(|| consensus_leaf(portions, sport, sport_tracks, &track_map, config));
                 let rows = (!leaves_ro.render.contains_key(&rkey)).then(|| {
                     render_leaf(
                         portions,
@@ -4665,14 +4645,7 @@ fn detect_for_cluster_with_grid(
         let processed = match leaves.consensus.get(&ckey).cloned() {
             Some(hit) => hit,
             None => {
-                let fresh = consensus_leaf(
-                    &portions,
-                    sport,
-                    sport_tracks,
-                    &track_map,
-                    &activity_to_route,
-                    config,
-                );
+                let fresh = consensus_leaf(&portions, sport, sport_tracks, &track_map, config);
                 leaves.consensus.insert(ckey, fresh.clone());
                 fresh
             }
@@ -8270,7 +8243,6 @@ mod seam_tests {
             representative_range: None,
             activity_ids: vec!["a".to_string()],
             activity_portions: Vec::new(),
-            route_ids: Vec::new(),
             visit_count: visits,
             distance_meters: dist,
             activity_traces: HashMap::new(),
@@ -8482,7 +8454,6 @@ mod portion_flag_tests {
             representative_range: None,
             activity_ids: vec!["a".to_string()],
             activity_portions: portions,
-            route_ids: Vec::new(),
             visit_count: 1,
             distance_meters: dist,
             activity_traces: HashMap::new(),

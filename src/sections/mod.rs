@@ -41,7 +41,7 @@ mod unified;
 use crate::GpsPoint;
 use crate::matching::calculate_route_distance;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub use progress::{
     AtomicProgressTracker, DetectionPhase, DetectionProgressCallback, NoopProgress,
@@ -246,9 +246,6 @@ pub struct FrequentSection {
     /// Each activity's portion (start/end indices, distance, direction)
     #[serde(alias = "activity_portions")]
     pub activity_portions: Vec<SectionPortion>,
-    /// Route group IDs that include this section
-    #[serde(alias = "route_ids")]
-    pub route_ids: Vec<String>,
     /// Number of times traversed
     #[serde(alias = "visit_count")]
     pub visit_count: u32,
@@ -375,7 +372,6 @@ pub fn process_cluster(
     cluster: OverlapCluster,
     sport_type: &str,
     track_map: &HashMap<&str, &[GpsPoint]>,
-    activity_to_route: &HashMap<&str, &str>,
     config: &SectionConfig,
     scale_name: Option<ScaleName>,
 ) -> Option<FrequentSection> {
@@ -395,20 +391,6 @@ pub fn process_cluster(
 
     // Compute activity portions for pace comparison
     let activity_portions = compute_activity_portions(&representative_polyline, track_map, config);
-
-    // Collect route IDs. Sorted after the dedupe, like `activity_id_vec` below:
-    // the set drains in hash order and this list is stored on the section.
-    let route_ids: Vec<String> = {
-        let mut ids: Vec<String> = cluster
-            .activity_ids
-            .iter()
-            .filter_map(|aid| activity_to_route.get(aid.as_str()).map(|s| s.to_string()))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        ids.sort();
-        ids
-    };
 
     // Extract traces for consensus computation only (not stored in section).
     // Sort for stable iteration order, HashSet iteration is randomized
@@ -498,7 +480,6 @@ pub fn process_cluster(
             ids
         },
         activity_portions,
-        route_ids,
         visit_count,
         distance_meters: consensus_distance,
         // Lazy activity_traces: empty during detection, populated on-demand

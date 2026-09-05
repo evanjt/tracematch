@@ -119,10 +119,6 @@ pub fn catalogue_digest(sections: &[FrequentSection]) -> u64 {
             h.f64(ap.distance_meters);
             h.str(&format!("{:?}", ap.direction));
         }
-        h.u64(s.route_ids.len() as u64);
-        for id in &s.route_ids {
-            h.str(id);
-        }
         h.u64(s.visit_count as u64);
         h.f64(s.distance_meters);
         // activity_traces: HashMap, so sort keys for a stable walk.
