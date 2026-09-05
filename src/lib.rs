@@ -120,10 +120,6 @@ pub enum Direction {
     Reverse,
     /// Only partially overlapping (low match quality)
     Partial,
-    /// Forward traversal (used in section laps)
-    Forward,
-    /// Backward traversal (used in section laps)
-    Backward,
 }
 
 impl Direction {
@@ -133,19 +129,17 @@ impl Direction {
             Direction::Same => "same",
             Direction::Reverse => "reverse",
             Direction::Partial => "partial",
-            Direction::Forward => "forward",
-            Direction::Backward => "backward",
         }
     }
 
-    /// Check if this direction is forward-like (Same or Forward).
+    /// Whether the traversal runs with the reference.
     pub fn is_forward_like(&self) -> bool {
-        matches!(self, Direction::Same | Direction::Forward)
+        matches!(self, Direction::Same)
     }
 
-    /// Check if this direction is reverse-like (Reverse or Backward).
+    /// Whether the traversal runs against the reference.
     pub fn is_reverse_like(&self) -> bool {
-        matches!(self, Direction::Reverse | Direction::Backward)
+        matches!(self, Direction::Reverse)
     }
 }
 
@@ -163,8 +157,6 @@ impl FromStr for Direction {
             "same" => Ok(Direction::Same),
             "reverse" => Ok(Direction::Reverse),
             "partial" => Ok(Direction::Partial),
-            "forward" => Ok(Direction::Forward),
-            "backward" => Ok(Direction::Backward),
             _ => Ok(Direction::Same), // Defensive fallback for corrupt data
         }
     }
