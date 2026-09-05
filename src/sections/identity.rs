@@ -133,8 +133,9 @@ pub fn shares_ground(a: &[GpsPoint], b: &[GpsPoint]) -> bool {
 }
 
 /// Side of the global cell a section's heart is quantised to for its id:
-/// twice [`GROUND_TOL_M`], independent of every setting, so two libraries
-/// that cut the same ground mint the same id.
+/// twice [`GROUND_TOL_M`], independent of every setting, so one library mints
+/// the same id for the same cut every time. Two libraries that cut the same
+/// ground seldom share a cell; [`shares_ground`] is what matches them.
 pub const ANCHOR_CELL_M: f64 = 100.0;
 
 /// The point half way along a line by arc length: where a section is, in
