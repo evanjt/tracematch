@@ -12,9 +12,9 @@
 //! same city) pay the full AMD cost only to be rejected by the
 //! endpoint check.
 //!
-//! This filter operates at the same boundary as
-//! [`crate::sections::spatial_filter`], but keyed on each route's
-//! start AND end points rather than every-track-point. Pairs are emitted
+//! This filter operates at the same boundary as the section detector's
+//! spatial pre-filter, but keyed on each route's start AND end points
+//! rather than every track point. Pairs are emitted
 //! only when at least one endpoint of route i lands within a
 //! neighbour-cell of an endpoint of route j. That correctly captures
 //! both the same-direction case (start_a ≈ start_b, end_a ≈ end_b)
@@ -93,8 +93,7 @@ impl RouteEndpointCells {
 ///
 /// `4 × endpoint_threshold` gives a 6× safety margin (effective filter
 /// radius is ~1.5 × cell_size with the 9-cell neighbour lookup),
-/// matching the safety margin used in
-/// [`crate::sections::spatial_filter::cell_size_for_proximity`].
+/// matching the safety margin the section detector's cell size carries.
 /// Floor at 50m so very tight thresholds don't produce useless cells.
 pub fn cell_size_for_endpoint_threshold(endpoint_threshold_meters: f64) -> f64 {
     let cell_size_meters = (endpoint_threshold_meters * 4.0).max(50.0);

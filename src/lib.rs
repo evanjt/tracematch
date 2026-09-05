@@ -513,7 +513,7 @@ pub struct ActivityMatchInfo {
 pub struct GroupingResult {
     /// The route groups
     pub groups: Vec<RouteGroup>,
-    /// Match info per activity: route_id -> Vec<ActivityMatchInfo>
+    /// Match info per activity: `route_id -> Vec<ActivityMatchInfo>`
     pub activity_matches: std::collections::HashMap<String, Vec<ActivityMatchInfo>>,
 }
 

@@ -206,7 +206,7 @@ pub struct BoundaryRecord {
 
 /// The mechanism behind a [`BoundaryRecord`], with the numbers that
 /// decided it. The decisions themselves live in
-/// [`merge_non_fork_boundaries`] and the selection backoff; records
+/// `merge_non_fork_boundaries` and the selection backoff; records
 /// only report them.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -476,7 +476,7 @@ pub struct Tunables {
     /// section's public face and must be where the majority went. A
     /// sustained run marks a variant walk; scattered single samples (a
     /// staircase jog, an end taper) never trip it. Three samples at
-    /// the 20 m step, mirroring [`minority_end_clip`]'s sustained-run
+    /// the 20 m step, mirroring `minority_end_clip`'s sustained-run
     /// floor. Calibrated on the city corpus's braid (a 1939 m section drawn by
     /// a diverter): share bars cannot tell a braid walk from a
     /// staircase jog, both 6-11 % of the line, a contiguous 60 m run
@@ -486,7 +486,7 @@ pub struct Tunables {
     /// DAYS, and, when every visit is dated, additionally requires
     /// the days to stretch beyond one stay: ground visited only within
     /// this window was one trip to a place, not repetition, however
-    /// many recordings the trip produced ([`occasion_support`]). A gap
+    /// many recordings the trip produced (`occasion_support`). A gap
     /// threshold cannot draw this line (a two-day trip and two commute
     /// days are both ~24 h apart; pairwise separation halves a daily
     /// commuter's support); the span can, a stay is compact, routine
@@ -1973,7 +1973,7 @@ fn merge_non_fork_boundaries(
 /// A clean line or a single lap scores ~0; a mid-line spin or a
 /// directionless junction blob scores high. This enforces the
 /// single-pass rule on the rendered representative: the cell-event cut
-/// in [`portions_for`]/[`simple_pass_range`] misses a spin too tight to
+/// in `portions_for` and `simple_pass_range` misses a spin too tight to
 /// dwell between re-entries, so the render guards against it with this.
 /// O(n): earlier points enter a `near`-sized spatial hash on a `gap`
 /// arc-lag, and the opening `gap` never enters, so a query only meets
@@ -3920,7 +3920,7 @@ fn detect_for_sport(
 ///
 /// The body past the grid is [`detect_for_cluster_with_grid`], shared
 /// verbatim with the cached incremental
-/// ([`detect_sections_unified_incremental_cached`]) so a touched cluster's
+/// ([`detect_sections_unified_incremental_cached_with_policy`]) so a touched cluster's
 /// recompute is byte-identical to the batch's.
 #[allow(clippy::too_many_arguments)]
 fn detect_for_cluster(
@@ -5709,7 +5709,7 @@ pub fn detect_sections_unified_explained(
 }
 
 /// [`detect_sections_unified_explained`] with per-activity start times.
-/// Starts chaining within [`Tunables::occasion_gap_h`] form one
+/// Starts chaining within [`Tunables::occasion_span_h`] form one
 /// OCCASION, and every support floor counts occasions instead of
 /// activities: a multi-day trip's files are one visit to their ground.
 /// Ids absent from `start_epochs` each count as their own occasion, so
@@ -5848,7 +5848,7 @@ pub struct UnifiedIncrementalResult {
     /// sibling inherited that prior), else `None`. The caller records lineage
     /// ("split into X and Y") without re-deriving the graph. On this path the
     /// prior ids are the caller's own section ids, so no id translation is
-    /// needed; it mirrors [`CandidateResolution::split_from`] on the visible
+    /// needed; it mirrors [`crate::sections::Decision::split_from`] on the visible
     /// path so the lab replay and the engine see the same lineage.
     pub added_split_from: Vec<Option<String>>,
     /// Prior sections whose ground decisively left the catalogue (the
@@ -5874,7 +5874,7 @@ pub struct UnifiedIncrementalResult {
     /// ground, `(prior_id, catalogue_id)`. Batch ids are positional and
     /// renumber freely between folds, so a caller holding the previous
     /// result re-keys through this map. Id-stable presentation with
-    /// debounce is the identity layer's job ([`HysteresisState`]); this
+    /// debounce is the identity layer's job ([`crate::sections::HysteresisState`]); this
     /// map is the raw, undamped fact of one fold. Id-stable presentation
     /// with debounce is the identity layer's job
     /// ([`super::identity::HysteresisState`]).
@@ -5902,7 +5902,7 @@ pub struct SectionMergedAway {
 /// recompute them.
 ///
 /// "Materially different" is an absolute one-evidence-cell test
-/// ([`cluster_cell_size`]) on endpoint shift or length delta: did the
+/// (`cluster_cell_size`) on endpoint shift or length delta: did the
 /// drawn line move perceptibly. The identity layer's
 /// [`RECUT_AGREEMENT`](super::identity::RECUT_AGREEMENT) asks a
 /// different, proportional question (is this re-cut material relative to
@@ -5964,7 +5964,7 @@ pub struct SectionUpdatePolicy {
 /// # Convergence, not accumulation
 ///
 /// Detection is already per-(sport, geo-cluster): the batch is a union
-/// over geographically disjoint clusters of [`detect_for_cluster`], and
+/// over geographically disjoint clusters of `detect_for_cluster`, and
 /// each cluster's catalogue is a pure function of that cluster's activity
 /// SET (proven order-free, canonical portion order, sorted grid
 /// accumulation). So the correct incremental only needs to re-run
@@ -6454,7 +6454,7 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 const EVIDENCE_CACHE_VERSION: u32 = 4;
 
 /// Persisted per-(sport, geo-cluster) evidence backing
-/// [`detect_sections_unified_incremental_cached`]. The engine holds one across
+/// [`detect_sections_unified_incremental_cached_with_policy`]. The engine holds one across
 /// folds and (in a later phase) persists it as a blob; this layer only defines
 /// the type and keeps it warm in memory.
 ///
