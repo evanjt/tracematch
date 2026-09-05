@@ -352,7 +352,7 @@ pub fn find_all_track_portions_with_gap(
 
 /// Detect direction by sampling multiple points along the track and checking
 /// their positions on the reference polyline. More robust than just comparing endpoints.
-fn detect_direction_robust(
+pub(crate) fn detect_direction_robust(
     track_portion: &[GpsPoint],
     reference: &[GpsPoint],
     ref_tree: &RTree<IndexedPoint>,

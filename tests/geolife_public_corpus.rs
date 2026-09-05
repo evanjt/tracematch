@@ -220,3 +220,87 @@ fn sections_only_cite_activities_that_were_supplied() {
         }
     }
 }
+
+/// How far along `line` a point sits, as a fraction of the line's length.
+fn progress_on(line: &[GpsPoint], cumulative: &[f64], point: &GpsPoint) -> f64 {
+    let mut best = (f64::INFINITY, 0.0);
+    for (i, p) in line.iter().enumerate() {
+        let d = tracematch::geo_utils::haversine_distance(p, point);
+        if d < best.0 {
+            best = (d, cumulative[i]);
+        }
+    }
+    let total = *cumulative.last().unwrap_or(&0.0);
+    if total <= 0.0 { 0.0 } else { best.1 / total }
+}
+
+/// The flag has to agree with the ground, measured independently of how the
+/// detector measured it. Each portion's points are projected onto the line the
+/// section emits and read for which way their progress runs; a portion flagged
+/// `Same` whose progress falls is a lap the app draws backwards, names as a
+/// best against the wrong population, and offers the wrong direction toggle for.
+#[test]
+fn every_portion_flag_agrees_with_travel_along_the_emitted_line() {
+    let corpus = load();
+    let tracks: HashMap<&str, &[GpsPoint]> = corpus
+        .tracks
+        .iter()
+        .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+        .collect();
+    let sections = detect(&corpus);
+
+    assert!(!sections.is_empty(), "no sections to check");
+
+    let mut measured = 0usize;
+    let mut disagreed = Vec::new();
+    for s in &sections {
+        if s.polyline.len() < 3 {
+            continue;
+        }
+        let mut cumulative = Vec::with_capacity(s.polyline.len());
+        let mut run = 0.0;
+        cumulative.push(0.0);
+        for w in s.polyline.windows(2) {
+            run += tracematch::geo_utils::haversine_distance(&w[0], &w[1]);
+            cumulative.push(run);
+        }
+
+        for portion in &s.activity_portions {
+            let Some(track) = tracks.get(portion.activity_id.as_str()) else {
+                continue;
+            };
+            let start = portion.start_index as usize;
+            let end = (portion.end_index as usize).min(track.len());
+            if end < start + 3 {
+                continue;
+            }
+            let first = progress_on(&s.polyline, &cumulative, &track[start]);
+            let last = progress_on(&s.polyline, &cumulative, &track[end - 1]);
+            // Only a lap that plainly crosses the section says anything about
+            // direction; a pass that barely moves along the line does not.
+            if (last - first).abs() < 0.5 {
+                continue;
+            }
+            measured += 1;
+            let travels_forward = last > first;
+            let flagged_forward = portion.direction == tracematch::Direction::Same;
+            if travels_forward != flagged_forward {
+                disagreed.push(format!(
+                    "{} / {} flagged {:?} but ran {:.2} to {:.2}",
+                    s.id, portion.activity_id, portion.direction, first, last
+                ));
+            }
+        }
+    }
+
+    assert!(
+        measured > 0,
+        "no portion crossed enough of its section to measure a direction"
+    );
+    assert!(
+        disagreed.is_empty(),
+        "{} of {measured} portions run against their own flag:\n{}",
+        disagreed.len(),
+        disagreed.join("\n")
+    );
+}

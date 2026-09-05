@@ -5821,6 +5821,18 @@ fn detect_by_sport(
         all_sections.extend(sections);
     }
 
+    let track_map: HashMap<&str, (&[GpsPoint], &[f64])> = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (id, pts))| {
+            (
+                id.as_str(),
+                (pts.as_slice(), seconds.get(i).copied().unwrap_or(NO_TIME)),
+            )
+        })
+        .collect();
+    reorient_portion_flags(&mut all_sections, &track_map);
+
     info!(
         "[Unified] {} sections, {} boundary records",
         all_sections.len(),
@@ -6124,6 +6136,83 @@ fn pair_leftovers(
 /// is exactly the fresh one in its original order and ids. The
 /// batch-parity gates depend on that: the policy is an addition to this
 /// layer, never a detour around it.
+/// How far along `line` each of its points sits, in metres from the start.
+fn cumulative_metres(line: &[GpsPoint]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(line.len());
+    let mut run = 0.0;
+    out.push(0.0);
+    for w in line.windows(2) {
+        run += crate::geo_utils::haversine_distance(&w[0], &w[1]);
+        out.push(run);
+    }
+    out
+}
+
+/// Where `point` falls along `line`, as a fraction of the line's length.
+fn progress_along(
+    cumulative: &[f64],
+    tree: &rstar::RTree<super::rtree::IndexedPoint>,
+    point: &GpsPoint,
+) -> Option<f64> {
+    let total = *cumulative.last()?;
+    if total <= 0.0 {
+        return None;
+    }
+    let nearest = tree.nearest_neighbor(&[point.latitude, point.longitude])?;
+    Some(cumulative[nearest.idx] / total)
+}
+
+/// The share of a section a portion must cross before its travel says anything
+/// about direction. Below it the two ends sit on the same stretch of line and
+/// the sign is noise.
+const DIRECTION_SPAN_FLOOR: f64 = 0.1;
+
+/// Measure every portion's direction against the line its section emits.
+///
+/// A carried or frozen section keeps its prior polyline while its portions were
+/// cut on the candidate's, and the two can run opposite ways. The flag is what
+/// the laps, the bests, `has_reverse_runs` and the athlete's direction toggle
+/// all read, so it is measured last, as progress along the line the app draws.
+/// A portion that does not cross enough of the section keeps the flag its cut
+/// gave it.
+pub(crate) fn reorient_portion_flags(
+    sections: &mut [FrequentSection],
+    tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
+) {
+    for section in sections.iter_mut() {
+        if section.polyline.len() < 3 || section.activity_portions.is_empty() {
+            continue;
+        }
+        let cumulative = cumulative_metres(&section.polyline);
+        let tree = super::rtree::build_rtree(&section.polyline);
+        for portion in section.activity_portions.iter_mut() {
+            let Some((track, _)) = tracks.get(portion.activity_id.as_str()) else {
+                continue;
+            };
+            let start = portion.start_index as usize;
+            let end = (portion.end_index as usize).min(track.len());
+            if end < start + 3 {
+                continue;
+            }
+            let slice = &track[start..end];
+            let (Some(first), Some(last)) = (
+                progress_along(&cumulative, &tree, &slice[0]),
+                progress_along(&cumulative, &tree, &slice[slice.len() - 1]),
+            ) else {
+                continue;
+            };
+            if (last - first).abs() < DIRECTION_SPAN_FLOOR {
+                continue;
+            }
+            portion.direction = if last > first {
+                crate::Direction::Same
+            } else {
+                crate::Direction::Reverse
+            };
+        }
+    }
+}
+
 fn resolve_fold(
     fresh: Vec<FrequentSection>,
     boundaries: Vec<BoundaryRecord>,
@@ -6298,6 +6387,7 @@ fn resolve_fold(
         catalogue.push(cand);
     }
     catalogue.extend(frozen_out);
+    reorient_portion_flags(&mut catalogue, tracks);
 
     UnifiedIncrementalResult {
         catalogue,
@@ -8363,5 +8453,165 @@ mod cluster_order_tests {
             lowest, sorted,
             "clusters must come out in lowest-member order"
         );
+    }
+}
+
+#[cfg(test)]
+mod portion_flag_tests {
+    use super::*;
+    use crate::Direction;
+
+    fn line_north(n: usize) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| GpsPoint {
+                latitude: 47.0 + i as f64 * 0.0005,
+                longitude: 8.0,
+                elevation: None,
+            })
+            .collect()
+    }
+
+    fn section_with(polyline: Vec<GpsPoint>, portions: Vec<SectionPortion>) -> FrequentSection {
+        let dist = crate::matching::calculate_route_distance(&polyline);
+        FrequentSection {
+            id: "sec".to_string(),
+            name: None,
+            sport_type: "All".to_string(),
+            polyline,
+            representative_activity_id: "a".to_string(),
+            representative_range: None,
+            activity_ids: vec!["a".to_string()],
+            activity_portions: portions,
+            route_ids: Vec::new(),
+            visit_count: 1,
+            distance_meters: dist,
+            activity_traces: HashMap::new(),
+            confidence: 1.0,
+            observation_count: 1,
+            average_spread: 0.0,
+            point_density: Vec::new(),
+            scale: None,
+            is_user_defined: false,
+            stability: 1.0,
+            elevation_gain_m: None,
+            avg_grade_percent: None,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            enrichment: Default::default(),
+            rank: None,
+            consensus_state: Default::default(),
+        }
+    }
+
+    fn portion(start: u32, end: u32, direction: Direction) -> SectionPortion {
+        SectionPortion {
+            activity_id: "a".to_string(),
+            start_index: start,
+            end_index: end,
+            distance_meters: 100.0,
+            direction,
+        }
+    }
+
+    /// Expected behaviour: the flag says which way the lap runs along the line
+    /// the section emits, whatever line the portion was originally cut on.
+    #[test]
+    fn a_lap_against_the_emitted_line_reads_reverse() {
+        let track = line_north(12);
+        let mut against = line_north(12);
+        against.reverse();
+        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
+            [("a", (track.as_slice(), seconds.as_slice()))]
+                .into_iter()
+                .collect();
+
+        let mut sections = vec![
+            section_with(against, vec![portion(0, 12, Direction::Same)]),
+            section_with(line_north(12), vec![portion(0, 12, Direction::Reverse)]),
+        ];
+        reorient_portion_flags(&mut sections, &tracks);
+
+        assert_eq!(
+            sections[0].activity_portions[0].direction,
+            Direction::Reverse
+        );
+        assert_eq!(sections[1].activity_portions[0].direction, Direction::Same);
+    }
+
+    #[test]
+    fn a_portion_the_pool_no_longer_holds_is_left_alone() {
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> = HashMap::new();
+        let mut sections = vec![section_with(
+            line_north(12),
+            vec![portion(0, 12, Direction::Reverse)],
+        )];
+        reorient_portion_flags(&mut sections, &tracks);
+
+        assert_eq!(
+            sections[0].activity_portions[0].direction,
+            Direction::Reverse
+        );
+    }
+
+    #[test]
+    fn a_portion_too_short_to_measure_keeps_its_flag() {
+        let track = line_north(12);
+        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
+            [("a", (track.as_slice(), seconds.as_slice()))]
+                .into_iter()
+                .collect();
+        let mut against = line_north(12);
+        against.reverse();
+
+        let mut sections = vec![section_with(against, vec![portion(0, 2, Direction::Same)])];
+        reorient_portion_flags(&mut sections, &tracks);
+
+        assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
+    }
+
+    /// An `end_index` past the track is clamped rather than panicking, which is
+    /// the shape a stale carried portion carries.
+    #[test]
+    fn an_end_past_the_track_is_clamped() {
+        let track = line_north(12);
+        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
+            [("a", (track.as_slice(), seconds.as_slice()))]
+                .into_iter()
+                .collect();
+        let mut against = line_north(12);
+        against.reverse();
+
+        let mut sections = vec![section_with(
+            against,
+            vec![portion(0, 400, Direction::Same)],
+        )];
+        reorient_portion_flags(&mut sections, &tracks);
+
+        assert_eq!(
+            sections[0].activity_portions[0].direction,
+            Direction::Reverse
+        );
+    }
+
+    #[test]
+    fn a_section_with_no_line_is_left_alone() {
+        let track = line_north(12);
+        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
+            [("a", (track.as_slice(), seconds.as_slice()))]
+                .into_iter()
+                .collect();
+
+        let mut sections = vec![section_with(
+            line_north(2),
+            vec![portion(0, 12, Direction::Same)],
+        )];
+        reorient_portion_flags(&mut sections, &tracks);
+
+        assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
     }
 }
