@@ -32,6 +32,7 @@
 //! state; the carry-forward structure is identical. Design:
 //! `~/.claude/plans/b2-identity-hysteresis-design.md`.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -965,6 +966,18 @@ impl HysteresisState {
         } else {
             self.params.k
         };
+        // The caller's loss query, asked at most once per (id, candidate) across
+        // both plan passes and the carries they resolve.
+        let loss_cache: RefCell<BTreeMap<(String, usize), bool>> = RefCell::new(BTreeMap::new());
+        let loses_once = |id: &str, j: usize| -> bool {
+            if let Some(&cached) = loss_cache.borrow().get(&(id.to_string(), j)) {
+                return cached;
+            }
+            let lost = loses(id, j);
+            loss_cache.borrow_mut().insert((id.to_string(), j), lost);
+            lost
+        };
+
         // A section mid re-cut competes on the batch geometry it is re-cutting TO
         // (its pending target), not its stale frozen footprint. Presenting the
         // stale, larger footprint lets it capture a neighbouring candidate's
@@ -987,14 +1000,49 @@ impl HysteresisState {
                 }
             })
             .collect();
-        let plan = plan_identity_tuned(
-            &prior,
-            next,
-            &IdentityParams {
-                merge_mutual_floor: self.params.merge_mutual_floor,
-                merge_size_ratio: self.params.merge_size_ratio,
-            },
-        );
+        let params = IdentityParams {
+            merge_mutual_floor: self.params.merge_mutual_floor,
+            merge_size_ratio: self.params.merge_size_ratio,
+        };
+
+        // A prior only has a pending target from the step AFTER it diverged, so on
+        // the first divergent step the loop above hands the plan the footprint the
+        // batch has already replaced. Close that window by planning twice: the
+        // first pass learns which candidate each prior matched, the second competes
+        // every materially re-cutting prior on that candidate instead of the ground
+        // it is leaving. Two passes, not to convergence: the first discovers the
+        // targets, the second competes on them, and a third would only move more
+        // matches again. The seeding rule reads the first plan alone and never
+        // iteration order, so the step stays byte-identical and permutation-stable.
+        // The coverage memo is threaded through both passes, so the second pays
+        // only for the pairs whose prior geometry it changed.
+        let mut memo: HashMap<(u64, u64), (f64, f64)> = HashMap::new();
+        let first = plan_identity_memo(&prior, next, &params, &mut memo);
+        let prior_index: BTreeMap<&str, usize> = prior
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id.as_str(), i))
+            .collect();
+        let mut seeded = prior.clone();
+        let mut reseeded = false;
+        for (j, d) in first.decisions.iter().enumerate() {
+            let Some(id) = d.carried_id() else { continue };
+            let (Some(&i), Some(held)) = (prior_index.get(id), self.visible.get(id)) else {
+                continue;
+            };
+            if self.adopts_outright(held, &next[j], || loses_once(id, j))
+                || seeded[i].polyline == next[j].polyline
+            {
+                continue;
+            }
+            seeded[i].polyline = next[j].polyline.clone();
+            reseeded = true;
+        }
+        let plan = if reseeded {
+            plan_identity_memo(&seeded, next, &params, &mut memo)
+        } else {
+            first
+        };
 
         // Index the plan by prior id: which candidate carried it, and which
         // priors retired and why. `carried` doubles as the carry half of the
@@ -1038,7 +1086,7 @@ impl HysteresisState {
         for (id, held) in old_visible {
             let carried_j = carried.get(id.as_str()).copied();
             let action = if let Some(j) = carried_j {
-                self.apply_carry(&id, &held, &next[j], k, &mut out, || loses(&id, j))
+                self.apply_carry(&id, &held, &next[j], k, &mut out, || loses_once(&id, j))
             } else if let Some(reason) = retired.get(id.as_str()) {
                 self.apply_retire(&id, &held, reason, k, &mut out)
             } else {
@@ -1141,6 +1189,22 @@ impl HysteresisState {
         }
     }
 
+    /// Whether a carried candidate is adopted outright rather than debounced:
+    /// the extents agree, the batch counts no fewer passes over the new line
+    /// and the caller reports no loss of its own. Its negation is a material
+    /// re-cut, which is both what [`Self::apply_carry`] debounces and what the
+    /// step's second plan pass competes on the matched candidate.
+    fn adopts_outright(
+        &self,
+        held: &HeldSection,
+        cand: &CandidateSection,
+        loses: impl FnOnce() -> bool,
+    ) -> bool {
+        mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement
+            && cand.visit_count >= held.visit_count
+            && !loses()
+    }
+
     /// Decide a carried section: fold visits immediately; adopt geometry now
     /// when the extents agree, the batch counts no fewer passes over the new
     /// line and the caller reports no loss of its own, otherwise debounce
@@ -1162,10 +1226,7 @@ impl HysteresisState {
         loses: impl FnOnce() -> bool,
     ) -> HeldAction {
         let visits = cand.visit_count.max(held.visit_count);
-        if mutual_overlap(&held.polyline, &cand.polyline) >= self.params.recut_agreement
-            && cand.visit_count >= held.visit_count
-            && !loses()
-        {
+        if self.adopts_outright(held, cand, loses) {
             // Extents agree and nothing is lost: adopt the batch geometry,
             // clear any debounce.
             return HeldAction::Keep(HeldSection {
