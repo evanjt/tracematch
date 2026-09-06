@@ -2,12 +2,18 @@
 //!
 //! Run with: `cargo bench --bench grouping_incremental --features synthetic`
 //!
-//! Background: profiling scenario E (550-activity year expansion) revealed
-//! `recompute_groups` was ~4 s of the ~9 s total, dominated by the full
-//! O(N²) `group_signatures_parallel_with_matches`. tracematch already had
-//! a `group_incremental` (O(N×M) where M = new) but veloqrs's
-//! `recompute_groups` always took the full path. This bench measures the
-//! delta between the two paths at realistic corpus sizes.
+//! Background: profiling scenario E (550-activity year expansion) put
+//! `recompute_groups` at ~4 s of the ~9 s total, and veloqrs always took the
+//! full path even though tracematch had a `group_incremental` (O(N×M) where
+//! M = new). This bench measures the delta between the two paths at realistic
+//! corpus sizes.
+//!
+//! **The 4 s is `recompute_groups`, not the fold this file benchmarks.** That
+//! call also builds signatures and writes tables, and the figure predates the
+//! endpoint-grid filter in `grouping_filter.rs`. The fold itself, on this
+//! machine on a quiet run: 7.7 ms at 60 activities, 22.7 ms at 150, 123.7 ms
+//! at 550. Read a number off your own run rather than off this comment, and
+//! do not quote the 4 s as the cost of grouping.
 
 use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
