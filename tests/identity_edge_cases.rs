@@ -944,3 +944,41 @@ fn a_heart_anchors_to_a_global_cell() {
     );
     assert_ne!(earth_cell(&far), cell, "two cells north is another cell");
 }
+
+// -------------------------------------------- competing on superseded ground
+
+/// Scenario: on the first step a section materially diverges, the batch has
+/// already replaced its footprint but the plan still competes it on the held
+/// one. A long senior prior re-cuts to its head, and its stale tail reaches a
+/// neighbouring candidate that belongs to a junior prior, out-nominating that
+/// prior on age alone.
+/// Expected behaviour: the neighbour carries the junior's id and nothing mints.
+/// The plan runs twice inside the step: the first pass learns which candidate
+/// each prior matched, the second competes a materially re-cut prior on that
+/// candidate rather than on the footprint it is leaving.
+#[test]
+fn a_diverging_prior_must_not_capture_a_neighbour_on_superseded_ground() {
+    let corridor = sparse(46.0, 7.0, 100);
+    let long = corridor[..80].to_vec();
+    let neighbour_ground = corridor[50..100].to_vec();
+    let head = corridor[..45].to_vec();
+    let neighbour_recut = corridor[55..82].to_vec();
+
+    let mut state = HysteresisState::default();
+    let (_, r) = state.step_assign(&[cand(long.clone(), 5)]);
+    let long_id = r[0].id.clone();
+    let (_, r) = state.step_assign(&[cand(long.clone(), 5), cand(neighbour_ground, 5)]);
+    let neighbour_id = r[1].id.clone();
+    assert_ne!(long_id, neighbour_id, "the neighbour mints its own id");
+
+    let (out, r) = state.step_assign(&[cand(head, 5), cand(neighbour_recut, 5)]);
+    assert_eq!(
+        r[0].id, long_id,
+        "the head is the long section's own re-cut"
+    );
+    assert_eq!(
+        r[1].id, neighbour_id,
+        "the neighbour's re-cut carries the neighbour's id, not a fresh one"
+    );
+    assert_eq!(out.minted, 0, "nothing mints: both candidates have a prior");
+}
