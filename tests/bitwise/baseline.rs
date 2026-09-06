@@ -27,11 +27,11 @@ pub const PREFIX: &str = "perf_";
 /// keeps its own history.
 pub const COMMENT: &str = "#";
 
-/// The switch that rewrites a golden. `Q76`: the golden is a tripwire, not a
+/// The switch that rewrites a golden. The golden is a tripwire, not a
 /// correctness record, so a rebase lands only after the before-and-after
 /// report has been read and signed off, and the reason it moved is written
 /// into the file. The switch carries that reason; a bare `1` records nothing,
-/// which is how the private golden went stale for four days (`B200`).
+/// which is how the private golden once went stale for four days.
 pub const REBASE_ENV: &str = "TRACEMATCH_BITWISE_REBASE";
 
 /// Set to a path, the gate also writes what it measured there, in golden
