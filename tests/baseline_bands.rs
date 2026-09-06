@@ -9,8 +9,9 @@ mod bitwise;
 use std::sync::Mutex;
 
 use bitwise::baseline::{
-    Band, anchor_peak, comment_lines, compose, digest_lines, digests_differ, peak_bytes,
-    peak_rise_bytes, recorded, regressions,
+    Band, REBASE_ENV, anchor_peak, check, civil_date, comment_lines, compose, digest_lines,
+    digests_differ, peak_bytes, peak_rise_bytes, rebase_header, rebase_reason, recorded,
+    regressions,
 };
 
 /// The peak is process-wide, so the two cases that read it take turns. The
@@ -271,7 +272,7 @@ perf_cold_ms 1000
 
 #[test]
 fn a_rebase_keeps_the_history_ahead_of_the_new_digests() {
-    let comments = ["# first", "# second"];
+    let comments = ["# first".to_string(), "# second".to_string()];
     let digests = ["A fedcba9876543210".to_string()];
     let costs = ["perf_cold_ms 900".to_string()];
     assert_eq!(
@@ -280,7 +281,7 @@ fn a_rebase_keeps_the_history_ahead_of_the_new_digests() {
     );
     // The composed text reads back as it was composed.
     let text = compose(&comments, &digests, &costs);
-    assert_eq!(comment_lines(&text), comments);
+    assert_eq!(comment_lines(&text), vec!["# first", "# second"]);
     assert_eq!(digest_lines(&text), vec!["A fedcba9876543210"]);
     assert_eq!(recorded(&text), vec![("perf_cold_ms".to_string(), 900)]);
 }
@@ -289,4 +290,122 @@ fn a_rebase_keeps_the_history_ahead_of_the_new_digests() {
 fn a_blank_line_in_a_golden_is_not_a_digest() {
     let golden = "A 0123456789abcdef\n\nperf_cold_ms 1000\n";
     assert_eq!(digest_lines(golden), vec!["A 0123456789abcdef"]);
+}
+
+// ---------------------------------------------------------------------------
+// The rebase switch. `Q76`: the golden is a tripwire, so a rebase says why it
+// moved and the file keeps that line.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_switch_is_no_rebase() {
+    assert_eq!(rebase_reason(None), None);
+}
+
+#[test]
+fn a_reason_is_carried_verbatim() {
+    assert_eq!(
+        rebase_reason(Some("  B94 drops 4 sections  ")),
+        Some("B94 drops 4 sections".to_string())
+    );
+}
+
+#[test]
+#[should_panic(expected = "must say why the golden moved")]
+fn the_bare_switch_is_refused() {
+    rebase_reason(Some("1"));
+}
+
+#[test]
+#[should_panic(expected = "must say why the golden moved")]
+fn an_empty_reason_is_refused() {
+    rebase_reason(Some("   "));
+}
+
+#[test]
+fn a_rebase_header_dates_itself_and_leads_the_history() {
+    let header = rebase_header("B200, the four commits since the B64 rebase");
+    assert!(
+        header.starts_with("# rebased 20"),
+        "a header carries its date: {header}"
+    );
+    assert!(header.ends_with(", B200, the four commits since the B64 rebase"));
+
+    let kept = "# rebased 2026-08-30, B64".to_string();
+    let golden = compose(
+        &[header.clone(), kept.clone()],
+        &["A deadbeef".to_string()],
+        &["perf_cold_ms 12".to_string()],
+    );
+    assert_eq!(
+        comment_lines(&golden),
+        vec![header.as_str(), kept.as_str()],
+        "the new line leads and the file keeps what it had"
+    );
+    assert_eq!(digest_lines(&golden), vec!["A deadbeef"]);
+}
+
+#[test]
+fn a_header_carries_the_calendar_date() {
+    assert_eq!(civil_date(0), "1970-01-01");
+    assert_eq!(civil_date(19_570), "2023-08-01");
+    assert_eq!(civil_date(20_702), "2026-09-06");
+    assert_eq!(civil_date(11_016), "2000-02-29", "a 400-year leap year");
+    assert_eq!(civil_date(19_782), "2024-02-29", "an ordinary leap year");
+}
+
+/// `REBASE_ENV` is process-wide, so the cases that set it take turns.
+static SWITCH: Mutex<()> = Mutex::new(());
+
+/// Runs `body` with the switch set, and clears it afterwards whatever happens.
+fn with_switch(value: &str, body: impl FnOnce()) {
+    let _guard = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    // Single-threaded for the length of the guard: nothing else reads the
+    // environment while it is held.
+    unsafe { std::env::set_var(REBASE_ENV, value) };
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    unsafe { std::env::remove_var(REBASE_ENV) };
+    if let Err(e) = out {
+        std::panic::resume_unwind(e);
+    }
+}
+
+#[test]
+fn a_rebase_through_the_gate_writes_its_reason_into_the_golden() {
+    let path = std::env::temp_dir().join(format!("tracematch-rebase-{}.txt", std::process::id()));
+    std::fs::write(&path, "# rebased 2026-08-30, B64\nA 0123456789abcdef\n").unwrap();
+
+    with_switch("B200, the four commits since the B64 rebase", || {
+        check(&path, &["A fedcba9876543210".to_string()], &[], &band());
+    });
+
+    let written = std::fs::read_to_string(&path).unwrap();
+    let history = comment_lines(&written);
+    assert_eq!(history.len(), 2, "the file keeps what it had: {written}");
+    assert!(
+        history[0].starts_with("# rebased 20")
+            && history[0].ends_with(", B200, the four commits since the B64 rebase"),
+        "the rebase records itself: {:?}",
+        history[0]
+    );
+    assert_eq!(history[1], "# rebased 2026-08-30, B64");
+    assert_eq!(digest_lines(&written), vec!["A fedcba9876543210"]);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn the_bare_switch_never_reaches_the_file() {
+    let path = std::env::temp_dir().join(format!("tracematch-bare-{}.txt", std::process::id()));
+    let untouched = "A 0123456789abcdef\n";
+    std::fs::write(&path, untouched).unwrap();
+
+    let refused = std::panic::catch_unwind(|| {
+        with_switch("1", || {
+            check(&path, &["A fedcba9876543210".to_string()], &[], &band());
+        });
+    });
+
+    assert!(refused.is_err(), "a bare switch is not a rebase");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), untouched);
+    std::fs::remove_file(&path).ok();
 }

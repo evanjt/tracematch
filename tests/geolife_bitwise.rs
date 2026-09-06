@@ -4,8 +4,10 @@
 //! data.
 //!
 //! One person, the busiest logger, in date order: the shape the app detects
-//! in. After an INTENTIONAL output change, re-baseline with
-//! `TRACEMATCH_BITWISE_REBASE=1` and commit the golden.
+//! in. A change that moves the output attaches its before-and-after report to
+//! the item and stops there; the rebase is Evan's call, carries its reason and
+//! is committed with the change that moved it. See
+//! `bitwise::baseline::REBASE_ENV`.
 //!
 //! Run: `scripts/fetch_geolife.sh && cargo test --release --features public-corpus \
 //!       --test geolife_bitwise -- --nocapture`

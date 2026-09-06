@@ -8,7 +8,8 @@
 //! both to count. A faster or lighter run never fails.
 //!
 //! Recorded in the same golden file as the digests, under a `perf_` prefix,
-//! and rebased by the same `TRACEMATCH_BITWISE_REBASE=1`.
+//! and rebased by the same switch, which carries the reason: see
+//! `REBASE_ENV`.
 //!
 //! Times are only meaningful in a release build, so a debug run compares the
 //! digests, skips the numbers, and carries the recorded ones forward rather
@@ -22,9 +23,16 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 pub const PREFIX: &str = "perf_";
 
 /// A line the gate never compares: the record of who moved the golden and
-/// why, written by `scripts/corpus_run.sh --rebase`. Carried forward by a
-/// rebase, so the file keeps its own history.
+/// why, written by every rebase and carried forward by the next, so the file
+/// keeps its own history.
 pub const COMMENT: &str = "#";
+
+/// The switch that rewrites a golden. `Q76`: the golden is a tripwire, not a
+/// correctness record, so a rebase lands only after the before-and-after
+/// report has been read and signed off, and the reason it moved is written
+/// into the file. The switch carries that reason; a bare `1` records nothing,
+/// which is how the private golden went stale for four days (`B200`).
+pub const REBASE_ENV: &str = "TRACEMATCH_BITWISE_REBASE";
 
 /// Set to a path, the gate also writes what it measured there, in golden
 /// form, whether or not the golden matched. A run can then diff the two
@@ -137,10 +145,10 @@ pub fn comment_lines(golden: &str) -> Vec<&str> {
 }
 
 /// A golden's text: its history first, then the digests, then the costs.
-pub fn compose(comments: &[&str], digests: &[String], costs: &[String]) -> String {
+pub fn compose(comments: &[String], digests: &[String], costs: &[String]) -> String {
     comments
         .iter()
-        .map(|c| c.to_string())
+        .cloned()
         .chain(digests.iter().cloned())
         .chain(costs.iter().cloned())
         .collect::<Vec<_>>()
@@ -174,7 +182,7 @@ pub fn regressions(golden: &str, measured: &[(&str, u64)], band: &Band) -> Vec<S
         let Some((_, was)) = baseline.iter().find(|(n, _)| n == name) else {
             out.push(format!(
                 "{name} is not in the baseline. Record it with \
-                 TRACEMATCH_BITWISE_REBASE=1"
+                 {REBASE_ENV}=\"<why it moved>\""
             ));
             continue;
         };
@@ -194,7 +202,7 @@ pub fn regressions(golden: &str, measured: &[(&str, u64)], band: &Band) -> Vec<S
         if !measured.iter().any(|(n, _)| n == name) {
             out.push(format!(
                 "{name} is in the baseline but nothing measures it any more. \
-                 Clear it with TRACEMATCH_BITWISE_REBASE=1"
+                 Clear it with {REBASE_ENV}=\"<why it moved>\""
             ));
         }
     }
@@ -206,6 +214,56 @@ pub fn regressions(golden: &str, measured: &[(&str, u64)], band: &Band) -> Vec<S
 // The golden file
 // ---------------------------------------------------------------------------
 
+/// The reason a rebase gives for moving the golden, or `None` when none is
+/// asked for. `1` is refused: it rewrites the file and records nothing, so
+/// nobody downstream can tell a signed-off move from an accident.
+pub fn rebase_reason(raw: Option<&str>) -> Option<String> {
+    let reason = raw?.trim();
+    assert!(
+        !reason.is_empty() && reason != "1",
+        "{REBASE_ENV} must say why the golden moved, not `1`. The golden is a \
+         tripwire: a rebase lands only after the before-and-after report has \
+         been read and signed off, and that sentence goes into the file. Set \
+         it, e.g. {REBASE_ENV}=\"B94, the day-based support floor drops 4 \
+         sections\""
+    );
+    Some(reason.to_string())
+}
+
+/// `rebase_reason` over the environment.
+pub fn rebase_asked() -> Option<String> {
+    rebase_reason(std::env::var(REBASE_ENV).ok().as_deref())
+}
+
+/// The line a rebase puts at the head of the golden's history.
+pub fn rebase_header(reason: &str) -> String {
+    format!("{COMMENT} rebased {}, {reason}", today())
+}
+
+fn today() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0);
+    civil_date(days)
+}
+
+/// Days since the epoch as `YYYY-MM-DD`, by Hinnant's `civil_from_days`. The
+/// crate carries no calendar dependency and a rebase header is the only place
+/// one is wanted.
+pub fn civil_date(days: u64) -> String {
+    let z = days as i64 + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Compare `digests` and `measured` with the golden at `path`, or record them
 /// there when it is absent or a rebase is asked for.
 ///
@@ -215,7 +273,7 @@ pub fn regressions(golden: &str, measured: &[(&str, u64)], band: &Band) -> Vec<S
 pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &Band) {
     let timed = !cfg!(debug_assertions);
     let existing = std::fs::read_to_string(path).ok();
-    let rebase = std::env::var("TRACEMATCH_BITWISE_REBASE").is_ok_and(|v| v == "1");
+    let rebase = rebase_asked();
 
     let costs = if timed {
         lines(measured)
@@ -225,7 +283,10 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
             .map(|g| lines(&borrowed(&recorded(g))))
             .unwrap_or_default()
     };
-    let comments: Vec<&str> = existing.as_deref().map(comment_lines).unwrap_or_default();
+    let comments: Vec<String> = existing
+        .as_deref()
+        .map(|g| comment_lines(g).iter().map(|c| c.to_string()).collect())
+        .unwrap_or_default();
     if let Ok(record) = std::env::var(RECORD_ENV)
         && !record.trim().is_empty()
     {
@@ -238,15 +299,18 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
     }
 
     if let Some(golden) = existing.as_deref()
-        && !rebase
+        && rebase.is_none()
     {
         let want = digest_lines(golden);
         let got: Vec<&str> = digests.iter().map(|s| s.as_str()).collect();
         for (w, g) in want.iter().zip(got.iter()) {
             assert_eq!(
                 w, g,
-                "bitwise divergence from the golden baseline. If this change \
-                 is INTENTIONAL, rerun with TRACEMATCH_BITWISE_REBASE=1"
+                "bitwise divergence from the golden baseline. This gate is a \
+                 tripwire: attach the before-and-after report to the item that \
+                 moved the output and stop. A rebase is not the agent's call, \
+                 and when it is made it says why: \
+                 {REBASE_ENV}=\"<why it moved>\""
             );
         }
         assert_eq!(want.len(), got.len(), "scenario count changed");
@@ -262,18 +326,28 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
         assert!(
             over.is_empty(),
             "cost regression against the recorded baseline:\n  {}\n\
-             Bands are deliberately loose. If this cost is INTENTIONAL, \
-             rebase with TRACEMATCH_BITWISE_REBASE=1",
+             Bands are deliberately loose. A rebase that absorbs one lands \
+             only after the report has been signed off, and says why: \
+             {REBASE_ENV}=\"<why it moved>\"",
             over.join("\n  ")
         );
         println!("cost baselines within band: {}", describe(measured));
         return;
     }
 
-    std::fs::write(path, compose(&comments, digests, &costs)).expect("write golden baseline");
+    // The record above is a measurement, so only the golden takes the header.
+    let mut history = comments;
+    if let Some(reason) = &rebase {
+        history.insert(0, rebase_header(reason));
+    }
+    std::fs::write(path, compose(&history, digests, &costs)).expect("write golden baseline");
     println!(
         "golden baseline {} at {}",
-        if rebase { "rewritten" } else { "recorded" },
+        if rebase.is_some() {
+            "rewritten"
+        } else {
+            "recorded"
+        },
         path.display()
     );
 }

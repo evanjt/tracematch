@@ -10,8 +10,10 @@
 //! band, so a cold-path slowdown fails the same gate the output does. See
 //! `baseline`.
 //!
-//! After an INTENTIONAL output or cost change, re-baseline with
-//! `TRACEMATCH_BITWISE_REBASE=1`.
+//! The golden is a tripwire, not a correctness record. An agent whose change
+//! moves it attaches the before-and-after report to the item and stops there:
+//! the rebase is Evan's call. When it is made it carries its reason, which the
+//! file keeps as a `# rebased` line. See `baseline::REBASE_ENV`.
 
 #![allow(dead_code)]
 

@@ -5,8 +5,9 @@
 //! is the same gate over public data and is the one CI runs.
 //!
 //! Local-only: gated behind `real-corpus`, corpus resolved via
-//! `TRACEMATCH_CORPUS`. After an INTENTIONAL output change, re-baseline with
-//! `TRACEMATCH_BITWISE_REBASE=1`.
+//! `TRACEMATCH_CORPUS`. A change that moves the output attaches its
+//! before-and-after report to the item and stops there; the rebase is Evan's
+//! call and carries its reason. See `bitwise::baseline::REBASE_ENV`.
 //!
 //! Run: `cargo test --release --features real-corpus --test full_corpus_bitwise -- --nocapture`
 

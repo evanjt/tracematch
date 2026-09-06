@@ -16,8 +16,8 @@
 //! records the track and point counts it was measured on, and a run over a
 //! different corpus re-records rather than comparing, so growth is reported
 //! as growth and never as a regression. The cold fold has no ceiling and is
-//! bounded by the band alone. Rebase by hand with
-//! `TRACEMATCH_BITWISE_REBASE=1`, the same switch the digests use.
+//! bounded by the band alone. Rebase by hand with the same switch the digests
+//! use, which carries the reason it moved: see `bitwise::baseline::REBASE_ENV`.
 //!
 //! Local-only: gated behind `real-corpus`, corpus resolved via
 //! `TRACEMATCH_CORPUS`.
@@ -90,8 +90,7 @@ fn a_warm_add_stays_inside_the_budget() {
         std::fs::remove_file(&path).expect("remove stale golden baseline");
         golden = None;
     }
-    let recording =
-        golden.is_none() || std::env::var("TRACEMATCH_BITWISE_REBASE").is_ok_and(|v| v == "1");
+    let recording = golden.is_none() || baseline::rebase_asked().is_some();
 
     let split = c.tracks.len() - WARM_ADDS;
     let head_ids: Vec<&str> = c.tracks[..split]
