@@ -5230,11 +5230,21 @@ fn detect_for_cluster_with_grid(
             };
             section.representative_activity_id = sport_tracks[t_idx].0.to_string();
             section.representative_range = Some((rs as u32, re as u32));
-            // Counts and junctions follow the DRAWN line. The medoid
-            // line they were first computed against is a selection
-            // artefact: a pass-weighted medoid shifts with new laps,
-            // and the count must not move when the visible line does
-            // not.
+            // Counts and junctions follow the line drawn HERE. The
+            // medoid line they were first computed against is a
+            // selection artefact: a pass-weighted medoid shifts with
+            // new laps, and the count must not move when the visible
+            // line does not.
+            //
+            // `reconcile_seam_overruns` shortens this line again much
+            // later and does NOT recount, deliberately and like the
+            // clips above: the extent, counts and occupied footprint
+            // keep the full portion, because the traffic on the ground
+            // did not change when the display did. A contributor whose
+            // coverage sat entirely in the clipped tail still counts,
+            // and the floors are applied above the seam pass against
+            // the line drawn here. So this is where the population is
+            // decided, and nothing below re-decides it.
             lap!(2);
             let drawn_candidates = super::portions::portion_candidates_bounded(
                 &section.polyline,
@@ -8279,6 +8289,62 @@ mod seam_tests {
                 GpsPoint::new(46.0 + y / 111_132.0, 7.0 + x / m_lng)
             })
             .collect()
+    }
+
+    /// The clip is a display adjustment and nothing else. The traffic on the
+    /// ground did not change when the line the user sees got shorter, so the
+    /// population the redraw measured stands, and a contributor whose coverage
+    /// sat entirely in the clipped tail still counts toward the section. A
+    /// comment said so and was 300 lines from the code it described, which is
+    /// how this came to be read as a bug twice.
+    #[test]
+    fn the_clip_moves_the_line_and_leaves_the_population_alone() {
+        let busy = east_line(0.0, 1000.0, 0.0);
+        let mut quiet = east_line(800.0, 1000.0, 10.0);
+        quiet.extend(east_line(1010.0, 1780.0, 40.0));
+        let mut sections = vec![sec("s_busy", 73, busy), sec("s_quiet", 65, quiet)];
+        sections[1].activity_ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        sections[1].activity_portions = vec![
+            SectionPortion {
+                activity_id: "a".to_string(),
+                start_index: 0,
+                end_index: 40,
+                distance_meters: 400.0,
+                direction: crate::Direction::Same,
+            },
+            SectionPortion {
+                activity_id: "b".to_string(),
+                start_index: 0,
+                end_index: 12,
+                distance_meters: 120.0,
+                direction: crate::Direction::Same,
+            },
+        ];
+        sections[1].representative_range = Some((0, 96));
+        let before = sections[1].clone();
+
+        let mut records = Vec::new();
+        reconcile_seam_overruns(&mut sections, 46.0, 150.0, &mut records);
+
+        let after = &sections[1];
+        assert!(
+            after.polyline.len() < before.polyline.len(),
+            "the quieter line clips back to the meet"
+        );
+        assert!(after.distance_meters < before.distance_meters);
+        assert_ne!(after.representative_range, before.representative_range);
+
+        assert_eq!(after.visit_count, before.visit_count);
+        assert_eq!(after.activity_ids, before.activity_ids);
+        assert_eq!(
+            after.activity_portions.len(),
+            before.activity_portions.len(),
+            "a contributor whose pass sat in the clipped end still counts"
+        );
+        assert_eq!(
+            after.activity_portions[1].end_index, before.activity_portions[1].end_index,
+            "the portions are the pre-clip line's and are not re-cut"
+        );
     }
 
     #[test]
