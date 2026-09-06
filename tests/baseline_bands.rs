@@ -293,8 +293,8 @@ fn a_blank_line_in_a_golden_is_not_a_digest() {
 }
 
 // ---------------------------------------------------------------------------
-// The rebase switch. `Q76`: the golden is a tripwire, so a rebase says why it
-// moved and the file keeps that line.
+// The rebase switch. The golden is a tripwire, so a rebase says why it moved
+// and the file keeps that line.
 // ---------------------------------------------------------------------------
 
 #[test]
