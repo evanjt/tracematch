@@ -979,3 +979,26 @@ pub fn small_oval_seam_excursion() -> Vec<(String, Vec<GpsPoint>)> {
     ));
     out
 }
+
+/// One straight corridor, recorded at a sample spacing wider than the
+/// detector's partition cell. Bresenham fills the gaps for the coverage
+/// grid, so the corridor still forms a node and still draws a line, but
+/// the pass matcher counts only the cells a track's own points land in.
+/// At 250 m between points and 100 m cells, no track covers the majority
+/// of the drawn line, so the redraw finds no portion at all.
+pub fn coarse_sampled_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    const LENGTH_M: f64 = 1_000.0;
+    const STEP_M: f64 = 250.0;
+    (0..outings)
+        .map(|i| {
+            let n = (LENGTH_M / STEP_M) as usize;
+            let pts = (0..=n)
+                .map(|k| {
+                    let x = k as f64 * STEP_M;
+                    (x, HUMAN_WOBBLE_M * (k as f64 + phase(i)).sin())
+                })
+                .collect::<Vec<_>>();
+            (format!("coarse_{i}"), track(&pts))
+        })
+        .collect()
+}
