@@ -1,10 +1,9 @@
 //! Contracts for the boundary records the detector emits beside its
 //! catalogue. `UsageChange`, `Fork`, and `LowSupport` are asserted in
 //! `unified_contracts.rs`; this file covers the remaining kinds
-//! (`Backoff`, `Trim`, `NoSinglePass` and `DrawnPopulation`), each on
-//! synthetic ground
-//! built to provably produce it, and checks that the record explains
-//! what the catalogue shows.
+//! (`Backoff`, `Trim`, `NoSinglePass`, `DrawnPopulation` and
+//! `DrawnEmpty`), each on synthetic ground built to provably produce it,
+//! and checks that the record explains what the catalogue shows.
 
 mod shapes;
 
@@ -434,4 +433,46 @@ fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
         haversine_distance(&at, &mid) < 200.0,
         "the record must sit on the dropped corridor"
     );
+}
+
+#[test]
+fn a_drawn_line_no_one_passes_is_recorded_and_dropped() {
+    // Six outings along one 1000 m corridor, each recorded a point every
+    // 250 m. The coverage grid bridges the gaps, so the corridor clusters
+    // and draws a line, but a pass is counted on the cells a track's own
+    // points fall in and none of them reaches the majority of the drawn
+    // line. Nothing traverses what would be shown, so nothing is shown.
+    let tracks = shapes::coarse_sampled_corridor(6);
+    let out = detect(&tracks);
+
+    let rec = out
+        .boundaries
+        .iter()
+        .find(|r| matches!(r.reason, BoundaryReason::DrawnEmpty { .. }))
+        .unwrap_or_else(|| panic!("no drawn-empty record: {:?}", out.boundaries));
+    let BoundaryReason::DrawnEmpty {
+        section_id,
+        contributors,
+    } = &rec.reason
+    else {
+        unreachable!()
+    };
+    assert!(
+        *contributors >= SectionConfig::default().min_activities,
+        "the record must name the cluster the redraw emptied, not an already-thin one"
+    );
+    assert!(
+        !out.sections.iter().any(|s| &s.id == section_id),
+        "the emptied candidate must not reach the catalogue"
+    );
+    assert!(
+        out.sections.iter().all(|s| !s.activity_portions.is_empty()),
+        "no section may be emitted with no traversal: {:?}",
+        out.sections
+            .iter()
+            .filter(|s| s.activity_portions.is_empty())
+            .map(|s| &s.id)
+            .collect::<Vec<_>>()
+    );
+    assert_catalogue_invariants(&tracks, &out.sections);
 }

@@ -5296,6 +5296,12 @@ fn detect_for_cluster_with_grid(
                         contributors: section.activity_ids.len() as u32,
                     },
                 });
+                // Nothing traverses the line that would be drawn, so
+                // there is nothing to show. Keeping the pre-redraw
+                // portions would ship a section whose members ran a
+                // consensus average no one of them covers.
+                orphaned.extend(node.cells.iter().copied());
+                continue;
             }
             // Every floor the candidate cleared was measured on the
             // pre-redraw evidence. The redraw swaps the consensus
