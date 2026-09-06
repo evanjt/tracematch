@@ -311,29 +311,23 @@ run_gate() {
     echo "  gate FAILED (exit $status), see $dir/$label.log"
     gate_failed=$((gate_failed + 1))
     if [ "$REBASE" -eq 1 ]; then
-      rebase_golden "$golden" "$record"
+      # The harness writes the golden and its `# rebased` header, so a rebase
+      # from here is the same gate run again with the reason in the switch.
+      local moved="${RANGE:-working tree at $(git -C "$TM_DIR" rev-parse --short HEAD)}"
+      echo "  rebasing $golden through the gate: $moved"
+      (cd "$build" && env "$@" $(target_dir "$build") \
+          TRACEMATCH_BITWISE_REBASE="corpus_run.sh, $moved" \
+          cargo test "${pkg[@]}" --release --features "$feature" --test "$target" -- --nocapture) \
+          >> "$dir/$label.log" 2>&1 \
+        && echo "  REBASED $golden" \
+        || echo "  the rebase run FAILED, see $dir/$label.log"
+      case "$golden" in
+        "$TM_DIR"/*) echo "    this golden is in the repository: commit it with the change that moved it" ;;
+      esac
     fi
     return 1
   fi
   echo "  gate passed"
-}
-
-# Write the recorded golden over the real one, keeping every comment line
-# it already had and adding one that says what moved it.
-rebase_golden() {
-  local golden="$1" record="$2"
-  local moved="${RANGE:-working tree at $(git -C "$TM_DIR" rev-parse --short HEAD)}"
-  local line="# rebased $(date +%F) by corpus_run.sh, $moved"
-  {
-    grep '^#' "$record"
-    echo "$line"
-    grep -v '^#' "$record"
-  } > "$golden.rebase" && mv "$golden.rebase" "$golden"
-  echo "  REBASED $golden"
-  echo "    $line"
-  case "$golden" in
-    "$TM_DIR"/*) echo "    this golden is in the repository: commit it with the change that moved it" ;;
-  esac
 }
 
 if [ "$GATES" -eq 1 ]; then
