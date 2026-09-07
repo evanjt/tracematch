@@ -30,7 +30,7 @@ use crate::{
 /// 3. Similar total distance (within max_distance_diff_ratio)
 /// 4. Same endpoints (within endpoint_threshold)
 /// 5. Middle points must also match
-pub fn should_group_routes(
+pub(crate) fn should_group_routes(
     sig1: &RouteSignature,
     sig2: &RouteSignature,
     match_result: &MatchResult,
