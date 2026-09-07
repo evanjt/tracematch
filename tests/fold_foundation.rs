@@ -11,7 +11,7 @@
 //! path without pulling in banned consensus averaging.
 //!
 //! PART B pins the CONVERGENCE TARGET and the cost that makes an incremental
-//! mandatory. A naive re-batch drip (re-run `detect_sections_unified` over the
+//! mandatory. A naive re-batch drip (re-run `detect_sections` over the
 //! whole accumulated pool on every add) is by construction the exact catalogue
 //! the fold must reproduce; its per-add cost grows with N, which is the O(N^2)
 //! bar a real incremental (target <= 150 ms/activity, flat) has to beat. A
@@ -26,8 +26,7 @@ use std::time::Instant;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::sections::find_sections_in_route;
 use tracematch::{
-    FrequentSection, GpsPoint, SectionConfig, detect_sections_unified,
-    detect_sections_unified_incremental,
+    FrequentSection, GpsPoint, SectionConfig, detect_sections, detect_sections_incremental,
 };
 
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
@@ -233,7 +232,7 @@ fn matching_half_characterisation() {
     let sport_types = corpus.sport_map_through_e();
     let cfg = SectionConfig::default();
 
-    let unified = detect_sections_unified(&tracks, &[], &sport_types, &cfg);
+    let unified = detect_sections(&tracks, &[], &sport_types, &cfg);
     let track_map: HashMap<&str, &[GpsPoint]> = tracks
         .iter()
         .map(|(id, p)| (id.as_str(), p.as_slice()))
@@ -368,7 +367,7 @@ fn matching_half_characterisation() {
 // PART B — pure-layer parity + cost contract for the incremental fold
 // ============================================================================
 
-/// Naive re-batch drip: on each add, re-run `detect_sections_unified` over the
+/// Naive re-batch drip: on each add, re-run `detect_sections` over the
 /// full accumulated pool. The final step IS the batch call, so it equals the
 /// batch by construction; more usefully, the batch is order-free (a shuffled
 /// ingest yields a ground-identical catalogue), which is the convergence target
@@ -380,14 +379,14 @@ fn naive_rebatch_convergence_and_order_free() {
     let sports = corpus.sport_map_through_e();
     let cfg = SectionConfig::default();
 
-    let batch = detect_sections_unified(&tracks, &[], &sports, &cfg);
+    let batch = detect_sections(&tracks, &[], &sports, &cfg);
 
     // Re-batch drip over growing prefixes; record each step's section count.
     let mut step_counts = Vec::with_capacity(tracks.len());
     let mut final_drip = Vec::new();
     for n in 1..=tracks.len() {
         let prefix = &tracks[..n];
-        let cat = detect_sections_unified(prefix, &[], &sports, &cfg);
+        let cat = detect_sections(prefix, &[], &sports, &cfg);
         step_counts.push(cat.len());
         if n == tracks.len() {
             final_drip = cat;
@@ -401,7 +400,7 @@ fn naive_rebatch_convergence_and_order_free() {
     // step order-free.
     let mut reordered = tracks.clone();
     reordered.reverse();
-    let batch_reordered = detect_sections_unified(&reordered, &[], &sports, &cfg);
+    let batch_reordered = detect_sections(&reordered, &[], &sports, &cfg);
 
     let final_vs_batch = catalogue_overlap(&final_drip, &batch);
     let order_free = catalogue_overlap(&batch_reordered, &batch);
@@ -435,7 +434,7 @@ fn naive_rebatch_convergence_and_order_free() {
 }
 
 /// Cost curve: the per-add price of the naive re-batch as the pool grows. Each
-/// number is one `detect_sections_unified` over N tracks, i.e. the cost the fold would
+/// number is one `detect_sections` over N tracks, i.e. the cost the fold would
 /// pay for a single add if it re-batched at pool size N. The drip TOTAL to reach
 /// N is the running sum of these, which is quadratic. The incremental must make
 /// the per-add cost roughly flat and <= 150 ms. Debug timings; release is much
@@ -452,14 +451,14 @@ fn naive_rebatch_cost_curve() {
     let sports = corpus.sport_map_through_e();
 
     println!("\n================ naive re-batch cost curve (debug) ================");
-    println!("(per-add = one detect_sections_unified over N tracks; drip total = running sum)");
+    println!("(per-add = one detect_sections over N tracks; drip total = running sum)");
     let mut prev: Option<(usize, u128)> = None;
     for &n in &sizes {
         let n = n.min(tracks.len());
         let prefix = &tracks[..n];
         // Warm one call is unnecessary; the grid build dominates and is stable.
         let t0 = Instant::now();
-        let cat = detect_sections_unified(prefix, &[], &sports, &cfg);
+        let cat = detect_sections(prefix, &[], &sports, &cfg);
         let ms = t0.elapsed().as_millis();
         let growth = match prev {
             Some((pn, pms)) if pms > 0 => format!("  x{:.2} vs N={}", ms as f64 / pms as f64, pn),
@@ -487,7 +486,7 @@ fn naive_rebatch_cost_curve() {
 /// converge to the from-scratch Unified batch at >= 0.95 ground overlap.
 ///
 /// This is green against the NAIVE-CORRECT baseline
-/// (`detect_sections_unified_incremental`), which re-batches the accumulated
+/// (`detect_sections_incremental`), which re-batches the accumulated
 /// pool on every fold: correct by construction (the final fold IS the batch)
 /// but O(N) per add. The convergence CONTRACT is now locked; the engine layer
 /// optimises the baseline's cost UNDER this gate without touching the assertion.
@@ -500,7 +499,7 @@ fn gate_unified_incremental_converges_to_batch() {
     let sports = corpus.sport_map_through_e();
     let cfg = SectionConfig::default();
 
-    let batch = detect_sections_unified(&tracks, &[], &sports, &cfg);
+    let batch = detect_sections(&tracks, &[], &sports, &cfg);
 
     // Order-free incremental drip: fold one activity at a time into the prior
     // catalogue. `pool` is the accumulated prefix (the new activity included);
@@ -509,7 +508,7 @@ fn gate_unified_incremental_converges_to_batch() {
     let mut catalogue: Vec<FrequentSection> = Vec::new();
     for n in 1..=tracks.len() {
         let pool = &tracks[..n];
-        let result = detect_sections_unified_incremental(&catalogue, pool, &[], &sports, &cfg);
+        let result = detect_sections_incremental(&catalogue, pool, &[], &sports, &cfg);
         catalogue = result.catalogue;
     }
 
@@ -582,8 +581,7 @@ fn assert_cached_tracks_naive_and_batch(
     label: &str,
 ) {
     use tracematch::{
-        SectionEvidenceCache, SectionUpdatePolicy,
-        detect_sections_unified_incremental_cached_with_policy,
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
     };
 
     let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
@@ -595,7 +593,7 @@ fn assert_cached_tracks_naive_and_batch(
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
 
-        let cached = detect_sections_unified_incremental_cached_with_policy(
+        let cached = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,
@@ -608,7 +606,7 @@ fn assert_cached_tracks_naive_and_batch(
         cached_cat = cached.catalogue;
 
         // Naive re-batches the whole pool: naive_cat is the batch by construction.
-        let naive = detect_sections_unified_incremental(&naive_cat, &pool, &[], sports, cfg);
+        let naive = detect_sections_incremental(&naive_cat, &pool, &[], sports, cfg);
         naive_cat = naive.catalogue;
 
         let cached_vs_naive = catalogue_overlap(&cached_cat, &naive_cat);
@@ -645,7 +643,7 @@ fn assert_cached_tracks_naive_and_batch(
 
     // Anchor the whole chain to a from-scratch batch: naive's final catalogue IS
     // the batch, and the cached tracked it the whole way.
-    let batch = detect_sections_unified(&pool, &[], sports, cfg);
+    let batch = detect_sections(&pool, &[], sports, cfg);
     assert_eq!(
         naive_cat.len(),
         batch.len(),
@@ -767,8 +765,7 @@ fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Tracks, HashMap
 #[test]
 fn gate_cached_incremental_cost_is_flat() {
     use tracematch::{
-        SectionEvidenceCache, SectionUpdatePolicy,
-        detect_sections_unified_incremental_cached_with_policy,
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
     };
 
     let cfg = SectionConfig::default();
@@ -794,7 +791,7 @@ fn gate_cached_incremental_cost_is_flat() {
             let (id, pts) = it.next().unwrap();
             pool.push((id.clone(), pts.clone()));
             let new_ids = [pool.last().unwrap().0.as_str()];
-            let res = detect_sections_unified_incremental_cached_with_policy(
+            let res = detect_sections_incremental_cached_with_policy(
                 &mut cache,
                 &cached_cat,
                 &pool,
@@ -808,7 +805,7 @@ fn gate_cached_incremental_cost_is_flat() {
         }
         let mean_cached = t_cached.elapsed().as_micros() as f64 / cluster_size as f64;
         let t_naive = Instant::now();
-        let _ = detect_sections_unified(&pool, &[], &sports, &cfg);
+        let _ = detect_sections(&pool, &[], &sports, &cfg);
         let naive = t_naive.elapsed().as_micros() as f64;
         samples.push((pool.len(), mean_cached, naive));
     }
@@ -875,8 +872,7 @@ fn gate_cached_incremental_cost_is_flat() {
 #[test]
 fn cached_single_cluster_cost_curve_is_linear() {
     use tracematch::{
-        SectionEvidenceCache, SectionUpdatePolicy,
-        detect_sections_unified_incremental_cached_with_policy,
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
     };
 
     let cfg = SectionConfig::default();
@@ -892,7 +888,7 @@ fn cached_single_cluster_cost_curve_is_linear() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let t0 = Instant::now();
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,
@@ -942,15 +938,14 @@ fn cached_single_cluster_cost_curve_is_linear() {
 /// route-then-recompute rebuilds each touched cluster ONCE over its final
 /// membership, so a cold detect over N is O(sum of touched clusters) = O(N),
 /// comparable to (and it also warms the cache from) a plain
-/// `detect_sections_unified(N)`. The earlier recompute-per-activity shape was
+/// `detect_sections(N)`. The earlier recompute-per-activity shape was
 /// O(N²): a cold/bulk add did k recomputes of a growing cluster — SLOWER than
 /// the single batch it replaced. Uses one growing home cluster: the WORST case
 /// for the old bug (every activity lands in the one cluster).
 #[test]
 fn gate_cached_cold_cache_cost_is_linear() {
     use tracematch::{
-        SectionEvidenceCache, SectionUpdatePolicy,
-        detect_sections_unified_incremental_cached_with_policy,
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
     };
 
     let cfg = SectionConfig::default();
@@ -965,7 +960,7 @@ fn gate_cached_cold_cache_cost_is_linear() {
         let new_ids: Vec<&str> = prefix.iter().map(|(id, _)| id.as_str()).collect();
         let mut cache = SectionEvidenceCache::new();
         let t0 = Instant::now();
-        let _ = detect_sections_unified_incremental_cached_with_policy(
+        let _ = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &[],
             &prefix,
@@ -977,7 +972,7 @@ fn gate_cached_cold_cache_cost_is_linear() {
         );
         let cached = t0.elapsed().as_micros();
         let t1 = Instant::now();
-        let _ = detect_sections_unified(&prefix, &[], &sports, &cfg);
+        let _ = detect_sections(&prefix, &[], &sports, &cfg);
         let batch = t1.elapsed().as_micros();
         (cached, batch)
     };

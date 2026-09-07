@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use tracematch::{
     GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy, Tunables,
-    sections::{detect_sections_unified_dated, detect_sections_unified_incremental_dated},
+    sections::{detect_sections_dated, detect_sections_incremental_dated},
 };
 
 const POOLED: &str = "All";
@@ -276,7 +276,7 @@ fn main() {
         let seed: Vec<&str> = tracks[..split].iter().map(|(id, _)| id.as_str()).collect();
         let policy = SectionUpdatePolicy::default();
         let build = Instant::now();
-        let mut result = detect_sections_unified_incremental_dated(
+        let mut result = detect_sections_incremental_dated(
             &mut cache,
             &[],
             &tracks[..split],
@@ -305,7 +305,7 @@ fn main() {
             let new_id = [tracks[split + i].0.as_str()];
             let existing = result.catalogue.clone();
             let start = Instant::now();
-            result = detect_sections_unified_incremental_dated(
+            result = detect_sections_incremental_dated(
                 &mut cache,
                 &existing,
                 pool,
@@ -335,7 +335,7 @@ fn main() {
             let new_ids: Vec<&str> = tracks[split..].iter().map(|(id, _)| id.as_str()).collect();
             let existing = result.catalogue.clone();
             let start = Instant::now();
-            result = detect_sections_unified_incremental_dated(
+            result = detect_sections_incremental_dated(
                 &mut cache,
                 &existing,
                 &tracks,
@@ -374,14 +374,8 @@ fn main() {
 
     for run in 1..=repeat {
         let start = Instant::now();
-        let out = detect_sections_unified_dated(
-            &tracks,
-            &[],
-            &sports,
-            &starts,
-            &config,
-            &Tunables::DEFAULT,
-        );
+        let out =
+            detect_sections_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
         let ms = start.elapsed().as_millis();
         println!(
             "run {} detect {} ms, {} sections, peak rss {} MB",

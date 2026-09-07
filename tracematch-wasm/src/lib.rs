@@ -157,8 +157,8 @@ pub fn group_routes_with_progress(
 /// Returns `{ sections: FrequentSection[], boundaries: BoundaryRecord[] }`.
 /// The boundaries carry the reason behind every cut and every candidate
 /// that backed off, which is what the site renders to explain itself.
-#[wasm_bindgen(js_name = "detectSectionsUnified")]
-pub fn detect_sections_unified(
+#[wasm_bindgen(js_name = "detectSections")]
+pub fn detect_sections(
     tracks_json: &str,
     seconds_json: &str,
     sport_types_json: &str,
@@ -190,7 +190,7 @@ pub fn detect_sections_unified(
         serde_json::from_str(tunables_json).map_err(|e| JsError::new(&e.to_string()))?
     };
 
-    let detection = tracematch::detect_sections_unified_explained(
+    let detection = tracematch::detect_sections_explained(
         &tracks,
         &seconds,
         &sport_types,

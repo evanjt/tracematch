@@ -161,7 +161,7 @@ export interface Tunables {
   refLatQuantDeg?: number;
 }
 
-// What detectSectionsUnified returns.
+// What detectSections returns.
 export interface UnifiedDetection {
   sections: FrequentSection[];
   boundaries: BoundaryRecord[];

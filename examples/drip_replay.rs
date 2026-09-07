@@ -1,9 +1,9 @@
 //! Chronological one-at-a-time drip replay over a real GPX corpus.
 //!
 //! Answers the drip-vs-bulk skepticism empirically: feed activities in
-//! date order through [`tracematch::detect_sections_unified_incremental_cached_with_policy`],
+//! date order through [`tracematch::detect_sections_incremental_cached_with_policy`],
 //! record each fold's added/dissolved/changed counts and the geometry
-//! deltas, then run one [`detect_sections_unified`] batch over the same
+//! deltas, then run one [`detect_sections`] batch over the same
 //! pool and compare the final catalogues on count, endpoints and length.
 //!
 //!     cargo run --release --example drip_replay -- \
@@ -20,8 +20,7 @@ use std::time::Instant;
 
 use tracematch::{
     CandidateFate, CandidateSection, FrequentSection, GpsPoint, HysteresisParams, HysteresisState,
-    SectionConfig, SectionEvidenceCache, detect_sections_unified_dated,
-    detect_sections_unified_incremental_dated,
+    SectionConfig, SectionEvidenceCache, detect_sections_dated, detect_sections_incremental_dated,
     geo_utils::haversine_distance,
     matching::{calculate_route_distance, resample_route},
     mutual_overlap,
@@ -464,7 +463,7 @@ fn main() {
         let new_ids = [act.id.as_str()];
 
         let t = Instant::now();
-        let res = detect_sections_unified_incremental_dated(
+        let res = detect_sections_incremental_dated(
             &mut cache,
             &catalogue,
             &pool,
@@ -701,7 +700,7 @@ fn main() {
     println!("\n== bulk batch over the same pool ==");
     let seconds: Vec<&[f64]> = secs_owned.iter().map(|s| s.as_slice()).collect();
     let t_batch = Instant::now();
-    let batch = detect_sections_unified_dated(
+    let batch = detect_sections_dated(
         &pool,
         &seconds,
         &sport_types,

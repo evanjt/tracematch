@@ -144,7 +144,7 @@ const sectionConfig = JSON.stringify({
 });
 
 const tSec = performance.now();
-const detection = wasm.detectSectionsUnified(
+const detection = wasm.detectSections(
   JSON.stringify(sectionTracks),
   '[]',
   JSON.stringify(sportTypes),

@@ -297,7 +297,7 @@ pub struct UnifiedDetection {
 
 /// The detector's free constants, each documented with its meaning and
 /// the evidence behind its default. Production always runs
-/// [`Tunables::DEFAULT`]; [`detect_sections_unified_tuned`] exists so
+/// [`Tunables::DEFAULT`]; [`detect_sections_tuned`] exists so
 /// the validation lab can sweep each value one at a time and verify the
 /// defaults sit on plateaus rather than on peaks fitted to one
 /// athlete's corpus (plateau tables: unified-lab REPORT.md, A1).
@@ -3920,7 +3920,7 @@ fn detect_for_sport(
 ///
 /// The body past the grid is [`detect_for_cluster_with_grid`], shared
 /// verbatim with the cached incremental
-/// ([`detect_sections_unified_incremental_cached_with_policy`]) so a touched cluster's
+/// ([`detect_sections_incremental_cached_with_policy`]) so a touched cluster's
 /// recompute is byte-identical to the batch's.
 #[allow(clippy::too_many_arguments)]
 fn detect_for_cluster(
@@ -5689,48 +5689,48 @@ fn reconcile_seam_overruns(
 /// `seconds` carries each track's per-point time offsets, parallel to
 /// `tracks`; it feeds only the lift velocity veto. Pass `&[]` when time
 /// streams are unavailable and the lift rule rests on geometry alone.
-pub fn detect_sections_unified(
+pub fn detect_sections(
     tracks: &[(String, Vec<GpsPoint>)],
     seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    detect_sections_unified_tuned(tracks, seconds, sport_types, config, &Tunables::DEFAULT)
+    detect_sections_tuned(tracks, seconds, sport_types, config, &Tunables::DEFAULT)
 }
 
-/// [`detect_sections_unified`] with explicit [`Tunables`]. The
+/// [`detect_sections`] with explicit [`Tunables`]. The
 /// validation lab's plateau sweeps run through here; production never
 /// passes anything but [`Tunables::DEFAULT`].
-pub fn detect_sections_unified_tuned(
+pub fn detect_sections_tuned(
     tracks: &[(String, Vec<GpsPoint>)],
     seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     tun: &Tunables,
 ) -> Vec<FrequentSection> {
-    detect_sections_unified_explained(tracks, seconds, sport_types, config, tun).sections
+    detect_sections_explained(tracks, seconds, sport_types, config, tun).sections
 }
 
-/// [`detect_sections_unified`] carrying its boundary records beside the
+/// [`detect_sections`] carrying its boundary records beside the
 /// sections: why each surviving cut exists and which candidates backed
 /// off, with the numbers that decided it.
-pub fn detect_sections_unified_explained(
+pub fn detect_sections_explained(
     tracks: &[(String, Vec<GpsPoint>)],
     seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     tun: &Tunables,
 ) -> UnifiedDetection {
-    detect_sections_unified_dated(tracks, seconds, sport_types, &HashMap::new(), config, tun)
+    detect_sections_dated(tracks, seconds, sport_types, &HashMap::new(), config, tun)
 }
 
-/// [`detect_sections_unified_explained`] with per-activity start times.
+/// [`detect_sections_explained`] with per-activity start times.
 /// Starts chaining within [`Tunables::occasion_span_h`] form one
 /// OCCASION, and every support floor counts occasions instead of
 /// activities: a multi-day trip's files are one visit to their ground.
 /// Ids absent from `start_epochs` each count as their own occasion, so
 /// a dateless call is exactly the classic entry.
-pub fn detect_sections_unified_dated(
+pub fn detect_sections_dated(
     tracks: &[(String, Vec<GpsPoint>)],
     seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
@@ -5849,7 +5849,7 @@ fn detect_by_sport(
 pub struct UnifiedIncrementalResult {
     /// The catalogue after the fold. Under the default policy this is the
     /// fresh detection verbatim (order and ids included), so it converges
-    /// to [`detect_sections_unified`] over `pool` exactly, order-free by
+    /// to [`detect_sections`] over `pool` exactly, order-free by
     /// construction. Under a pinning policy, frozen sections are emitted
     /// after the fresh ones; nothing downstream may read meaning into
     /// catalogue position.
@@ -5970,7 +5970,7 @@ pub struct SectionUpdatePolicy {
 }
 
 /// Fold one activity into an existing Unified catalogue, order-free and
-/// converging to the [`detect_sections_unified`] batch over the same
+/// converging to the [`detect_sections`] batch over the same
 /// pool.
 ///
 /// `pool` is the FULL accumulated pool INCLUDING the just-added activity;
@@ -6000,7 +6000,7 @@ pub struct SectionUpdatePolicy {
 /// keeps this delta contract ([`UnifiedIncrementalResult`]) unchanged;
 /// only the body and an added evidence-cache handle change. Design:
 /// `~/.claude/plans/b1-incremental-design.md`.
-pub fn detect_sections_unified_incremental(
+pub fn detect_sections_incremental(
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],
     seconds: &[&[f64]],
@@ -6010,7 +6010,7 @@ pub fn detect_sections_unified_incremental(
     let UnifiedDetection {
         sections: fresh,
         boundaries,
-    } = detect_sections_unified_explained(pool, seconds, sport_types, config, &Tunables::DEFAULT);
+    } = detect_sections_explained(pool, seconds, sport_types, config, &Tunables::DEFAULT);
     let lookup: HashMap<&str, (&[GpsPoint], &[f64])> = pool
         .iter()
         .enumerate()
@@ -6443,7 +6443,7 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 // Cached cluster-recompute incremental (the O(touched-cluster) fast path)
 // ============================================================================
 //
-// The naive [`detect_sections_unified_incremental`] above re-batches the WHOLE
+// The naive [`detect_sections_incremental`] above re-batches the WHOLE
 // pool on every add. This path holds the per-(sport, cluster) catalogue across
 // calls and re-runs detection ONLY for the cluster(s) a new activity touches,
 // reusing every untouched cluster verbatim. Detection is already partitioned
@@ -6470,7 +6470,7 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 const EVIDENCE_CACHE_VERSION: u32 = 4;
 
 /// Persisted per-(sport, geo-cluster) evidence backing
-/// [`detect_sections_unified_incremental_cached_with_policy`]. The engine holds one across
+/// [`detect_sections_incremental_cached_with_policy`]. The engine holds one across
 /// folds and (in a later phase) persists it as a blob; this layer only defines
 /// the type and keeps it warm in memory.
 ///
@@ -6824,7 +6824,7 @@ impl ClusterEvidence {
 
 /// Fold new activities into an existing Unified catalogue using the persisted
 /// per-cluster evidence in `cache`. Order-free and equal to the
-/// [`detect_sections_unified`] batch over `pool` (same per-cluster
+/// [`detect_sections`] batch over `pool` (same per-cluster
 /// decomposition), so it converges at >= 0.95 ground overlap with identical
 /// section count.
 ///
@@ -6846,7 +6846,7 @@ impl ClusterEvidence {
 /// for, so the catalogue under `SectionUpdatePolicy::default()` is the one
 /// the batch-parity gates measure.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_sections_unified_incremental_cached_with_policy(
+pub fn detect_sections_incremental_cached_with_policy(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],
@@ -6856,7 +6856,7 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
 ) -> UnifiedIncrementalResult {
-    detect_sections_unified_incremental_dated(
+    detect_sections_incremental_dated(
         cache,
         existing,
         pool,
@@ -6869,12 +6869,12 @@ pub fn detect_sections_unified_incremental_cached_with_policy(
     )
 }
 
-/// [`detect_sections_unified_incremental_cached_with_policy`] with
+/// [`detect_sections_incremental_cached_with_policy`] with
 /// per-activity start times: the incremental twin of
-/// [`detect_sections_unified_dated`], so drip and batch count occasions
+/// [`detect_sections_dated`], so drip and batch count occasions
 /// identically and the parity gates keep holding under dated corpora.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_sections_unified_incremental_dated(
+pub fn detect_sections_incremental_dated(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],
@@ -6885,7 +6885,7 @@ pub fn detect_sections_unified_incremental_dated(
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
 ) -> UnifiedIncrementalResult {
-    detect_sections_unified_incremental_observed(
+    detect_sections_incremental_observed(
         cache,
         existing,
         pool,
@@ -6899,13 +6899,13 @@ pub fn detect_sections_unified_incremental_dated(
     )
 }
 
-/// [`detect_sections_unified_incremental_dated`] that reports after each
+/// [`detect_sections_incremental_dated`] that reports after each
 /// cluster it cuts: `(done, total, cache)`, the cache as it stands with
 /// that cluster clean. A caller persisting [`SectionEvidenceCache::checkpoint`]
 /// there can resume a killed fold with no new activities and cut only
 /// what is left. The report changes nothing about the fold.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_sections_unified_incremental_observed(
+pub fn detect_sections_incremental_observed(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],

@@ -91,12 +91,10 @@ pub use naming::{
 pub use unified::{
     BoundaryReason, BoundaryRecord, SectionEvidenceCache, SectionGeometryChange, SectionMergedAway,
     SectionUpdatePolicy, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans_tuned, detect_sections_unified, detect_sections_unified_dated,
-    detect_sections_unified_explained, detect_sections_unified_incremental,
-    detect_sections_unified_incremental_cached_with_policy,
-    detect_sections_unified_incremental_dated, detect_sections_unified_incremental_observed,
-    detect_sections_unified_tuned, lift_spans, lift_spans_tuned, required_visits_for_length,
-    self_pass_penalty,
+    confirmed_lift_spans_tuned, detect_sections, detect_sections_dated, detect_sections_explained,
+    detect_sections_incremental, detect_sections_incremental_cached_with_policy,
+    detect_sections_incremental_dated, detect_sections_incremental_observed, detect_sections_tuned,
+    lift_spans, lift_spans_tuned, required_visits_for_length, self_pass_penalty,
 };
 
 // Re-export single-route section utilities (find known sections).

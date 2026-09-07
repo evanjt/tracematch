@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    detect_sections_unified, detect_sections_unified_incremental_cached_with_policy,
+    detect_sections, detect_sections_incremental_cached_with_policy,
 };
 
 /// Endpoints must agree this closely for two sections to count as the
@@ -115,7 +115,7 @@ fn replay(tracks: &[(String, Vec<GpsPoint>)], chunks: &[usize], label: &str) -> 
         next += take;
         let new_ids: Vec<&str> = arriving.iter().map(|s| s.as_str()).collect();
 
-        let result = detect_sections_unified_incremental_cached_with_policy(
+        let result = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -127,7 +127,7 @@ fn replay(tracks: &[(String, Vec<GpsPoint>)], chunks: &[usize], label: &str) -> 
         );
         catalogue = result.catalogue;
 
-        let batch = detect_sections_unified(&pool, &[], &sports, &cfg);
+        let batch = detect_sections(&pool, &[], &sports, &cfg);
         assert_same_catalogue(
             &catalogue,
             &batch,

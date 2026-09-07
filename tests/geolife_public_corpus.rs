@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use geolife::load_geolife;
 use tracematch::{
-    FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, detect_sections_unified,
+    FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, detect_sections,
     group_signatures_parallel,
 };
 
@@ -156,7 +156,7 @@ fn detect(corpus: &Corpus) -> Vec<FrequentSection> {
 
     let _ = groups;
     let seconds: Vec<&[f64]> = corpus.seconds.iter().map(Vec::as_slice).collect();
-    detect_sections_unified(
+    detect_sections(
         &corpus.tracks,
         &seconds,
         &corpus.sports,

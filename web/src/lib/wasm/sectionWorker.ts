@@ -20,7 +20,7 @@ import type {
 import init, {
   createSignature,
   groupRoutesWithProgress,
-  detectSectionsUnified,
+  detectSections,
 } from './pkg/tracematch_wasm.js';
 
 // Map raw phase strings from the Rust library to human-readable labels
@@ -129,7 +129,7 @@ async function handleAnalyse(req: AnalyseRequest) {
       // parser reads no <time>, and the lift veto falls back to
       // geometry when the stream is absent.
       progress(req.requestId, 'Detecting sections', 0, 0);
-      const detection = detectSectionsUnified(
+      const detection = detectSections(
         tracksJson,
         '[]',
         sportTypesJson,

@@ -15,7 +15,7 @@ use std::time::Instant;
 use tracematch::{
     FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
     sections::{
-        build_accumulator_from_traces, detect_sections_unified_incremental_dated,
+        build_accumulator_from_traces, detect_sections_incremental_dated,
         extract_all_activity_traces,
     },
 };
@@ -173,7 +173,7 @@ fn main() {
     let mut cache = SectionEvidenceCache::new();
     let ids: Vec<&str> = tracks.iter().map(|(id, _)| id.as_str()).collect();
     let t = Instant::now();
-    let mut cold = detect_sections_unified_incremental_dated(
+    let mut cold = detect_sections_incremental_dated(
         &mut cache,
         &[],
         &tracks,
@@ -202,7 +202,7 @@ fn main() {
     let split = tracks.len().saturating_sub(adds);
     let mut cache = SectionEvidenceCache::new();
     let seed_ids: Vec<&str> = tracks[..split].iter().map(|(id, _)| id.as_str()).collect();
-    let mut result = detect_sections_unified_incremental_dated(
+    let mut result = detect_sections_incremental_dated(
         &mut cache,
         &[],
         &tracks[..split],
@@ -218,7 +218,7 @@ fn main() {
         let upto = split + n;
         let new = [tracks[upto - 1].0.as_str()];
         let t = Instant::now();
-        result = detect_sections_unified_incremental_dated(
+        result = detect_sections_incremental_dated(
             &mut cache,
             &result.catalogue,
             &tracks[..upto],

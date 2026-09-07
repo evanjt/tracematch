@@ -32,8 +32,8 @@ use std::collections::BTreeSet;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::{
     CandidateSection, FrequentSection, GpsPoint, HysteresisState, SectionConfig,
-    SectionEvidenceCache, SectionUpdatePolicy,
-    detect_sections_unified_incremental_cached_with_policy, shares_ground,
+    SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
+    shares_ground,
 };
 
 // ============================================================================
@@ -161,7 +161,7 @@ fn drip_measure(corpus: &LifecycleCorpus) -> MeasureRun {
         let new_ids = [pool.last().unwrap().0.as_str()];
 
         // Raw batch catalogue for this pool (the batch truth the fold damps).
-        let result = detect_sections_unified_incremental_cached_with_policy(
+        let result = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
             &pool,

@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     BoundaryReason, FrequentSection, GpsPoint, SectionConfig, Tunables, UnifiedDetection,
-    detect_sections_unified_explained,
+    detect_sections_explained,
 };
 
 fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> UnifiedDetection {
-    detect_sections_unified_explained(
+    detect_sections_explained(
         tracks,
         &[],
         &shapes::pooled(tracks),

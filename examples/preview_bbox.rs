@@ -264,7 +264,7 @@ fn main() {
     let tun = tracematch::Tunables::DEFAULT;
 
     let t = Instant::now();
-    let full = tracematch::detect_sections_unified_dated(
+    let full = tracematch::detect_sections_dated(
         &tracks,
         &seconds,
         &sport_types,
@@ -317,7 +317,7 @@ fn main() {
         let ids: Vec<&str> = tracks.iter().map(|(i, _)| i.as_str()).collect();
         let mut cache = tracematch::SectionEvidenceCache::new();
         let t = Instant::now();
-        let base = tracematch::detect_sections_unified_incremental_dated(
+        let base = tracematch::detect_sections_incremental_dated(
             &mut cache,
             &[],
             &tracks,
@@ -359,7 +359,7 @@ fn main() {
         ] {
             let mut c = cache.clone();
             let t = Instant::now();
-            let r = tracematch::detect_sections_unified_incremental_dated(
+            let r = tracematch::detect_sections_incremental_dated(
                 &mut c,
                 &[],
                 &tracks,
@@ -448,15 +448,9 @@ fn main() {
         let kt: Vec<(String, Vec<GpsPoint>)> = keep.iter().map(|&i| tracks[i].clone()).collect();
         let ks: Vec<&[f64]> = keep.iter().map(|&i| seconds[i]).collect();
         let t = Instant::now();
-        let cs = tracematch::detect_sections_unified_dated(
-            &kt,
-            &ks,
-            &sport_types,
-            &start_epochs,
-            &config,
-            &tun,
-        )
-        .sections;
+        let cs =
+            tracematch::detect_sections_dated(&kt, &ks, &sport_types, &start_epochs, &config, &tun)
+                .sections;
         let ms = t.elapsed().as_millis();
         // Compare over the whole region the kept clusters cover.
         let mut agree = 0;
@@ -520,7 +514,7 @@ fn main() {
         let sub_seconds: Vec<&[f64]> = idx.iter().map(|&i| seconds[i]).collect();
 
         let t = Instant::now();
-        let sub = tracematch::detect_sections_unified_dated(
+        let sub = tracematch::detect_sections_dated(
             &sub_tracks,
             &sub_seconds,
             &sport_types,
@@ -635,7 +629,7 @@ fn main() {
             let sub_pts: usize = sub_tracks.iter().map(|(_, p)| p.len()).sum();
             let empty: Vec<&[f64]> = vec![&[]; clip_tracks.len()];
             let t = Instant::now();
-            let clipped = tracematch::detect_sections_unified_dated(
+            let clipped = tracematch::detect_sections_dated(
                 &clip_tracks,
                 &empty,
                 &clip_sports,
@@ -691,7 +685,7 @@ fn main() {
                 let mut plus_seconds = sub_seconds.clone();
                 plus_tracks.push(tracks[f].clone());
                 plus_seconds.push(seconds[f]);
-                let plus = tracematch::detect_sections_unified_dated(
+                let plus = tracematch::detect_sections_dated(
                     &plus_tracks,
                     &plus_seconds,
                     &sport_types,

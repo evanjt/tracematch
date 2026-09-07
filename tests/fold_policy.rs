@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    detect_sections_unified_incremental_cached_with_policy,
+    detect_sections_incremental_cached_with_policy,
 };
 
 fn endpoints_match(a: &FrequentSection, b: &FrequentSection, tol_m: f64) -> bool {
@@ -53,7 +53,7 @@ fn drip_with_pins(
     for (step, (id, pts)) in tracks.iter().enumerate() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -169,7 +169,7 @@ fn unpin_releases_the_withheld_recut() {
     // by the pin, so the very next fold emits the released re-cut: the
     // trunk lands in `changed`, nothing stays in `held`, and the
     // catalogue converges to the from-scratch batch over the pool.
-    use tracematch::detect_sections_unified;
+    use tracematch::detect_sections;
 
     let tracks = shapes::late_fork(6, 6);
     let sports: HashMap<String, String> = shapes::pooled(&tracks);
@@ -184,7 +184,7 @@ fn unpin_releases_the_withheld_recut() {
     for (step, (id, pts)) in tracks.iter().enumerate() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -210,7 +210,7 @@ fn unpin_releases_the_withheld_recut() {
     );
 
     policy.pinned_ids.clear();
-    let res = detect_sections_unified_incremental_cached_with_policy(
+    let res = detect_sections_incremental_cached_with_policy(
         &mut cache,
         &catalogue,
         &pool,
@@ -230,7 +230,7 @@ fn unpin_releases_the_withheld_recut() {
         "the trunk's ground survives under the fresh cut"
     );
 
-    let batch = detect_sections_unified(&pool, &[], &sports, &cfg);
+    let batch = detect_sections(&pool, &[], &sports, &cfg);
     assert_eq!(
         normalise(&res.catalogue),
         normalise(&batch),
@@ -311,7 +311,7 @@ fn freeze_all_holds_geometry_but_not_existence() {
         } else {
             policy_frozen.clone()
         };
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -363,7 +363,7 @@ fn default_policy_delta_is_internally_consistent() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let prior = catalogue.clone();
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -416,7 +416,7 @@ fn split_loser_carries_its_parent_link_on_the_fold() {
         pool.push((id.clone(), pts.clone()));
         let new_ids = [pool.last().unwrap().0.as_str()];
         let prior = catalogue.clone();
-        let res = detect_sections_unified_incremental_cached_with_policy(
+        let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &catalogue,
             &pool,
@@ -460,7 +460,7 @@ fn merged_ground_is_not_reported_as_dissolved() {
     // id leaves the list. Its ground did NOT leave, so it must be
     // reported in `merged` (with the surviving id) and never in
     // `dissolved`.
-    use tracematch::{detect_sections_unified, detect_sections_unified_incremental};
+    use tracematch::{detect_sections, detect_sections_incremental};
 
     let cfg = SectionConfig::default();
     let half = |x0: f64, x1: f64, n: usize, tag: &str| -> Vec<(String, Vec<GpsPoint>)> {
@@ -477,8 +477,8 @@ fn merged_ground_is_not_reported_as_dissolved() {
 
     let west = half(0.0, 700.0, 4, "west");
     let east = half(700.0, 1400.0, 4, "east");
-    let west_sections = detect_sections_unified(&west, &[], &shapes::pooled(&west), &cfg);
-    let east_sections = detect_sections_unified(&east, &[], &shapes::pooled(&east), &cfg);
+    let west_sections = detect_sections(&west, &[], &shapes::pooled(&west), &cfg);
+    let east_sections = detect_sections(&east, &[], &shapes::pooled(&east), &cfg);
     assert_eq!(west_sections.len(), 1, "west half detects as one section");
     assert_eq!(east_sections.len(), 1, "east half detects as one section");
     let mut existing = west_sections;
@@ -490,8 +490,7 @@ fn merged_ground_is_not_reported_as_dissolved() {
     existing.append(&mut junior);
 
     let full = half(0.0, 1400.0, 6, "full");
-    let res =
-        detect_sections_unified_incremental(&existing, &full, &[], &shapes::pooled(&full), &cfg);
+    let res = detect_sections_incremental(&existing, &full, &[], &shapes::pooled(&full), &cfg);
     assert_eq!(res.catalogue.len(), 1, "one continuous cut wins");
     assert!(
         res.merged

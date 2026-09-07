@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::{
     GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    detect_sections_unified_incremental_observed,
+    detect_sections_incremental_observed,
 };
 
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
@@ -68,7 +68,7 @@ fn a_fold_resumed_from_a_checkpoint_cuts_only_what_is_left() {
         .collect();
     let base_ids: Vec<&str> = base.iter().map(|(id, _)| id.as_str()).collect();
     let mut cache = SectionEvidenceCache::new();
-    let existing = detect_sections_unified_incremental_observed(
+    let existing = detect_sections_incremental_observed(
         &mut cache,
         &[],
         &base,
@@ -88,7 +88,7 @@ fn a_fold_resumed_from_a_checkpoint_cuts_only_what_is_left() {
     let new_ids: Vec<&str> = held.iter().map(|&i| tracks[i].0.as_str()).collect();
     let mut checkpoint: Option<SectionEvidenceCache> = None;
     let mut seen_total = 0;
-    let full = detect_sections_unified_incremental_observed(
+    let full = detect_sections_incremental_observed(
         &mut cache,
         &existing,
         &tracks,
@@ -121,7 +121,7 @@ fn a_fold_resumed_from_a_checkpoint_cuts_only_what_is_left() {
     // Resume: no new activities, only the dirty clusters are cut.
     let mut resumed = checkpoint;
     let mut cuts = Vec::new();
-    let again = detect_sections_unified_incremental_observed(
+    let again = detect_sections_incremental_observed(
         &mut resumed,
         &existing,
         &tracks,

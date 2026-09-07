@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     Direction, FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    Tunables, detect_sections_unified, detect_sections_unified_dated,
-    detect_sections_unified_incremental_dated, shares_ground,
+    Tunables, detect_sections, detect_sections_dated, detect_sections_incremental_dated,
+    shares_ground,
 };
 
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
@@ -23,7 +23,7 @@ fn config() -> SectionConfig {
 }
 
 fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Vec<FrequentSection> {
-    detect_sections_unified(tracks, &[], &shapes::pooled(tracks), &config())
+    detect_sections(tracks, &[], &shapes::pooled(tracks), &config())
 }
 
 // ------------------------------------------------------------- helpers
@@ -785,11 +785,11 @@ fn one_trip_ground_is_not_a_section() {
     // habit. The evidence is identical; only the calendar differs.
     // Expected behaviour: a trip's files chain into one occasion and
     // one occasion is not repetition; the habit is.
-    use tracematch::{Tunables, detect_sections_unified_dated};
+    use tracematch::{Tunables, detect_sections_dated};
     let tracks = shapes::plain_corridor(2);
     let detect_at = |epochs: &[(&str, i64)]| {
         let map: HashMap<String, i64> = epochs.iter().map(|&(id, e)| (id.to_string(), e)).collect();
-        detect_sections_unified_dated(
+        detect_sections_dated(
             &tracks,
             &[],
             &shapes::pooled(&tracks),
@@ -823,13 +823,13 @@ fn a_daily_habit_is_repetition_but_one_stay_is_not() {
     // holiday's jogging loop — one visit to a place, however many
     // recordings the stay produced. Day gaps cannot draw this line
     // (trip days and commute days are both ~24 h apart); the span can.
-    use tracematch::{Tunables, detect_sections_unified_dated};
+    use tracematch::{Tunables, detect_sections_dated};
     const DAY: i64 = 86_400;
     let habit = shapes::plain_corridor(10);
     let map: HashMap<String, i64> = (0..10)
         .map(|i| (format!("cor_{}", i), i as i64 * DAY))
         .collect();
-    let out = detect_sections_unified_dated(
+    let out = detect_sections_dated(
         &habit,
         &[],
         &shapes::pooled(&habit),
@@ -845,7 +845,7 @@ fn a_daily_habit_is_repetition_but_one_stay_is_not() {
     let map: HashMap<String, i64> = (0..6)
         .map(|i| (format!("cor_{}", i), i as i64 * DAY))
         .collect();
-    let out = detect_sections_unified_dated(
+    let out = detect_sections_dated(
         &stay,
         &[],
         &shapes::pooled(&stay),
@@ -866,7 +866,7 @@ fn a_trip_plus_a_later_return_clears_the_floor() {
     // Three recordings: two on consecutive days (one trip), a third a
     // fortnight later. The trip collapses to one occasion; the return
     // makes two — the ground was genuinely returned to.
-    use tracematch::{Tunables, detect_sections_unified_dated};
+    use tracematch::{Tunables, detect_sections_dated};
     let tracks = shapes::plain_corridor(3);
     const DAY: i64 = 86_400;
     let map: HashMap<String, i64> = [
@@ -875,7 +875,7 @@ fn a_trip_plus_a_later_return_clears_the_floor() {
         ("cor_2".to_string(), 14 * DAY),
     ]
     .into();
-    let out = detect_sections_unified_dated(
+    let out = detect_sections_dated(
         &tracks,
         &[],
         &shapes::pooled(&tracks),
@@ -1041,10 +1041,10 @@ fn boundaries_explain_the_cuts() {
     // Every surviving cut carries its mechanism and numbers as data.
     // The oval entrance is a usage change; the Y junction is a fork
     // with a worthy branch; a boundary-free corridor emits nothing.
-    use tracematch::{BoundaryReason, Tunables, detect_sections_unified_explained};
+    use tracematch::{BoundaryReason, Tunables, detect_sections_explained};
 
     let tracks = shapes::oval_stem(6);
-    let out = detect_sections_unified_explained(
+    let out = detect_sections_explained(
         &tracks,
         &[],
         &shapes::pooled(&tracks),
@@ -1064,7 +1064,7 @@ fn boundaries_explain_the_cuts() {
     );
 
     let tracks = shapes::fork_y(8);
-    let out = detect_sections_unified_explained(
+    let out = detect_sections_explained(
         &tracks,
         &[],
         &shapes::pooled(&tracks),
@@ -1085,7 +1085,7 @@ fn boundaries_explain_the_cuts() {
     );
 
     let tracks = shapes::persona_commuter();
-    let out = detect_sections_unified_explained(
+    let out = detect_sections_explained(
         &tracks,
         &[],
         &shapes::pooled(&tracks),
@@ -1109,8 +1109,8 @@ fn a_fork_names_the_activities_its_branch_collected() {
     // The fold reports the same sets as the batch: attribution is a
     // property of the ground, not of arrival order.
     use tracematch::{
-        BoundaryReason, BoundaryRecord, Tunables, detect_sections_unified_explained,
-        detect_sections_unified_incremental,
+        BoundaryReason, BoundaryRecord, Tunables, detect_sections_explained,
+        detect_sections_incremental,
     };
     let tracks = shapes::fork_y(8);
     let pooled = shapes::pooled(&tracks);
@@ -1141,8 +1141,7 @@ fn a_fork_names_the_activities_its_branch_collected() {
         sets
     };
 
-    let batch =
-        detect_sections_unified_explained(&tracks, &[], &pooled, &config(), &Tunables::DEFAULT);
+    let batch = detect_sections_explained(&tracks, &[], &pooled, &config(), &Tunables::DEFAULT);
     let sets = fork_sets(&batch.boundaries);
     assert!(!sets.is_empty(), "no fork record at the junction");
     let parity = |id: &str| id.trim_start_matches("fork_").parse::<usize>().unwrap() % 2;
@@ -1161,7 +1160,7 @@ fn a_fork_names_the_activities_its_branch_collected() {
         "every outing left by one branch or the other"
     );
 
-    let fold = detect_sections_unified_incremental(&[], &tracks, &[], &pooled, &config());
+    let fold = detect_sections_incremental(&[], &tracks, &[], &pooled, &config());
     assert_eq!(
         fork_sets(&fold.boundaries),
         sets,
@@ -1294,10 +1293,10 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
     // hot. Support must bind everywhere, not just in total: the deep
     // tail is one outing's private ground, cut with a low-support
     // record, while the corridor keeps all five contributors.
-    use tracematch::{BoundaryReason, Tunables, detect_sections_unified_explained};
+    use tracematch::{BoundaryReason, Tunables, detect_sections_explained};
 
     let tracks = shapes::welded_tail();
-    let out = detect_sections_unified_explained(
+    let out = detect_sections_explained(
         &tracks,
         &[],
         &shapes::pooled(&tracks),
@@ -1699,7 +1698,7 @@ fn pooling_counts_every_sport_on_shared_ground() {
         ..config()
     };
 
-    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
+    let sections = detect_sections(&tracks, &[], &sports, &config);
 
     let main = sections
         .iter()
@@ -1723,7 +1722,7 @@ fn partitioning_strands_the_minority_sport() {
         pool_sports: false,
         ..config()
     };
-    let sections = detect_sections_unified(&tracks, &[], &sports, &config);
+    let sections = detect_sections(&tracks, &[], &sports, &config);
 
     let ride = tracks[3].0.as_str();
     assert!(
@@ -1746,8 +1745,8 @@ fn tied_sports_label_the_same_way_whatever_the_order() {
         pool_sports: true,
         ..config()
     };
-    let forward = detect_sections_unified(&tracks, &[], &sports, &config);
-    let backward = detect_sections_unified(&reversed, &[], &sports, &config);
+    let forward = detect_sections(&tracks, &[], &sports, &config);
+    let backward = detect_sections(&reversed, &[], &sports, &config);
 
     let label = |s: &[FrequentSection]| {
         s.iter()
@@ -1832,10 +1831,9 @@ fn pooled_fold_agrees_with_the_pooled_batch() {
     let ids: Vec<&str> = tracks.iter().map(|(id, _)| id.as_str()).collect();
     let starts = HashMap::new();
 
-    let batch =
-        detect_sections_unified_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
+    let batch = detect_sections_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
     let mut cache = SectionEvidenceCache::default();
-    let cold = detect_sections_unified_incremental_dated(
+    let cold = detect_sections_incremental_dated(
         &mut cache,
         &[],
         &tracks,
@@ -1851,7 +1849,7 @@ fn pooled_fold_agrees_with_the_pooled_batch() {
     let mut reversed = cold.catalogue.clone();
     reversed.reverse();
     for (order, existing) in [("as cut", &cold.catalogue), ("reversed", &reversed)] {
-        let warm = detect_sections_unified_incremental_dated(
+        let warm = detect_sections_incremental_dated(
             &mut cache.clone(),
             existing,
             &tracks,
@@ -1899,7 +1897,7 @@ fn a_pooled_fold_labels_sport_the_way_the_batch_does() {
     let run_ids: Vec<&str> = runs.iter().map(|(id, _)| id.as_str()).collect();
 
     let mut cache = SectionEvidenceCache::default();
-    let cold = detect_sections_unified_incremental_dated(
+    let cold = detect_sections_incremental_dated(
         &mut cache,
         &[],
         &runs,
@@ -1920,7 +1918,7 @@ fn a_pooled_fold_labels_sport_the_way_the_batch_does() {
         sports.insert(id.clone(), "Ride".to_string());
     }
     let ride_ids: Vec<&str> = tracks[3..].iter().map(|(id, _)| id.as_str()).collect();
-    let warm = detect_sections_unified_incremental_dated(
+    let warm = detect_sections_incremental_dated(
         &mut cache,
         &cold.catalogue,
         &tracks,
@@ -1953,8 +1951,7 @@ fn a_pooled_fold_labels_sport_the_way_the_batch_does() {
         "no ride joined the corridor, so the label was never at risk"
     );
 
-    let batch =
-        detect_sections_unified_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
+    let batch = detect_sections_dated(&tracks, &[], &sports, &starts, &config, &Tunables::DEFAULT);
     assert!(
         batch.sections.iter().any(|b| b.sport_type == "Ride"),
         "the rides never outnumbered the runs, so the equality below is vacuous"
