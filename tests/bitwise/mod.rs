@@ -28,7 +28,7 @@ use baseline::Band;
 use tracematch::sections::FrequentSection;
 use tracematch::{
     GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy, Tunables,
-    sections::{confirmed_lift_spans_tuned, detect_sections_unified_incremental_dated},
+    sections::{confirmed_lift_spans_tuned, detect_sections_incremental_dated},
 };
 
 pub struct Corpus {
@@ -189,7 +189,7 @@ pub fn fold(
     c: &Corpus,
     config: &SectionConfig,
 ) -> Vec<FrequentSection> {
-    detect_sections_unified_incremental_dated(
+    detect_sections_incremental_dated(
         cache,
         existing,
         pool,

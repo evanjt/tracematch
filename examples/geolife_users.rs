@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use tracematch::{
     FrequentSection, GpsPoint, MatchConfig, RouteSignature, SectionConfig, Tunables,
-    detect_sections_unified_dated, geo_utils::haversine_distance, group_signatures_parallel,
+    detect_sections_dated, geo_utils::haversine_distance, group_signatures_parallel,
     matching::resample_route,
 };
 
@@ -156,7 +156,7 @@ fn detect(trips: &[&GeoTrajectory]) -> (Vec<FrequentSection>, f64) {
             .iter()
             .filter_map(|t| day_of(&t.date).map(|d| (t.id.clone(), d * 86_400)))
             .collect();
-        detect_sections_unified_dated(
+        detect_sections_dated(
             &tracks,
             &seconds,
             &sports,

@@ -21,8 +21,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use tracematch::{
-    FrequentSection, GpsPoint, SectionConfig, detect_sections_unified,
-    geo_utils::haversine_distance,
+    FrequentSection, GpsPoint, SectionConfig, detect_sections, geo_utils::haversine_distance,
 };
 
 // ---------------------------------------------------------------- loading
@@ -349,8 +348,7 @@ fn main() {
     let seconds: Vec<&[f64]> = activities.iter().map(|a| a.seconds.as_slice()).collect();
 
     let t_batch = Instant::now();
-    let batch: Vec<FrequentSection> =
-        detect_sections_unified(&pool, &seconds, &sport_types, &config);
+    let batch: Vec<FrequentSection> = detect_sections(&pool, &seconds, &sport_types, &config);
     println!(
         "batch: {} sections in {:.1} s",
         batch.len(),

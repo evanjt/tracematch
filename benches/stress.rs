@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 use tracematch::synthetic::SyntheticScenario;
-use tracematch::{SectionConfig, detect_sections_unified};
+use tracematch::{SectionConfig, detect_sections};
 
 // ============================================================================
 // 1. Scaling Curve (Multiscale) — Find the N^2 cliff
@@ -34,7 +34,7 @@ fn bench_scaling_curve(c: &mut Criterion) {
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
-            b.iter(|| detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config));
+            b.iter(|| detect_sections(&dataset.tracks, &[], &dataset.sport_types, &config));
         });
     }
 
@@ -62,9 +62,7 @@ fn bench_route_length_impact(c: &mut Criterion) {
             BenchmarkId::new("corridor_km", length_km),
             &length_km,
             |b, _| {
-                b.iter(|| {
-                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
-                });
+                b.iter(|| detect_sections(&dataset.tracks, &[], &dataset.sport_types, &config));
             },
         );
     }
@@ -93,9 +91,7 @@ fn bench_overlap_density(c: &mut Criterion) {
             BenchmarkId::new("overlap_pct", overlap_pct),
             &overlap_pct,
             |b, _| {
-                b.iter(|| {
-                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
-                });
+                b.iter(|| detect_sections(&dataset.tracks, &[], &dataset.sport_types, &config));
             },
         );
     }
@@ -129,7 +125,7 @@ fn bench_no_overlap_worst_case(c: &mut Criterion) {
         let config = SectionConfig::default();
 
         group.bench_with_input(BenchmarkId::new("activities", count), &count, |b, _| {
-            b.iter(|| detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config));
+            b.iter(|| detect_sections(&dataset.tracks, &[], &dataset.sport_types, &config));
         });
     }
 
@@ -173,9 +169,7 @@ fn bench_component_breakdown(c: &mut Criterion) {
         {
             let config = SectionConfig::default();
             group.bench_with_input(BenchmarkId::new("full_pipeline", count), &count, |b, _| {
-                b.iter(|| {
-                    detect_sections_unified(&dataset.tracks, &[], &dataset.sport_types, &config)
-                });
+                b.iter(|| detect_sections(&dataset.tracks, &[], &dataset.sport_types, &config));
             });
         }
     }

@@ -1270,7 +1270,7 @@ fn main() {
             let t = Instant::now();
             let sections = match name {
                 "unified" => {
-                    let out = tracematch::detect_sections_unified_dated(
+                    let out = tracematch::detect_sections_dated(
                         &tracks,
                         &seconds,
                         &sport_types,
@@ -1486,7 +1486,7 @@ fn main() {
                 .map(|(id, _)| (id.clone(), "All".to_string()))
                 .collect();
             let t = Instant::now();
-            let sections = tracematch::detect_sections_unified_dated(
+            let sections = tracematch::detect_sections_dated(
                 &tracks,
                 &secs,
                 &types,
@@ -2286,7 +2286,7 @@ fn main() {
                 let mut tun = Tunables::DEFAULT;
                 set(&mut tun, v);
                 let t0 = Instant::now();
-                let full = tracematch::detect_sections_unified_dated(
+                let full = tracematch::detect_sections_dated(
                     &tracks,
                     &all_secs,
                     &types,
@@ -2295,7 +2295,7 @@ fn main() {
                     &tun,
                 )
                 .sections;
-                let jk = tracematch::detect_sections_unified_dated(
+                let jk = tracematch::detect_sections_dated(
                     &jk_tracks,
                     &jk_secs,
                     &types,
@@ -2458,7 +2458,7 @@ fn main() {
                     .collect()
             };
             let detect = |ts: &[(String, Vec<GpsPoint>)], ss: &[&[f64]]| -> Vec<FrequentSection> {
-                tracematch::detect_sections_unified_dated(
+                tracematch::detect_sections_dated(
                     ts,
                     ss,
                     &types(ts),
