@@ -59,7 +59,7 @@ pub mod grouping;
 pub mod grouping_filter;
 pub use grouping::{
     GROUPING_PHASE_COMPARING, group_signatures, group_signatures_with_matches,
-    group_signatures_with_progress, should_group_routes,
+    group_signatures_with_progress,
 };
 #[cfg(feature = "parallel")]
 pub use grouping::{
