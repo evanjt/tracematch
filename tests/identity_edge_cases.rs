@@ -982,3 +982,31 @@ fn a_diverging_prior_must_not_capture_a_neighbour_on_superseded_ground() {
     );
     assert_eq!(out.minted, 0, "nothing mints: both candidates have a prior");
 }
+
+/// Scenario: a trunk splits late in its life. The head keeps the trunk's id
+/// and the tail mints beside it, and the step plans twice because the head is
+/// a material re-cut of the trunk.
+/// Expected behaviour: the tail's mint names the trunk as the ground it was
+/// carved from. The second pass presents the trunk on the head it re-cut to,
+/// which the tail no longer touches, so lineage is read from the first pass,
+/// where the trunk still holds the ground both pieces came from.
+#[test]
+fn a_tail_carved_off_a_re_cutting_trunk_still_names_its_parent() {
+    let corridor = sparse(46.0, 7.0, 100);
+    let head = corridor[..50].to_vec();
+    let tail = corridor[50..].to_vec();
+
+    let mut state = HysteresisState::default();
+    let (_, r) = state.step_assign(&[cand(corridor, 5)]);
+    let trunk_id = r[0].id.clone();
+
+    let (out, r) = state.step_assign(&[cand(head, 5), cand(tail, 5)]);
+    assert_eq!(r[0].id, trunk_id, "the head carries the trunk's id");
+    assert_eq!(out.minted, 1, "the tail is the only mint");
+    assert_eq!(r[1].fate, CandidateFate::Minted, "the tail mints");
+    assert_eq!(
+        r[1].split_from.as_deref(),
+        Some(trunk_id.as_str()),
+        "a piece carved off the trunk records the trunk as its parent"
+    );
+}
