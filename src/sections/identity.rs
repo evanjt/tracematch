@@ -1038,6 +1038,15 @@ impl HysteresisState {
             seeded[i].polyline = next[j].polyline.clone();
             reseeded = true;
         }
+        // A mint's parent is the ground it was carved from, which only the
+        // first pass still holds: the second presents a re-cutting prior on
+        // the candidate it matched, and a sibling carved off the far end no
+        // longer shares a corridor with that, so its mint would name nobody.
+        let lineage: Vec<Option<String>> = first
+            .decisions
+            .iter()
+            .map(|d| d.split_from().map(str::to_string))
+            .collect();
         let plan = if reseeded {
             plan_identity_memo(&seeded, next, &params, &mut memo)
         } else {
@@ -1136,7 +1145,10 @@ impl HysteresisState {
                 let id = format!("s_{:06}", self.ordinal);
                 candidate_ids[j] = id.clone();
                 fates[j] = Some(CandidateFate::Minted);
-                split_froms[j] = d.split_from().map(str::to_string);
+                split_froms[j] = d
+                    .split_from()
+                    .map(str::to_string)
+                    .or_else(|| lineage[j].clone());
                 new_visible.insert(
                     id,
                     HeldSection {
