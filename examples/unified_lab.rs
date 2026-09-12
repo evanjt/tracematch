@@ -283,6 +283,57 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[idx]
 }
 
+/// A prior whose re-cut debounce began on this step, and the two lines a mint
+/// can be measured against.
+///
+/// `held` is the geometry the prior still shows, frozen for the length of the
+/// debounce. `target` is the polyline of the candidate that carried it on this
+/// step, which is what the two-pass planning seeded from, and is `None` when no
+/// candidate carried the prior at all.
+struct DivergedPrior<'a> {
+    id: String,
+    held: &'a [GpsPoint],
+    target: Option<&'a [GpsPoint]>,
+}
+
+/// Whether a mint overlapping a diverged prior is a phantom, and both numbers
+/// behind the verdict.
+///
+/// A frozen carry keeps showing the line it held before the batch redrew it,
+/// while the planner seeds against the line that carried it. Measuring a mint
+/// against the held line therefore asks whether it overlaps ground the batch has
+/// already left, which every mint on redrawn ground does. The question the
+/// column exists to ask is whether the mint overlaps the ground the seeding
+/// planned against, so where there is a carrier, that is the line.
+///
+/// Where there is no carrier the held line is all there is, and the verdict is
+/// labelled rather than silently measured against a different thing: that is the
+/// dissolve-pending exposure, left open deliberately.
+struct PhantomVerdict {
+    /// Containment of the mint in the prior's held, frozen line.
+    held: f64,
+    /// Containment in the carrier's polyline, absent when nothing carried it.
+    target: Option<f64>,
+    is_phantom: bool,
+}
+
+/// The share of a mint that has to sit inside a diverged prior before the mint
+/// is called a phantom of it.
+const PHANTOM_CONTAINMENT: f64 = 0.5;
+
+fn phantom_verdict(mint: &[GpsPoint], prior: &DivergedPrior) -> PhantomVerdict {
+    let held = containment(mint, prior.held, 60.0);
+    let target = prior.target.map(|g| containment(mint, g, 60.0));
+    // The measured line is the target where one exists, and the held line only
+    // where nothing carried the prior this step.
+    let measured = target.unwrap_or(held);
+    PhantomVerdict {
+        held,
+        target,
+        is_phantom: measured >= PHANTOM_CONTAINMENT,
+    }
+}
+
 /// Fraction of `a`'s resampled points within `threshold` metres of any of
 /// `b`'s resampled points. cos(lat)-corrected planar distance.
 fn containment(a: &[GpsPoint], b: &[GpsPoint], threshold_m: f64) -> f64 {
@@ -1514,8 +1565,8 @@ fn main() {
         // Corridor coverage against the final catalogue: identity churn
         // between horizons (winner flips, re-cuts) does not count as
         // loss when the ground stays represented.
-        let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
-        let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
+        let cell_m = tracematch::sections::cluster_cell_size(&section_config);
+        let same_traffic = tracematch::sections::same_traffic_share(&section_config);
         let full_grid = CorridorGrid::build(&rs_all[last], cell_m);
         for (i, (label, n_acts, sections, ms)) in runs.iter().enumerate() {
             let into_next = if i < last {
@@ -1779,27 +1830,75 @@ fn main() {
                     // Priors whose re-cut debounce began on this step competed
                     // on the footprint `prior` holds, which the batch had
                     // already redrawn.
-                    let diverged: Vec<&[GpsPoint]> = state
+                    let diverged: Vec<DivergedPrior> = state
                         .pending_recut_ids()
                         .into_iter()
                         .filter(|id| !recut_before.contains(id))
                         .filter_map(|id| {
-                            prior
+                            let held = prior
                                 .iter()
                                 .find(|p| p.id == id)
-                                .map(|p| p.polyline.as_slice())
+                                .map(|p| p.polyline.as_slice())?;
+                            // The candidate that carried this prior on this step
+                            // is the line the seeding planned against. A frozen
+                            // carry is the case the column gets wrong; an
+                            // adopted one already shows the batch geometry, so
+                            // held and target agree and either answers.
+                            let target = resolutions
+                                .iter()
+                                .position(|r| {
+                                    r.id == id && matches!(r.fate, CandidateFate::CarriedFrozen)
+                                })
+                                .map(|i| cands[i].polyline.as_slice());
+                            Some(DivergedPrior { id, held, target })
                         })
                         .collect();
-                    let phantoms = cands
+                    let mut phantoms = 0usize;
+                    for (c, _) in cands
                         .iter()
                         .zip(&resolutions)
                         .filter(|(_, r)| matches!(r.fate, CandidateFate::Minted))
-                        .filter(|(c, _)| {
-                            diverged
-                                .iter()
-                                .any(|g| containment(&c.polyline, g, 60.0) >= 0.5)
-                        })
-                        .count();
+                    {
+                        for d in &diverged {
+                            let v = phantom_verdict(&c.polyline, d);
+                            if v.held < PHANTOM_CONTAINMENT
+                                && v.target.unwrap_or(0.0) < PHANTOM_CONTAINMENT
+                            {
+                                continue;
+                            }
+                            // Print both numbers, so the next reader does not
+                            // have to instrument this again to see which line a
+                            // verdict came off.
+                            match v.target {
+                                Some(t) => println!(
+                                    "         mint vs {}: held {:.3}  target {:.3}  -> {}",
+                                    d.id,
+                                    v.held,
+                                    t,
+                                    if v.is_phantom {
+                                        "phantom"
+                                    } else {
+                                        "new ground"
+                                    }
+                                ),
+                                None => println!(
+                                    "         mint vs {}: held {:.3}  target none (no carrier this \
+                                     step)  -> {}",
+                                    d.id,
+                                    v.held,
+                                    if v.is_phantom {
+                                        "phantom"
+                                    } else {
+                                        "new ground"
+                                    }
+                                ),
+                            }
+                            if v.is_phantom {
+                                phantoms += 1;
+                                break;
+                            }
+                        }
+                    }
                     phantom_mints += phantoms;
                     println!(
                         "  {:<4} {:>5} acts  raw {:>3} -> visible {:>3}   minted {:>2}  restored {:>2}  \
@@ -2186,67 +2285,91 @@ fn main() {
             .iter()
             .map(|a| (a.id.as_str(), a.points.as_slice()))
             .collect();
-        let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
-        let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
-
         // pass_window_needed values are encoded as window * 10 + needed.
-        type Setter = fn(&mut Tunables, f64);
+        // A setter takes both sides, because two of the five athlete-facing
+        // knobs live on SectionConfig and not on Tunables. Sweeping a
+        // SectionConfig axis with a fixed config is what made proximity
+        // unsweepable at all.
+        type Setter = fn(&mut Tunables, &mut SectionConfig, f64);
         let axes: Vec<(&str, Vec<f64>, Setter)> = vec![
+            // The two athlete-facing knobs. Both run past the clamps the
+            // detector applies, so a sweep can say where the answer stops
+            // moving rather than the range assuming it.
+            (
+                "proximity_threshold",
+                vec![10.0, 50.0, 100.0, 150.0, 200.0, 300.0, 450.0, 600.0],
+                |_t, c, v| c.proximity_threshold = v,
+            ),
+            (
+                "divergence_threshold",
+                vec![0.01, 0.05, 0.15, 0.25, 0.35, 0.5, 0.65, 0.8],
+                |_t, c, v| c.divergence_threshold = v,
+            ),
             (
                 "pass_away_cells",
                 vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-                |t, v| t.pass_away_cells = v as usize,
+                |t, _c, v| t.pass_away_cells = v as usize,
             ),
-            ("ele_level_tol_m", vec![10.0, 15.0, 20.0, 25.0], |t, v| {
-                t.ele_level_tol_m = v
-            }),
-            ("pass_subgrid", vec![2.0, 3.0, 4.0], |t, v| {
+            (
+                "ele_level_tol_m",
+                vec![10.0, 15.0, 20.0, 25.0],
+                |t, _c, v| t.ele_level_tol_m = v,
+            ),
+            ("pass_subgrid", vec![2.0, 3.0, 4.0], |t, _c, v| {
                 t.pass_subgrid = v
             }),
-            ("dwell_events", vec![4.0, 5.0, 6.0, 8.0, 10.0], |t, v| {
-                t.dwell_events = v as usize
-            }),
+            (
+                "dwell_events",
+                vec![4.0, 5.0, 6.0, 8.0, 10.0],
+                |t, _c, v| t.dwell_events = v as usize,
+            ),
             (
                 "pass_window_needed",
                 vec![42.0, 53.0, 63.0, 64.0],
-                |t, v| {
+                |t, _c, v| {
                     t.pass_window = (v / 10.0) as usize;
                     t.pass_needed = v as usize % 10;
                 },
             ),
-            ("reach", vec![1.0, 2.0], |t, v| t.reach = v as i32),
-            ("lift_span_m", vec![200.0, 300.0, 400.0], |t, v| {
+            ("reach", vec![1.0, 2.0], |t, _c, v| t.reach = v as i32),
+            ("lift_span_m", vec![200.0, 300.0, 400.0], |t, _c, v| {
                 t.lift_span_m = v
             }),
-            ("lift_min_grade", vec![0.18, 0.22, 0.26, 0.30], |t, v| {
-                t.lift_min_grade = v
-            }),
-            ("lift_min_straight", vec![0.96, 0.975, 0.985], |t, v| {
+            (
+                "lift_min_grade",
+                vec![0.18, 0.22, 0.26, 0.30],
+                |t, _c, v| t.lift_min_grade = v,
+            ),
+            ("lift_min_straight", vec![0.96, 0.975, 0.985], |t, _c, v| {
                 t.lift_min_straight = v
             }),
             (
                 "jitter_human_min",
                 vec![1.02, 1.035, 1.05, 1.065, 1.08],
-                |t, v| t.jitter_human_min = v,
+                |t, _c, v| t.jitter_human_min = v,
             ),
-            ("descent_match_m", vec![40.0, 60.0, 80.0], |t, v| {
+            ("descent_match_m", vec![40.0, 60.0, 80.0], |t, _c, v| {
                 t.descent_match_m = v
             }),
             (
                 "cluster_gap_m",
                 vec![10_000.0, 25_000.0, 50_000.0, 100_000.0, 200_000.0],
-                |t, v| t.cluster_gap_m = v,
+                |t, _c, v| t.cluster_gap_m = v,
             ),
-            ("self_pass_clean", vec![0.02, 0.05, 0.08, 0.10], |t, v| {
-                t.self_pass_clean = v
-            }),
-            ("minority_run_m", vec![40.0, 60.0, 80.0, 100.0], |t, v| {
-                t.minority_run_m = v
-            }),
+            (
+                "self_pass_clean",
+                vec![0.02, 0.05, 0.08, 0.10],
+                |t, _c, v| t.self_pass_clean = v,
+            ),
+            (
+                "minority_run_m",
+                vec![40.0, 60.0, 80.0, 100.0],
+                |t, _c, v| t.minority_run_m = v,
+            ),
             (
                 "occasion_span_h",
                 vec![72.0, 120.0, 168.0, 240.0, 336.0],
-                |t, v| t.occasion_span_h = v,
+                |t, _c, v| t.occasion_span_h = v,
             ),
         ];
 
@@ -2284,14 +2407,20 @@ fn main() {
             ));
             for &v in values {
                 let mut tun = Tunables::DEFAULT;
-                set(&mut tun, v);
+                // A swept SectionConfig axis changes the grid the metrics are
+                // measured on, so the cell and the traffic share are taken per
+                // value rather than once for the whole table.
+                let mut cfg = section_config.clone();
+                set(&mut tun, &mut cfg, v);
+                let cell_m = tracematch::sections::cluster_cell_size(&cfg);
+                let same_traffic = tracematch::sections::same_traffic_share(&cfg);
                 let t0 = Instant::now();
                 let full = tracematch::detect_sections_dated(
                     &tracks,
                     &all_secs,
                     &types,
                     &start_epochs,
-                    &section_config,
+                    &cfg,
                     &tun,
                 )
                 .sections;
@@ -2300,7 +2429,7 @@ fn main() {
                     &jk_secs,
                     &types,
                     &start_epochs,
-                    &section_config,
+                    &cfg,
                     &tun,
                 )
                 .sections;
@@ -2573,8 +2702,8 @@ fn main() {
             // tolerance, one partition cell, against the whole other
             // catalogue) which is immune to winner flips and re-cuts.
             let jk_rs = resample_all(&jk_sections);
-            let cell_m = (section_config.proximity_threshold * 0.5).clamp(50.0, 150.0);
-            let same_traffic = 1.0 - section_config.divergence_threshold.clamp(0.05, 0.5);
+            let cell_m = tracematch::sections::cluster_cell_size(&section_config);
+            let same_traffic = tracematch::sections::same_traffic_share(&section_config);
             let jk_grid = CorridorGrid::build(&jk_rs, cell_m);
             println!();
             for min_visits in [5u32, 10] {
@@ -2632,6 +2761,163 @@ fn main() {
 
     println!();
     println!("Peak RSS: {:.0} MB", peak_rss_mb());
+}
+
+/// Scenario: a prior enters its re-cut debounce, so it keeps showing the line it
+/// held while the batch has already redrawn the ground underneath it. A mint
+/// lands on that redrawn ground.
+///
+/// Expected behaviour: the mint is measured against the line the seeding planned
+/// against, which is the carrying candidate's polyline, not against the frozen
+/// held line. `I148` measured two real mints at containment 1.000 in the held
+/// line and 0.000 in the carrier, and the column called both phantom.
+#[cfg(test)]
+mod phantom_tests {
+    use super::*;
+
+    /// A straight run of points, `metres` apart, starting at `start_m` along the
+    /// same line, so two runs either overlap or do not by construction.
+    fn line(start_m: f64, metres: f64) -> Vec<GpsPoint> {
+        let step = 20.0;
+        let n = (metres / step) as usize + 1;
+        (0..n)
+            .map(|i| GpsPoint {
+                latitude: 46.0 + (start_m + i as f64 * step) / 111_000.0,
+                longitude: 7.0,
+                elevation: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mint_clear_of_both_lines_is_new_ground() {
+        let held = line(0.0, 400.0);
+        let target = line(2_000.0, 400.0);
+        let mint = line(6_000.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &held,
+            target: Some(&target),
+        };
+
+        let verdict = phantom_verdict(&mint, &prior);
+
+        assert!(
+            verdict.held < PHANTOM_CONTAINMENT,
+            "held {:.3}",
+            verdict.held
+        );
+        assert!(!verdict.is_phantom);
+    }
+
+    #[test]
+    fn a_mint_on_the_seeded_target_is_a_phantom_however_far_it_is_from_the_frozen_line() {
+        let held = line(0.0, 400.0);
+        let target = line(2_000.0, 400.0);
+        let mint = line(2_000.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &held,
+            target: Some(&target),
+        };
+
+        let verdict = phantom_verdict(&mint, &prior);
+
+        assert!(
+            verdict.held < PHANTOM_CONTAINMENT,
+            "held {:.3}",
+            verdict.held
+        );
+        assert!(
+            verdict.is_phantom,
+            "the seeding planned this ground, so a mint on it is a duplicate"
+        );
+    }
+
+    #[test]
+    fn a_mint_inside_the_frozen_line_and_outside_the_target_is_new_ground() {
+        let held = line(0.0, 400.0);
+        let target = line(2_000.0, 400.0);
+        let mint = line(0.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &held,
+            target: Some(&target),
+        };
+
+        let verdict = phantom_verdict(&mint, &prior);
+
+        // This is `I148`'s measured shape: 1.000 in the held line, 0.000 in the
+        // carrier. The old column called it phantom off the first number alone.
+        assert!(
+            verdict.held >= PHANTOM_CONTAINMENT,
+            "held {:.3}",
+            verdict.held
+        );
+        assert!(
+            verdict.target.expect("a carrier") < PHANTOM_CONTAINMENT,
+            "target {:?}",
+            verdict.target
+        );
+        assert!(
+            !verdict.is_phantom,
+            "measured against the seeded target it is new ground"
+        );
+    }
+
+    #[test]
+    fn a_mint_inside_both_lines_is_still_a_phantom() {
+        let held = line(0.0, 400.0);
+        let target = line(0.0, 400.0);
+        let mint = line(0.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &held,
+            target: Some(&target),
+        };
+
+        assert!(phantom_verdict(&mint, &prior).is_phantom);
+    }
+
+    #[test]
+    fn a_prior_with_no_carrier_falls_back_to_the_held_line() {
+        let held = line(0.0, 400.0);
+        let mint = line(0.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &held,
+            target: None,
+        };
+
+        let verdict = phantom_verdict(&mint, &prior);
+
+        assert_eq!(
+            verdict.target, None,
+            "nothing carried it, so there is no target"
+        );
+        assert!(
+            verdict.is_phantom,
+            "the held line is all there is to measure against"
+        );
+    }
+
+    #[test]
+    fn an_adopted_carry_agrees_with_itself() {
+        // An adopted carry shows the batch geometry, so held and target are the
+        // same line and the verdict cannot depend on which one is measured.
+        let ground = line(0.0, 400.0);
+        let mint = line(2_000.0, 400.0);
+        let prior = DivergedPrior {
+            id: "s_000049".to_string(),
+            held: &ground,
+            target: Some(&ground),
+        };
+
+        let verdict = phantom_verdict(&mint, &prior);
+
+        assert_eq!(verdict.held, verdict.target.expect("a carrier"));
+        assert!(!verdict.is_phantom);
+    }
 }
 
 #[cfg(test)]
