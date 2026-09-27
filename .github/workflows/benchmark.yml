@@ -1,14 +1,15 @@
 name: Benchmarks
 
+# Instruction counts move little from one commit to the next, so a weekly run
+# against main's last good baseline catches a regression without charging
+# every push and PR for valgrind.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,25 +36,42 @@ jobs:
       - name: Install iai-callgrind-runner
         run: cargo install iai-callgrind-runner@0.14.2
 
-      - name: Verify iai-callgrind-runner
-        run: |
-          which iai-callgrind-runner || echo "$HOME/.cargo/bin/iai-callgrind-runner"
-          ls -la $HOME/.cargo/bin/ | grep iai || true
-
-      - name: Cache iai-callgrind baselines
-        uses: actions/cache@v4
+      # The baseline is main's, keyed on the toolchain because a compiler bump
+      # moves every count. A run id makes each saved entry unique, and the
+      # prefix restores the newest one.
+      - name: Restore main's baseline
+        uses: actions/cache/restore@v4
         with:
           path: target/iai
-          key: iai-baseline-${{ runner.os }}-${{ hashFiles('benches/iai_benchmarks.rs') }}
+          key: iai-main-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
-            iai-baseline-${{ runner.os }}-
+            iai-main-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
 
+      # Exit code 3 when any benchmark's instruction count rises more than 5%
+      # over the baseline. On main the baseline is compared and then replaced.
+      # A dispatch from any other branch compares against main's and leaves it.
       - name: Run iai-callgrind benchmarks
-        run: cargo bench --bench iai_benchmarks
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            cargo bench --bench iai_benchmarks -- --save-baseline=main
+          else
+            cargo bench --bench iai_benchmarks -- --baseline=main
+          fi
         env:
           IAI_CALLGRIND_RUNNER: /home/runner/.cargo/bin/iai-callgrind-runner
+          IAI_CALLGRIND_REGRESSION: Ir=5
+
+      # Only a passing run on main becomes the next baseline, so a regression
+      # cannot replace the numbers it was judged against.
+      - name: Save main's baseline
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: target/iai
+          key: iai-main-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ github.run_id }}
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: iai-benchmark-results
