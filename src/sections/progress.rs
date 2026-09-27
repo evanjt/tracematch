@@ -7,19 +7,19 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Detection phases, ordered by execution sequence.
+/// The phases a detector would report through the callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectionPhase {
     /// Building spatial indices
     BuildingRtrees,
     /// Finding overlaps between tracks
     FindingOverlaps,
-    /// Post-processing: fold splitting, heading/gradient splitting, merging, dedup
+    /// Everything after the overlaps are found
     Postprocessing,
 }
 
 impl DetectionPhase {
-    /// Returns the phase name as a string matching the TypeScript PHASE_WEIGHTS keys.
+    /// The phase name in snake case.
     pub fn as_str(&self) -> &'static str {
         match self {
             DetectionPhase::BuildingRtrees => "building_rtrees",
@@ -31,7 +31,8 @@ impl DetectionPhase {
 
 /// Trait for receiving progress updates during section detection.
 ///
-/// Called from parallel rayon threads. Implementations must be thread-safe.
+/// Implementations must be thread-safe, because a detector that reported through
+/// it would do so from its worker threads.
 pub trait DetectionProgressCallback: Send + Sync {
     /// Called when entering a new phase. `total` is the number of items in this phase.
     fn on_phase(&self, phase: DetectionPhase, total: u32);

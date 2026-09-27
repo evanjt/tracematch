@@ -40,12 +40,19 @@ jobs:
       # moves every count. A run id makes each saved entry unique, and the
       # prefix restores the newest one.
       - name: Restore main's baseline
+        id: baseline
         uses: actions/cache/restore@v4
         with:
           path: target/iai
           key: iai-main-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
             iai-main-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      # A weekly run can outlast the cache's seven days, and with no baseline the
+      # comparison passes having compared nothing. Say so where it shows.
+      - name: Warn when there is no baseline
+        if: steps.baseline.outputs.cache-matched-key == ''
+        run: echo "::warning::No saved baseline for this toolchain, so this run compares nothing and only records one."
 
       # Exit code 3 when any benchmark's instruction count rises more than 5%
       # over the baseline. On main the baseline is compared and then replaced.
