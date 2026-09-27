@@ -132,15 +132,47 @@ pub fn track_portions(
     line: &[GpsPoint],
     config: &SectionConfig,
 ) -> Vec<SectionPortion> {
-    if line.len() < 2 || track.len() < 2 {
-        return Vec::new();
+    match PreparedLine::new(line, config) {
+        Some(prepared) => prepared.portions(activity_id, track),
+        None => Vec::new(),
     }
-    if !intersects_bounds(track, &polyline_bounds(line, config.proximity_threshold)) {
-        return Vec::new();
+}
+
+/// One section line, with the matcher and the index a pass is counted
+/// against built once.
+///
+/// [`track_portions`] builds both per call, which a fold over a section's
+/// tracks pays for on every member. The counting is the same either way:
+/// this is the same matcher, the same R-tree and the same padded bounds,
+/// held rather than rebuilt.
+pub struct PreparedLine<'a> {
+    line: &'a [GpsPoint],
+    bounds: (f64, f64, f64, f64),
+    matcher: LineMatcher,
+    ref_tree: RTree<IndexedPoint>,
+}
+
+impl<'a> PreparedLine<'a> {
+    /// `None` for a line too short to match against.
+    pub fn new(line: &'a [GpsPoint], config: &SectionConfig) -> Option<Self> {
+        if line.len() < 2 {
+            return None;
+        }
+        Some(Self {
+            line,
+            bounds: polyline_bounds(line, config.proximity_threshold),
+            matcher: LineMatcher::new(line, config),
+            ref_tree: build_rtree(line),
+        })
     }
-    let matcher = LineMatcher::new(line, config);
-    let ref_tree = build_rtree(line);
-    passes_of(&matcher, &ref_tree, line, activity_id, track)
+
+    /// Every qualifying pass `track` makes over the line.
+    pub fn portions(&self, activity_id: &str, track: &[GpsPoint]) -> Vec<SectionPortion> {
+        if track.len() < 2 || !intersects_bounds(track, &self.bounds) {
+            return Vec::new();
+        }
+        passes_of(&self.matcher, &self.ref_tree, self.line, activity_id, track)
+    }
 }
 
 /// The cell a pass is scored in: a track counts on a line when its points
@@ -777,6 +809,53 @@ mod tests {
             "GPS noise should not cause false splits, got {} results",
             results.len()
         );
+    }
+
+    /// Scenario: a fold counts one section's line against many tracks, and
+    /// built a matcher and an R-tree for each of them.
+    /// Expected behaviour: a line prepared once counts every track exactly as
+    /// `track_portions` does, including the short line and the far track.
+    #[test]
+    fn a_prepared_line_counts_what_track_portions_counts() {
+        let config = SectionConfig::default();
+        let reference = make_linear_reference(60);
+        let tracks: Vec<(&str, Vec<GpsPoint>)> = vec![
+            ("out-and-back", make_out_and_back_track(&reference, 2, 80)),
+            ("one-pass", make_out_and_back_track(&reference, 1, 80)),
+            ("too-short", vec![reference[0]]),
+            (
+                "elsewhere",
+                make_linear_reference(40)
+                    .iter()
+                    .map(|p| GpsPoint::new(p.latitude + 1.0, p.longitude + 1.0))
+                    .collect(),
+            ),
+        ];
+
+        let shape = |ps: Vec<SectionPortion>| -> Vec<(String, u32, u32, i64, Direction)> {
+            ps.into_iter()
+                .map(|p| {
+                    (
+                        p.activity_id,
+                        p.start_index,
+                        p.end_index,
+                        p.distance_meters.to_bits() as i64,
+                        p.direction,
+                    )
+                })
+                .collect()
+        };
+        let line = PreparedLine::new(&reference, &config).expect("a 60-point line prepares");
+        for (id, track) in &tracks {
+            assert_eq!(
+                shape(line.portions(id, track)),
+                shape(track_portions(id, track, &reference, &config)),
+                "{id} counts the same either way"
+            );
+        }
+
+        assert!(PreparedLine::new(&reference[..1], &config).is_none());
+        assert!(track_portions("a", &tracks[0].1, &reference[..1], &config).is_empty());
     }
 
     #[test]

@@ -83,20 +83,21 @@ pub mod scenarios;
 pub use sections::{
     BoundaryReason, BoundaryRecord, CandidateFate, CandidateResolution, CandidateSection, Decision,
     DetectionPhase, DetectionProgressCallback, FrequentSection, HysteresisParams, HysteresisState,
-    IdentityParams, IdentityPlan, PriorSection, RetireReason, Retirement, ScaleName, SectionConfig,
-    SectionEvidenceCache, SectionGeometryChange, SectionMatch, SectionMergedAway, SectionPortion,
-    SectionUpdatePolicy, StepOutcome, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans_tuned, detect_sections, detect_sections_dated, detect_sections_explained,
-    detect_sections_incremental, detect_sections_incremental_cached_with_policy,
-    detect_sections_incremental_dated, detect_sections_incremental_observed, detect_sections_tuned,
-    dissolve_pressure, dominant_sport, earth_cell, find_all_track_portions, find_sections_in_route,
-    lift_spans, lift_spans_tuned, line_match_cell_m, mutual_overlap, plan_identity,
-    plan_identity_tuned, recalculate_section_polyline, required_visits_for_length, section_heart,
-    self_pass_penalty, shares_ground, track_portions,
+    IdentityParams, IdentityPlan, PreparedLine, PriorSection, RetireReason, Retirement, ScaleName,
+    SectionConfig, SectionEvidenceCache, SectionGeometryChange, SectionMatch, SectionMergedAway,
+    SectionPortion, SectionUpdatePolicy, StepOutcome, Tunables, UnifiedDetection,
+    UnifiedIncrementalResult, confirmed_lift_spans_tuned, detect_sections, detect_sections_dated,
+    detect_sections_explained, detect_sections_incremental,
+    detect_sections_incremental_cached_with_policy, detect_sections_incremental_dated,
+    detect_sections_incremental_observed, detect_sections_tuned, dissolve_pressure, dominant_sport,
+    earth_cell, find_all_track_portions, find_sections_in_route, lift_spans, lift_spans_tuned,
+    line_match_cell_m, mutual_overlap, plan_identity, plan_identity_tuned,
+    recalculate_section_polyline, required_visits_for_length, section_heart, self_pass_penalty,
+    shares_ground, track_portions,
 };
 pub use sections::{
     Enrichment, RankCandidate, RankFeatures, RankMember, RankOuting, RankTraversal, SectionClass,
-    enrich, max_sustained_grade, rank,
+    enrich, max_sustained_grade, rank, rank_features, score_features,
 };
 
 // ============================================================================

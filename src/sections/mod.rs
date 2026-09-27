@@ -57,12 +57,14 @@ pub use consensus::{
 pub use interestingness::{
     Candidate as RankCandidate, Enrichment, Member as RankMember, Outing as RankOuting,
     RankFeatures, SectionClass, Traversal as RankTraversal, enrich, max_sustained_grade, rank,
+    rank_features, score_features,
 };
 pub(crate) use medoid::{compute_stability, select_medoid};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
 pub(crate) use portions::compute_activity_portions;
 pub use portions::{
-    find_all_track_portions, find_all_track_portions_with_gap, line_match_cell_m, track_portions,
+    PreparedLine, find_all_track_portions, find_all_track_portions_with_gap, line_match_cell_m,
+    track_portions,
 };
 pub use rtree::{IndexedPoint, build_rtree};
 pub use traces::{
@@ -89,12 +91,14 @@ pub use naming::{
 };
 
 pub use unified::{
-    BoundaryReason, BoundaryRecord, SectionEvidenceCache, SectionGeometryChange, SectionMergedAway,
-    SectionUpdatePolicy, Tunables, UnifiedDetection, UnifiedIncrementalResult,
-    confirmed_lift_spans_tuned, detect_sections, detect_sections_dated, detect_sections_explained,
-    detect_sections_incremental, detect_sections_incremental_cached_with_policy,
-    detect_sections_incremental_dated, detect_sections_incremental_observed, detect_sections_tuned,
-    lift_spans, lift_spans_tuned, required_visits_for_length, self_pass_penalty,
+    BoundaryReason, BoundaryRecord, CLUSTER_GAP_M, ClusterFootprint, POOLED_SPORT,
+    SectionEvidenceCache, SectionGeometryChange, SectionMergedAway, SectionUpdatePolicy, Tunables,
+    UnifiedDetection, UnifiedIncrementalResult, bbox_of, clamped_divergence, cluster_cell_size,
+    clusters_touched_by, confirmed_lift_spans_tuned, detect_sections, detect_sections_dated,
+    detect_sections_explained, detect_sections_incremental,
+    detect_sections_incremental_cached_with_policy, detect_sections_incremental_dated,
+    detect_sections_incremental_observed, detect_sections_tuned, lift_spans, lift_spans_tuned,
+    pool_for_fold, required_visits_for_length, same_traffic_share, self_pass_penalty,
 };
 
 // Re-export single-route section utilities (find known sections).

@@ -1062,8 +1062,32 @@ const COVER_TOLERANCE_CELLS: f64 = 0.5;
 /// jitter in the reference trace never reads as a re-cut.
 pub const CHANGED_CELLS: f64 = 1.0;
 
-pub(super) fn cluster_cell_size(config: &SectionConfig) -> f64 {
+/// The coverage grid's cell, in metres, for a given proximity.
+///
+/// Half the proximity, floored at 50 m and capped at 150 m. The floor is what
+/// keeps the grid from exploding on a small proximity, so it is not free to
+/// move: a 5 m cell is a different cost curve, not a finer answer.
+///
+/// Public because the lab sweeps proximity and has to draw the same grid the
+/// detector does. A second copy of this expression there would flatten a sweep
+/// twice and report two clamped values as one finding.
+pub fn cluster_cell_size(config: &SectionConfig) -> f64 {
     (config.proximity_threshold * 0.5).clamp(50.0, 150.0)
+}
+
+/// The divergence the detector actually uses, clamped to the range it is
+/// defined over.
+///
+/// Exactly today's slider range, so every value outside it is discarded here.
+/// Public for the same reason as [`cluster_cell_size`]: the lab has to ask
+/// rather than restate.
+pub fn clamped_divergence(config: &SectionConfig) -> f64 {
+    config.divergence_threshold.clamp(0.05, 0.5)
+}
+
+/// The coverage share two tracks must share to count as the same traffic.
+pub fn same_traffic_share(config: &SectionConfig) -> f64 {
+    1.0 - clamped_divergence(config)
 }
 
 fn build_coverage_grid(
@@ -4144,9 +4168,9 @@ fn detect_for_cluster_with_grid(
         return Vec::new();
     }
 
-    let divergence = config.divergence_threshold.clamp(0.05, 0.5);
+    let divergence = clamped_divergence(config);
     let span_s = (tun.occasion_span_h * 3600.0) as i64;
-    let same_traffic = 1.0 - divergence;
+    let same_traffic = same_traffic_share(config);
 
     let t_partition = web_time::Instant::now();
     let mut supernodes = partition_supernodes(&hot_cells, coverage, same_traffic);
@@ -6164,6 +6188,27 @@ const DIRECTION_SPAN_FLOOR: f64 = 0.1;
 /// all read, so it is measured last, as progress along the line the app draws.
 /// A portion that does not cross enough of the section keeps the flag its cut
 /// gave it.
+/// Which activity tracks the resolve step actually reads.
+///
+/// `reorient_portion_flags` and `graft_frozen` both take the caller's whole
+/// pool and both skip an id the map does not hold, so neither says what it
+/// needs and the caller has no choice but to hand over everything. What they
+/// genuinely read is the activities the fold routed this call, plus the members
+/// of the clusters it recomputed: a portion belonging to any other activity sits
+/// in a section the fold did not touch, and its direction was settled by the
+/// call that did touch it.
+///
+/// Stated as a function so the loader has something to ask. Nothing else can
+/// tell it which tracks to decode.
+pub(crate) fn tracks_the_resolve_reads<'a>(
+    new_activity_ids: &[&'a str],
+    recomputed_members: impl Iterator<Item = &'a str>,
+) -> std::collections::BTreeSet<&'a str> {
+    let mut wanted: std::collections::BTreeSet<&str> = new_activity_ids.iter().copied().collect();
+    wanted.extend(recomputed_members);
+    wanted
+}
+
 pub(crate) fn reorient_portion_flags(
     sections: &mut [FrequentSection],
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
@@ -6603,9 +6648,12 @@ struct LeafMemos {
 /// as rewriting a track's points breaks the others.
 type LiftMemo = HashMap<String, (Option<usize>, Vec<(usize, usize)>)>;
 
-/// Per-track raw bounding box by activity id: `(min_lat, max_lat, min_lng,
-/// max_lng)`, the same tuple [`super::portions::track_bounds`] returns.
-type BoundsMemo = HashMap<String, (f64, f64, f64, f64)>;
+/// A raw bounding box: `(min_lat, max_lat, min_lng, max_lng)`, the same tuple
+/// [`super::portions::track_bounds`] returns.
+type Bbox = (f64, f64, f64, f64);
+
+/// Per-track raw bounding box by activity id.
+type BoundsMemo = HashMap<String, Bbox>;
 
 /// Complete input fingerprint of one [`track_portion`] call: the activity,
 /// the supernode's interned cell set, the track's lift-free keep ranges,
@@ -7046,12 +7094,16 @@ fn fold_by_sport(
     sport_names.sort_unstable();
     let total = cache.dirty_clusters();
     let mut done = 0usize;
+    // Which clusters this call actually recomputed, since `dirty` is cleared as
+    // each one finishes and the resolve step below needs to know afterwards.
+    let mut recomputed: Vec<(String, usize)> = Vec::new();
     for sport in &sport_names {
         let n = cache.sports[sport].len();
         for ci in 0..n {
             if !cache.sports[sport][ci].dirty {
                 continue;
             }
+            recomputed.push((sport.clone(), ci));
             let records = recompute_cluster(
                 &mut cache.sports.get_mut(sport).expect("sport just listed")[ci],
                 sport,
@@ -7077,6 +7129,36 @@ fn fold_by_sport(
     let t_assemble = web_time::Instant::now();
     let assembled = assemble_catalogue(cache);
     phase!("assemble", t_assemble);
+    // The resolve step reads the members of every cluster, not only the ones this
+    // call recomputed: a fold resumed from a checkpoint finds the clusters it cut
+    // before the checkpoint already clean, and narrowing to this call's set gave
+    // it a different catalogue from the uninterrupted fold.
+    // Built against the pool rather than filtered out of `lookup`, so a loader
+    // that decodes on demand has a set to decode and not a map to shrink.
+    let wanted = tracks_the_resolve_reads(
+        new_activity_ids,
+        sport_names
+            .iter()
+            .flat_map(|sport| cache.sports[sport].iter())
+            .flat_map(|c| c.member_ids.iter().map(String::as_str)),
+    );
+    if std::env::var("TRACEMATCH_RESOLVE_SET_REPORT").is_ok() {
+        eprintln!(
+            "resolve set: {} of pool {} ({} clusters recomputed)",
+            wanted.len(),
+            pool.len(),
+            recomputed.len()
+        );
+    }
+    let resolve_tracks: HashMap<&str, (&[GpsPoint], &[f64])> = pool
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| wanted.contains(id.as_str()))
+        .map(|(i, (id, pts))| {
+            let secs: &[f64] = seconds.get(i).copied().unwrap_or(&[]);
+            (id.as_str(), (pts.as_slice(), secs))
+        })
+        .collect();
     let t_resolve = web_time::Instant::now();
     let out = resolve_fold(
         assembled,
@@ -7084,7 +7166,7 @@ fn fold_by_sport(
         existing,
         policy,
         config,
-        &lookup,
+        &resolve_tracks,
         &mut cache.leaves.coverage,
     );
     phase!("resolve", t_resolve);
@@ -7126,6 +7208,123 @@ fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
 /// single cluster it touches, seed a new singleton if it touches none, or bridge
 /// (merge) the clusters it connects. Marks every touched cluster dirty and does
 /// NOT recompute, the recompute pass does that once, after all routing.
+/// The bboxes the routing relation compares, per cluster, and nothing else.
+///
+/// A caller that wants to know what routing WOULD do, before deciding which
+/// tracks to load, needs these three fields and no track but the new one. It
+/// must not clone the cache to get them: a cluster also carries its
+/// last-emitted [`FrequentSection`]s with their polylines, so a clone copies the
+/// whole catalogue to read three numbers.
+pub struct ClusterFootprint {
+    /// Member activity ids in arrival order, the set a recompute will read.
+    pub member_ids: Vec<String>,
+    /// Per-member raw bbox, parallel to `member_ids`.
+    pub member_bboxes: Vec<(f64, f64, f64, f64)>,
+    /// Union of the member bboxes, the O(1) pre-filter.
+    pub union_bbox: (f64, f64, f64, f64),
+}
+
+/// Which clusters an activity's bbox routes into, decided and nothing changed.
+///
+/// This is the whole of `route_only`'s decision, lifted so it can be asked
+/// rather than only done. The indices are into `clusters`, in ascending order:
+/// none means a fresh cluster, one means a join, more than one means a bridge
+/// that will merge them all.
+///
+/// **The `clusters` slice has to be the sport bucket the fold will use.** Under
+/// [`SectionConfig::pool_sports`], which is the default, every track is
+/// relabelled [`POOLED_SPORT`] before the cache is touched, so a caller that
+/// looks up the activity's own sport finds an empty bucket, is told "a fresh
+/// cluster", and concludes a detect needs one track when it needs the library.
+/// That is an answer wrong in the direction that makes `recompute_cluster`'s
+/// `lookup[id.as_str()]` panic.
+pub fn clusters_touched_by(
+    clusters: &[ClusterFootprint],
+    new_bbox: (f64, f64, f64, f64),
+    gap_m: f64,
+) -> Vec<usize> {
+    let new_padded = pad_bbox(new_bbox, gap_m);
+    clusters
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            // Union-bbox pre-filter rejects a far cluster in O(1); only a cluster
+            // the activity might actually join pays the per-member scan.
+            boxes_overlap(new_padded, pad_bbox(c.union_bbox, gap_m))
+                && c.member_bboxes
+                    .iter()
+                    .any(|&m| boxes_overlap(new_padded, pad_bbox(m, gap_m)))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The bbox of a track, for a caller planning a route without a cache.
+pub fn bbox_of(points: &[GpsPoint]) -> (f64, f64, f64, f64) {
+    track_bbox(points)
+}
+
+/// The cluster gap the fold routes with, so a caller planning a pool pads the
+/// same way rather than guessing.
+pub const CLUSTER_GAP_M: f64 = Tunables::DEFAULT.cluster_gap_m;
+
+/// The activities a fold has to be given, decided from the cache's footprints
+/// before a single track is read.
+///
+/// Phase one routes on the new ids alone, phase two recomputes only a dirty
+/// cluster and reads only that cluster's own `member_ids`, and phase three
+/// tolerates an id it cannot find. So the honest pool is the new ids plus every
+/// member of every cluster they route into, and everything else in the library
+/// is a track loaded and decoded for nothing.
+///
+/// Answering **short** is the failure that matters: `recompute_cluster` indexes
+/// its members with a hard lookup, so a member left out is a panic rather than
+/// a worse catalogue. Each new id is routed independently and the results
+/// unioned, which is a safe superset: a cluster a new id creates holds only
+/// that id, and a bridge routes into every cluster it bridges.
+///
+/// An empty `clusters` is a cold cache, where the answer is the new ids, which
+/// on a cold cache is the whole pool. That is the shape that makes a restart
+/// self-heal.
+pub fn pool_for_fold(
+    clusters: &[ClusterFootprint],
+    new: &[(String, Bbox)],
+) -> std::collections::BTreeSet<String> {
+    // Ordered, not hashed: a detection input is ordered so the output cannot
+    // depend on which way a hash happened to fall.
+    let mut pool: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (id, bbox) in new {
+        pool.insert(id.clone());
+        for index in clusters_touched_by(clusters, *bbox, CLUSTER_GAP_M) {
+            pool.extend(clusters[index].member_ids.iter().cloned());
+        }
+    }
+    pool
+}
+
+impl SectionEvidenceCache {
+    /// The routing footprints of one sport bucket, in cluster order.
+    ///
+    /// Empty for a sport the cache has never seen, which is the honest answer:
+    /// the first activity of a sport routes into a cluster that does not exist
+    /// yet. Pass [`POOLED_SPORT`] under `pool_sports`.
+    pub fn cluster_footprints(&self, sport: &str) -> Vec<ClusterFootprint> {
+        self.sports
+            .get(sport)
+            .map(|clusters| {
+                clusters
+                    .iter()
+                    .map(|c| ClusterFootprint {
+                        member_ids: c.member_ids.clone(),
+                        member_bboxes: c.member_bboxes.clone(),
+                        union_bbox: c.union_bbox,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 fn route_only(
     cache: &mut SectionEvidenceCache,
     sport: &str,
@@ -7135,22 +7334,19 @@ fn route_only(
 ) {
     let gap = tun.cluster_gap_m;
     let new_bbox = track_bbox(new_pts);
-    let new_padded = pad_bbox(new_bbox, gap);
 
     let clusters = cache.sports.entry(sport.to_string()).or_default();
-    let touched: Vec<usize> = clusters
+    // The decision is `clusters_touched_by` and nothing else, so a caller that
+    // asks it beforehand gets exactly what happens here.
+    let footprints: Vec<ClusterFootprint> = clusters
         .iter()
-        .enumerate()
-        .filter(|(_, c)| {
-            // Union-bbox pre-filter rejects a far cluster in O(1); only a cluster
-            // the activity might actually join pays the per-member scan.
-            boxes_overlap(new_padded, pad_bbox(c.union_bbox, gap))
-                && c.member_bboxes
-                    .iter()
-                    .any(|&m| boxes_overlap(new_padded, pad_bbox(m, gap)))
+        .map(|c| ClusterFootprint {
+            member_ids: Vec::new(),
+            member_bboxes: c.member_bboxes.clone(),
+            union_bbox: c.union_bbox,
         })
-        .map(|(i, _)| i)
         .collect();
+    let touched = clusters_touched_by(&footprints, new_bbox, gap);
 
     match touched.as_slice() {
         [] => {
@@ -7307,6 +7503,259 @@ pub fn required_visits_for_length(distance_meters: f64, total_activities: usize)
     };
 
     base + bonus
+}
+
+/// Scenario: the fold resolves a catalogue in which most sections belong to
+/// clusters it did not touch, and the tracks behind those sections are not
+/// decoded.
+///
+/// Expected behaviour: the set the resolve step asks for is exactly the
+/// activities routed this call plus the members of the clusters recomputed, and a
+/// portion whose track is not in it keeps the direction an earlier call settled
+/// rather than losing it.
+/// Scenario: a loader has to decide which tracks to read before the fold routes,
+/// so it asks the routing relation what it would do.
+///
+/// Expected behaviour: the answer it gets is exactly what routing then does, for
+/// a join, a fresh cluster and a bridge, and the sport bucket it asks about is
+/// the one the fold will use.
+#[cfg(test)]
+mod planning_a_route {
+    use super::*;
+
+    fn track(lat: f64, lng: f64) -> Vec<GpsPoint> {
+        (0..20)
+            .map(|i| GpsPoint::new(lat + f64::from(i) * 0.0005, lng))
+            .collect()
+    }
+
+    /// Far enough apart that a 50 km pad cannot bridge them.
+    const HOME: (f64, f64) = (46.0, 7.0);
+    const AWAY: (f64, f64) = (49.0, 7.0);
+
+    fn routed(ids: &[(&str, (f64, f64))]) -> SectionEvidenceCache {
+        let mut cache = SectionEvidenceCache::new();
+        let tun = Tunables::DEFAULT;
+        for (id, (lat, lng)) in ids {
+            route_only(&mut cache, POOLED_SPORT, id, &track(*lat, *lng), &tun);
+        }
+        cache
+    }
+
+    fn plan(cache: &SectionEvidenceCache, at: (f64, f64)) -> Vec<usize> {
+        clusters_touched_by(
+            &cache.cluster_footprints(POOLED_SPORT),
+            bbox_of(&track(at.0, at.1)),
+            Tunables::DEFAULT.cluster_gap_m,
+        )
+    }
+
+    #[test]
+    fn a_repeat_of_a_known_route_plans_the_cluster_it_will_join() {
+        let cache = routed(&[("a1", HOME), ("a2", HOME), ("a3", AWAY)]);
+
+        let planned = plan(&cache, HOME);
+
+        assert_eq!(planned.len(), 1, "one cluster, not both: {planned:?}");
+        let footprints = cache.cluster_footprints(POOLED_SPORT);
+        assert_eq!(
+            footprints[planned[0]].member_ids,
+            vec!["a1".to_string(), "a2".to_string()],
+            "the plan names the members a recompute will read"
+        );
+    }
+
+    #[test]
+    fn a_ride_in_new_country_plans_no_cluster_at_all() {
+        let cache = routed(&[("a1", HOME), ("a2", HOME)]);
+
+        assert!(
+            plan(&cache, AWAY).is_empty(),
+            "a fresh cluster reads no existing track"
+        );
+    }
+
+    #[test]
+    fn a_bridging_ride_plans_every_cluster_it_will_merge() {
+        let cache = routed(&[("a1", HOME), ("a2", AWAY)]);
+
+        // A track spanning both areas overlaps each of them.
+        let spanning: Vec<GpsPoint> = (0..200)
+            .map(|i| GpsPoint::new(HOME.0 + f64::from(i) * 0.02, 7.0))
+            .collect();
+        let planned = clusters_touched_by(
+            &cache.cluster_footprints(POOLED_SPORT),
+            bbox_of(&spanning),
+            Tunables::DEFAULT.cluster_gap_m,
+        );
+
+        assert_eq!(planned.len(), 2, "a bridge reads both sides: {planned:?}");
+    }
+
+    #[test]
+    fn the_plan_is_what_routing_then_does() {
+        let mut cache = routed(&[("a1", HOME), ("a2", HOME), ("a3", AWAY)]);
+        // `dirty` is sticky until a recompute clears it, so every cluster these
+        // routes created still carries it. Settle them the way the recompute pass
+        // does, or this reads every cluster as touched. A loader planning a load
+        // must take the plan's own indices for the same reason: `dirty` on a cache
+        // that has not been recomputed says nothing about this call.
+        for clusters in cache.sports.values_mut() {
+            for c in clusters.iter_mut() {
+                c.dirty = false;
+            }
+        }
+        let planned = plan(&cache, HOME);
+        let expected: Vec<String> = cache.cluster_footprints(POOLED_SPORT)[planned[0]]
+            .member_ids
+            .clone();
+
+        route_only(
+            &mut cache,
+            POOLED_SPORT,
+            "a4",
+            &track(HOME.0, HOME.1),
+            &Tunables::DEFAULT,
+        );
+
+        let dirty: Vec<Vec<String>> = cache.sports[POOLED_SPORT]
+            .iter()
+            .filter(|c| c.dirty)
+            .map(|c| {
+                c.member_ids
+                    .iter()
+                    .filter(|id| id.as_str() != "a4")
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(
+            dirty,
+            vec![expected],
+            "exactly the cluster the plan named went dirty"
+        );
+    }
+
+    /// The mistake that reports a plan of one track against a whole library. A
+    /// pooled cache has no bucket under a real sport name, so asking about one
+    /// says "fresh cluster" and a loader that believes it starves
+    /// `recompute_cluster`, which hard-indexes its members.
+    #[test]
+    fn asking_about_the_wrong_sport_bucket_under_pooling_reads_as_a_fresh_cluster() {
+        let cache = routed(&[("a1", HOME), ("a2", HOME)]);
+
+        assert!(
+            cache.cluster_footprints("Ride").is_empty(),
+            "a pooled cache holds nothing under a real sport name"
+        );
+        assert!(
+            !cache.cluster_footprints(POOLED_SPORT).is_empty(),
+            "and everything under the pooled one"
+        );
+        assert!(
+            SectionConfig::default().pool_sports,
+            "pooling is the default"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_track_requirement {
+    use super::*;
+
+    /// The one section shape this module needs, spelled out because
+    /// `FrequentSection` has no `Default` and the fields the test cares about are
+    /// the polyline and the portions.
+    fn section_for_direction_test(
+        polyline: Vec<GpsPoint>,
+        portions: Vec<SectionPortion>,
+    ) -> FrequentSection {
+        let distance_meters = crate::matching::calculate_route_distance(&polyline);
+        FrequentSection {
+            id: "sec".to_string(),
+            name: None,
+            sport_type: "All".to_string(),
+            polyline,
+            representative_activity_id: "absent".to_string(),
+            representative_range: None,
+            activity_ids: vec!["absent".to_string()],
+            activity_portions: portions,
+            visit_count: 1,
+            distance_meters,
+            activity_traces: HashMap::new(),
+            confidence: 1.0,
+            observation_count: 1,
+            average_spread: 0.0,
+            point_density: Vec::new(),
+            scale: None,
+            is_user_defined: false,
+            stability: 1.0,
+            elevation_gain_m: None,
+            avg_grade_percent: None,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            enrichment: Default::default(),
+            rank: None,
+            consensus_state: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_set_is_the_routed_ids_plus_the_recomputed_members() {
+        let wanted = tracks_the_resolve_reads(&["a9"], ["a1", "a2", "a9"].into_iter());
+
+        assert_eq!(
+            wanted.iter().copied().collect::<Vec<_>>(),
+            vec!["a1", "a2", "a9"],
+            "the new id is in it once, not twice"
+        );
+    }
+
+    #[test]
+    fn a_routed_id_with_no_cluster_yet_is_still_asked_for() {
+        // The first activity of a new sport routes into a cluster too small to
+        // recompute, so it appears in no member list and the resolve still needs
+        // its track.
+        let wanted = tracks_the_resolve_reads(&["a9"], std::iter::empty());
+
+        assert!(wanted.contains("a9"));
+        assert_eq!(wanted.len(), 1);
+    }
+
+    #[test]
+    fn nothing_routed_and_nothing_recomputed_asks_for_nothing() {
+        assert!(tracks_the_resolve_reads(&[], std::iter::empty()).is_empty());
+    }
+
+    /// The property the narrowing rests on: an absent track leaves the portion's
+    /// stored direction alone. If this ever became a reset to `Same`, narrowing
+    /// the set would silently reorient every untouched section.
+    #[test]
+    fn an_absent_track_leaves_the_stored_direction_alone() {
+        let polyline: Vec<GpsPoint> = (0..40)
+            .map(|i| GpsPoint::new(46.0 + f64::from(i) * 0.0005, 7.0))
+            .collect();
+        let mut sections = vec![section_for_direction_test(
+            polyline,
+            vec![SectionPortion {
+                activity_id: "absent".to_string(),
+                start_index: 0,
+                end_index: 30,
+                distance_meters: 800.0,
+                direction: crate::Direction::Reverse,
+            }],
+        )];
+
+        reorient_portion_flags(&mut sections, &HashMap::new());
+
+        assert_eq!(
+            sections[0].activity_portions[0].direction,
+            crate::Direction::Reverse,
+            "an absent track must not reset the direction"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8656,5 +9105,295 @@ mod portion_flag_tests {
         reorient_portion_flags(&mut sections, &tracks);
 
         assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
+    }
+}
+
+/// Scenario: two of the five athlete-facing knobs are clamped inside the
+/// detector, and the lab restated both clamps in three places of its own.
+///
+/// Expected behaviour: there is one answer to "what cell does this proximity
+/// draw" and one to "what counts as the same traffic", and they are these.
+/// Anything that needs them asks rather than restating, so a sweep past a
+/// clamp is flattened once and can be reported as a clamp.
+#[cfg(test)]
+mod knob_clamp_tests {
+    use super::*;
+
+    fn at(proximity: f64, divergence: f64) -> SectionConfig {
+        SectionConfig {
+            proximity_threshold: proximity,
+            divergence_threshold: divergence,
+            ..SectionConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_cell_is_half_the_proximity_between_its_floor_and_its_cap() {
+        assert_eq!(cluster_cell_size(&at(200.0, 0.2)), 100.0);
+        assert_eq!(cluster_cell_size(&at(240.0, 0.2)), 120.0);
+    }
+
+    #[test]
+    fn the_cell_floors_at_fifty_and_caps_at_one_fifty() {
+        // Everything at or below 100 m draws the same grid, and everything at
+        // or above 300 m draws the same grid. That is the flattening a sweep
+        // past the slider has to be able to name.
+        assert_eq!(cluster_cell_size(&at(10.0, 0.2)), 50.0);
+        assert_eq!(cluster_cell_size(&at(100.0, 0.2)), 50.0);
+        assert_eq!(cluster_cell_size(&at(300.0, 0.2)), 150.0);
+        assert_eq!(cluster_cell_size(&at(600.0, 0.2)), 150.0);
+    }
+
+    #[test]
+    fn divergence_passes_through_inside_its_range() {
+        assert_eq!(clamped_divergence(&at(200.0, 0.05)), 0.05);
+        assert_eq!(clamped_divergence(&at(200.0, 0.25)), 0.25);
+        assert_eq!(clamped_divergence(&at(200.0, 0.5)), 0.5);
+    }
+
+    #[test]
+    fn divergence_clamps_to_exactly_the_slider_range() {
+        assert_eq!(clamped_divergence(&at(200.0, 0.01)), 0.05);
+        assert_eq!(clamped_divergence(&at(200.0, 0.8)), 0.5);
+    }
+
+    #[test]
+    fn the_same_traffic_share_is_the_clamped_divergences_complement() {
+        assert!((same_traffic_share(&at(200.0, 0.2)) - 0.8).abs() < 1e-12);
+        // Past the clamp both ends collapse onto one share, which is what a
+        // control that moves and changes nothing looks like from here.
+        assert_eq!(
+            same_traffic_share(&at(200.0, 0.8)),
+            same_traffic_share(&at(200.0, 0.5))
+        );
+        assert_eq!(
+            same_traffic_share(&at(200.0, 0.01)),
+            same_traffic_share(&at(200.0, 0.05))
+        );
+    }
+}
+
+/// How much of the pool a narrowed track load would actually name, measured
+/// rather than argued.
+///
+/// The loader reads every track in the library on every detect, and the saving
+/// depends on how small the routed-plus-recomputed set is beside it. Routing
+/// decides that set and mutates the cache while it does, so the plan is measured
+/// here the way a loader would have to take it: on a copy, before anything is
+/// loaded.
+#[cfg(all(test, feature = "synthetic"))]
+mod narrowed_pool_plan {
+    use super::*;
+    use crate::scenarios::{LifecycleConfig, LifecycleCorpus};
+
+    /// One cluster as a plan sees it: member ids, member bboxes, union bbox.
+    type SkeletonCluster = (Vec<String>, Vec<Bbox>, Bbox);
+
+    /// What a plan needs from the cache, and nothing else.
+    ///
+    /// `SectionEvidenceCache` is `Clone`, but a cluster carries its last-emitted
+    /// `sections` with their polylines, so cloning the whole cache to plan a load
+    /// copies every polyline in the catalogue. A plan reads only the member ids
+    /// and the bboxes the routing relation compares, which is this.
+    struct RoutingSkeleton {
+        sports: HashMap<String, Vec<SkeletonCluster>>,
+    }
+
+    impl RoutingSkeleton {
+        fn of(cache: &SectionEvidenceCache) -> Self {
+            let mut sports = HashMap::new();
+            for (sport, clusters) in &cache.sports {
+                sports.insert(
+                    sport.clone(),
+                    clusters
+                        .iter()
+                        .map(|c| (c.member_ids.clone(), c.member_bboxes.clone(), c.union_bbox))
+                        .collect(),
+                );
+            }
+            Self { sports }
+        }
+
+        fn strings(&self) -> usize {
+            self.sports
+                .values()
+                .flat_map(|cs| cs.iter())
+                .map(|(ids, _, _)| ids.len())
+                .sum()
+        }
+    }
+
+    /// The ids a detect would have to load if it loaded only what the fold reads:
+    /// the new activities, plus every member of every cluster they touch.
+    ///
+    /// Taken by routing a clone for real, because the answer for the second new
+    /// id depends on what the first did to the cache, bridges included.
+    ///
+    /// The sport key must be the one the fold used, not the activity's own.
+    /// Under `pool_sports`, which is the default, every track is relabelled
+    /// [`POOLED_SPORT`] before the cache is touched, so a plan that keys on the
+    /// real sport finds no cluster, mints a fresh one and reports that a detect
+    /// needs one track. That is a plan which is wrong in the direction that
+    /// panics, and it is the first thing a loader change has to get right.
+    fn plan(
+        cache: &SectionEvidenceCache,
+        new_ids: &[&str],
+        points: &HashMap<String, Vec<GpsPoint>>,
+        sport_types: &HashMap<String, String>,
+        pooled: bool,
+    ) -> std::collections::BTreeSet<String> {
+        let mut probe = cache.clone();
+        let tun = Tunables::DEFAULT;
+        for &id in new_ids {
+            let Some(pts) = points.get(id) else { continue };
+            let sport = sport_types.get(id).map(String::as_str).unwrap_or("Unknown");
+            let sport = if pooled { POOLED_SPORT } else { sport };
+            route_only(&mut probe, sport, id, pts, &tun);
+        }
+        let mut wanted: std::collections::BTreeSet<String> =
+            new_ids.iter().map(|s| s.to_string()).collect();
+        for clusters in probe.sports.values() {
+            for c in clusters.iter().filter(|c| c.dirty) {
+                wanted.extend(c.member_ids.iter().cloned());
+            }
+        }
+        wanted
+    }
+
+    /// The same corpus repeated in `areas` places far enough apart that routing
+    /// cannot bridge them, which is an athlete with a home and some holidays.
+    /// One area is the common case and is what `corpus` alone gives.
+    fn corpus_in_areas(bucket_a: usize, areas: usize) -> Vec<(String, Vec<GpsPoint>, String)> {
+        let base = corpus(bucket_a);
+        let mut out = Vec::with_capacity(base.len() * areas);
+        for area in 0..areas {
+            // A degree of latitude is 111 km, far past any routing pad.
+            let shift = area as f64 * 1.0;
+            for (id, pts, sport) in &base {
+                out.push((
+                    format!("{id}_area{area}"),
+                    pts.iter()
+                        .map(|p| GpsPoint {
+                            latitude: p.latitude + shift,
+                            longitude: p.longitude,
+                            elevation: p.elevation,
+                        })
+                        .collect(),
+                    sport.clone(),
+                ));
+            }
+        }
+        out
+    }
+
+    fn corpus(bucket_a: usize) -> Vec<(String, Vec<GpsPoint>, String)> {
+        LifecycleCorpus::generate(&LifecycleConfig {
+            bucket_a_count: bucket_a,
+            bucket_b_delta_count: 0,
+            bucket_d_delta_count: 0,
+            bucket_e_delta_count: 0,
+            parallel_street_count: 0,
+            ..LifecycleConfig::default()
+        })
+        .through_a()
+        .into_iter()
+        .map(|a| (a.id.clone(), a.gps_points.clone(), a.sport_type.clone()))
+        .collect()
+    }
+
+    #[test]
+    #[ignore = "folds a whole corpus per size; run it deliberately"]
+    fn how_much_of_the_pool_one_more_activity_actually_needs() {
+        println!("areas  pool  plan  plan_share  skeleton_member_strings");
+        // The new activity is always a repeat of an existing one under a fresh
+        // id, which is what an athlete riding their usual route produces. What
+        // varies is how many geographically separate areas the library holds,
+        // because that is what decides how much of the pool one cluster is.
+        for &areas in &[1usize, 2, 4, 8] {
+            measure(areas, 480 / areas);
+        }
+    }
+
+    fn measure(areas: usize, size: usize) {
+        {
+            let all = corpus_in_areas(size, areas);
+            let (last, earlier) = (&all[0], &all[1..]);
+            let new_id = format!("{}_again", last.0);
+
+            let pool: Vec<(String, Vec<GpsPoint>)> = earlier
+                .iter()
+                .map(|(id, pts, _)| (id.clone(), pts.clone()))
+                .collect();
+            let mut sport_types: HashMap<String, String> = all
+                .iter()
+                .map(|(id, _, sport)| (id.clone(), sport.clone()))
+                .collect();
+            sport_types.insert(new_id.clone(), last.2.clone());
+            let mut points: HashMap<String, Vec<GpsPoint>> = all
+                .iter()
+                .map(|(id, pts, _)| (id.clone(), pts.clone()))
+                .collect();
+            points.insert(new_id.clone(), last.1.clone());
+            let seconds: Vec<&[f64]> = pool.iter().map(|_| &[] as &[f64]).collect();
+            let new_refs: Vec<&str> = pool.iter().map(|(id, _)| id.as_str()).collect();
+
+            let mut cache = SectionEvidenceCache::new();
+            let folded = detect_sections_incremental_observed(
+                &mut cache,
+                &[],
+                &pool,
+                &new_refs,
+                &seconds,
+                &sport_types,
+                &HashMap::new(),
+                &SectionConfig::default(),
+                &SectionUpdatePolicy::default(),
+                &mut |_, _, _| {},
+            );
+            assert!(
+                !folded.catalogue.is_empty(),
+                "the corpus at {size} detected nothing, so the plan means nothing"
+            );
+
+            // The incremental fold that follows, which is the case the
+            // narrowing is for: one more activity against a warm cache. The
+            // resolve-set report is printed from inside the fold.
+            let mut warm_pool = pool.clone();
+            warm_pool.push((new_id.clone(), last.1.clone()));
+            let warm_seconds: Vec<&[f64]> = warm_pool.iter().map(|_| &[] as &[f64]).collect();
+            let _ = detect_sections_incremental_observed(
+                &mut cache.clone(),
+                &folded.catalogue,
+                &warm_pool,
+                &[new_id.as_str()],
+                &warm_seconds,
+                &sport_types,
+                &HashMap::new(),
+                &SectionConfig::default(),
+                &SectionUpdatePolicy::default(),
+                &mut |_, _, _| {},
+            );
+
+            let wanted = plan(
+                &cache,
+                &[new_id.as_str()],
+                &points,
+                &sport_types,
+                SectionConfig::default().pool_sports,
+            );
+            let skeleton = RoutingSkeleton::of(&cache);
+            println!(
+                "{areas:5}  {:4}  {:4}  {:9.1}%  {:23}",
+                pool.len() + 1,
+                wanted.len(),
+                100.0 * wanted.len() as f64 / (pool.len() + 1) as f64,
+                skeleton.strings()
+            );
+
+            assert!(
+                wanted.contains(&new_id),
+                "the plan must name the activity being added"
+            );
+        }
     }
 }
