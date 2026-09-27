@@ -1,28 +1,13 @@
-//! # Adaptive Consensus Section Detection
+//! # Section Detection
 //!
-//! Detects frequently-traveled road sections using FULL GPS tracks.
-//! Produces smooth, natural polylines that evolve and refine over time
-//! as more tracks are observed.
-//!
-//! ## Algorithm
-//! 1. Load full GPS tracks (1000s of points per activity)
-//! 2. Find overlapping portions using R-tree spatial indexing
-//! 3. Cluster overlaps that represent the same physical section
-//! 4. Select initial medoid as the starting reference
-//! 5. Compute consensus polyline via weighted averaging of all tracks
-//! 6. Track per-point confidence based on observation density
-//! 7. Adapt section boundaries based on where tracks consistently overlap
-//!
-//! ## Consensus Algorithm
-//! - Normalize all tracks to common parameterization (by distance)
-//! - At each position, collect nearby points from all tracks
-//! - Compute weighted average: weight = 1 / (distance_to_reference + epsilon)
-//! - Higher observation density → higher confidence → tighter future matching
-//!
-//! ## Adaptive Boundaries
-//! - Track where each activity's overlap starts/ends relative to section
-//! - Section can grow if tracks consistently extend beyond current bounds
-//! - Section contracts if tracks consistently end before current bounds
+//! Detects frequently travelled sections from full GPS tracks. The detector
+//! is the Unified cut in `unified.rs`: every track of a sport is rasterised
+//! into a coverage grid of ~100 m cells, adjacent cells with near-identical
+//! traffic are joined into corridor stretches, and a boundary between two
+//! stretches survives only where the diverging branch is itself a section.
+//! A section's polyline is the medoid activity's own points, never an average
+//! of several tracks. The module doc of `unified.rs` states each rule and the
+//! function that applies it.
 
 mod consensus;
 mod grid;
@@ -318,11 +303,11 @@ pub struct FrequentSection {
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
 
-    /// Incremental-consensus running sums. None means "not yet built" -
-    /// the next merge will build it from current traces. Populated after
-    /// the first merge through `merge_traces_into_consensus`. Skipped
-    /// during JSON serialisation when None to keep blob size flat for
-    /// sections that haven't been touched by the incremental path yet.
+    /// Incremental-consensus running sums. Every constructor sets it to None
+    /// and nothing populates it, so it is always None today:
+    /// `merge_traces_into_consensus` folds into a caller-held
+    /// `ConsensusAccumulator`, not this field. Skipped during JSON
+    /// serialisation when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_state: Option<ConsensusAccumulator>,
 }

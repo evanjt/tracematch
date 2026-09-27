@@ -156,7 +156,8 @@ pub fn select_medoid(
             }
         }
     } else {
-        // Approximate: compare each to a random sample of 5 others
+        // Approximate: compare each to up to 5 others, taken at a fixed even
+        // stride through the traces
         let sample_size = 5.min(traces.len() - 1);
 
         for i in 0..traces.len() {
