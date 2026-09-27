@@ -56,6 +56,7 @@ step "Check formatting" cargo fmt --check
 step "Clippy" cargo clippy --all-targets --all-features -- -D warnings
 step "Clippy (detection ordering)" cargo clippy -- -D clippy::iter_over_hash_type
 step "Check (no default features)" cargo check -p tracematch --no-default-features
+step "Check tests (default features)" cargo check --tests
 step "Docs" env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features synthetic
 step "Publish (dry run)" publish_dry_run
 step "Test (synthetic)" cargo test --features synthetic
