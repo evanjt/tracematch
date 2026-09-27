@@ -8,7 +8,7 @@ Given a collection of GPS tracks (running, cycling, etc.), tracematch can compar
 
 The papers each rule rests on are listed in `REFERENCES.md`.
 
-Finds recurring **sections**, corridors that many activities travel, across your whole history at once. One rule defines a section: *a maximal corridor stretch of near-constant traffic composition* (who passes, and how often). Every section's polyline is a real single pass of one activity, never an average and never stitched from several. Entry point: `detect_sections_unified`.
+Finds recurring **sections**, corridors that many activities travel, across your whole history at once. One rule defines a section: *a maximal corridor stretch of near-constant traffic composition* (who passes, and how often). Every section's polyline is a real single pass of one activity, never an average and never stitched from several. Entry point: `detect_sections`.
 
 ### The pipeline
 
