@@ -6022,8 +6022,7 @@ pub struct SectionUpdatePolicy {
 /// layer a passing baseline to optimise UNDER. The optimisation, a
 /// persisted per-cluster evidence grid folded in O(cluster) per add -
 /// keeps this delta contract ([`UnifiedIncrementalResult`]) unchanged;
-/// only the body and an added evidence-cache handle change. Design:
-/// `~/.claude/plans/b1-incremental-design.md`.
+/// only the body and an added evidence-cache handle change.
 pub fn detect_sections_incremental(
     existing: &[FrequentSection],
     pool: &[(String, Vec<GpsPoint>)],

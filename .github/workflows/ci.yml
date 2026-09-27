@@ -39,6 +39,11 @@ jobs:
       # them, and one drifted out of sync for three months unnoticed.
       - name: Check (no default features)
         run: cargo check -p tracematch --no-default-features
+      # Compiled, not run: a test that uses `tracematch::synthetic` without
+      # declaring the feature breaks a plain `cargo test`, and the synthetic lane
+      # below cannot see that.
+      - name: Check tests (default features)
+        run: cargo check --tests
       - name: Docs
         run: cargo doc --no-deps --features synthetic
         env:
