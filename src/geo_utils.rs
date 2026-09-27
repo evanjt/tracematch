@@ -11,7 +11,6 @@
 //! |----------|-------------|
 //! | [`haversine_distance`] | Great-circle distance between two GPS points |
 //! | [`compute_bounds`] | Bounding box of a GPS track |
-//! | [`compute_center`] | Centroid of a GPS track |
 //!
 //! ## Example
 //!
@@ -135,55 +134,6 @@ pub fn compute_bounds(points: &[GpsPoint]) -> Bounds {
         min_lng: f64::MAX,
         max_lng: f64::MIN,
     })
-}
-
-// =============================================================================
-// Center/Centroid Functions
-// =============================================================================
-
-/// Compute the geographic center (centroid) of a GPS track.
-///
-/// Returns the arithmetic mean of all latitude and longitude values.
-/// This is a simple centroid calculation suitable for small geographic areas.
-///
-/// # Arguments
-///
-/// * `points` - Slice of GPS points
-///
-/// # Returns
-///
-/// A [`GpsPoint`] at the center of the track. Returns (0, 0) for empty input.
-///
-/// # Notes
-///
-/// For tracks spanning large areas or crossing the antimeridian (180°/-180° longitude),
-/// this simple averaging may produce unexpected results. For such cases, consider
-/// using a proper spherical centroid calculation.
-///
-/// # Example
-///
-/// ```rust
-/// use tracematch::{GpsPoint, geo_utils};
-///
-/// let track = vec![
-///     GpsPoint::new(51.50, -0.10),
-///     GpsPoint::new(51.52, -0.12),
-/// ];
-///
-/// let center = geo_utils::compute_center(&track);
-/// assert!((center.latitude - 51.51).abs() < 0.001);
-/// assert!((center.longitude - (-0.11)).abs() < 0.001);
-/// ```
-pub fn compute_center(points: &[GpsPoint]) -> GpsPoint {
-    if points.is_empty() {
-        return GpsPoint::new(0.0, 0.0);
-    }
-
-    let sum_lat: f64 = points.iter().map(|p| p.latitude).sum();
-    let sum_lng: f64 = points.iter().map(|p| p.longitude).sum();
-    let n = points.len() as f64;
-
-    GpsPoint::new(sum_lat / n, sum_lng / n)
 }
 
 // =============================================================================

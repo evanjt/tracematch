@@ -35,19 +35,3 @@ fn test_compute_bounds() {
     assert_eq!(bounds.min_lng, -0.13);
     assert_eq!(bounds.max_lng, -0.12);
 }
-
-#[test]
-fn test_compute_center() {
-    let track = vec![GpsPoint::new(51.50, -0.10), GpsPoint::new(51.52, -0.12)];
-    let center = compute_center(&track);
-    assert!(approx_eq(center.latitude, 51.51, 0.001));
-    assert!(approx_eq(center.longitude, -0.11, 0.001));
-}
-
-#[test]
-fn test_compute_center_empty() {
-    let empty: Vec<GpsPoint> = vec![];
-    let center = compute_center(&empty);
-    assert_eq!(center.latitude, 0.0);
-    assert_eq!(center.longitude, 0.0);
-}

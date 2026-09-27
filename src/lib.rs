@@ -42,10 +42,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-// Unified error handling
-pub mod error;
-pub use error::{OptionExt, Result, RouteMatchError};
-
 // Union-Find data structure for grouping
 pub mod union_find;
 pub use union_find::UnionFind;
