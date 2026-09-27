@@ -1,9 +1,10 @@
+//! Progress callback for section detection phases.
+//!
+//! Implementations receive phase transitions and per-item progress updates
+//! during multi-scale section detection. Progress is emitted from parallel
+//! threads, so implementations must be `Send + Sync`.
+
 use std::sync::Mutex;
-/// Progress callback for section detection phases.
-///
-/// Implementations receive phase transitions and per-item progress updates
-/// during multi-scale section detection. Progress is emitted from parallel
-/// threads, so implementations must be `Send + Sync`.
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Detection phases, ordered by execution sequence.
