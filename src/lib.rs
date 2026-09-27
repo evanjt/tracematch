@@ -6,7 +6,6 @@
 //! - GPS route matching using Average Minimum Distance (AMD)
 //! - Route grouping and clustering algorithms
 //! - Frequent section detection (multi-scale)
-//! - Activity heatmap generation
 //! - Parallel processing for batch operations
 //!
 //! ## Features
@@ -254,7 +253,7 @@ impl Bounds {
 /// A simplified route signature for efficient matching.
 ///
 /// The signature contains a simplified version of the original GPS track,
-/// optimized for comparison using the Fréchet distance algorithm.
+/// optimized for comparison by Average Minimum Distance (AMD).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteSignature {
     /// Unique identifier for the activity/route
@@ -394,19 +393,19 @@ pub struct MatchConfig {
     pub zero_threshold: f64,
 
     /// Minimum match percentage to consider routes similar.
-    /// Default: 65.0% (lowered from 80% to account for GPS variance)
+    /// Default: 55.0%
     pub min_match_percentage: f64,
 
     /// Minimum route distance to be considered for grouping.
     /// Default: 500.0 meters
     pub min_route_distance: f64,
 
-    /// Maximum distance difference ratio for grouping (within 20%).
-    /// Default: 0.20
+    /// Maximum distance difference ratio for grouping (within 25%).
+    /// Default: 0.25
     pub max_distance_diff_ratio: f64,
 
     /// Endpoint threshold for matching start/end points.
-    /// Default: 200.0 meters
+    /// Default: 250.0 meters
     pub endpoint_threshold: f64,
 
     /// Fixed number of points for resampling (legacy mode).
@@ -465,9 +464,13 @@ impl Default for MatchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteGroup {
-    /// Unique identifier for this group (typically the first activity ID)
+    /// Unique identifier for this group: the Union-Find root of its members.
+    /// Union by rank can make any member the root, not only the first. A group
+    /// split off an existing one takes that group's id with `_split` appended.
     pub group_id: String,
-    /// ID of the representative activity (the medoid)
+    /// ID of the representative activity: the existing representative while it
+    /// is still a member, otherwise the sorted-first member. A split-off group
+    /// takes the member with the highest average match to the others.
     pub representative_id: String,
     /// All activity IDs that belong to this group
     pub activity_ids: Vec<String>,

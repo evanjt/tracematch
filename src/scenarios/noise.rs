@@ -102,10 +102,10 @@ impl GaussMarkovConfig {
 
 /// Stateful first-order Gauss–Markov noise generator.
 ///
-/// Maintains the AR(1) state across successive `perturb_track` calls only when
-/// you explicitly call `reset_for_new_activity`. Two activities sampled
-/// without reset will share noise correlation across the boundary, which is
-/// not what we want, always reset between activities.
+/// The AR(1) state carries across successive `perturb_track` calls unless
+/// `reset_for_new_activity` is called, which re-draws it from the steady-state
+/// distribution. Two activities sampled without a reset share noise
+/// correlation across the boundary, so reset between activities.
 pub struct GaussMarkovNoise {
     config: GaussMarkovConfig,
     rng: StdRng,

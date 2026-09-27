@@ -2,15 +2,14 @@
 //!
 //! Route grouping (Union-Find of "same-route" activities) compares every
 //! pair of route signatures within a dataset. For N routes that's
-//! N(N-1)/2 pairs, at N=1000 that's nearly 500k comparisons, each
-//! costing ~25ms of AMD work (`compare_routes`). The existing
-//! `RTree<RouteBounds>` pre-filter in `grouping.rs` only prunes pairs
-//! whose bounding boxes are further apart than `SPATIAL_TOLERANCE`
-//! (~1km), but the strict grouping gate in `should_group_routes`
-//! requires start/end points within `endpoint_threshold` (250m
-//! default). Two routes whose bounds overlap (everyone running in the
-//! same city) pay the full AMD cost only to be rejected by the
-//! endpoint check.
+//! N(N-1)/2 pairs, at N=1000 that's nearly 500k comparisons, each a
+//! resample and an AMD comparison. The strict grouping gate in
+//! `should_group_routes` requires start/end points within
+//! `endpoint_threshold` (250m default), so most of those pairs are
+//! rejected on their endpoints after paying for the AMD work.
+//! `group_signatures_with_progress` in `grouping.rs` takes its candidate
+//! pairs from this filter, then applies `distance_ratio_ok` and
+//! `endpoints_could_group` before comparing a pair.
 //!
 //! This filter operates at the same boundary as the section detector's
 //! spatial pre-filter, but keyed on each route's start AND end points
