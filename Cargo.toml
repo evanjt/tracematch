@@ -105,6 +105,11 @@ name = "grouping_incremental"
 harness = false
 required-features = ["synthetic"]
 
+[[bench]]
+name = "fold_cost"
+harness = false
+required-features = ["synthetic"]
+
 [[test]]
 name = "fold_corridor_convergence"
 required-features = ["synthetic"]

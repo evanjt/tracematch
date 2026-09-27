@@ -6626,6 +6626,12 @@ struct LeafMemos {
     /// the gate [`rescue_confirmed`] runs its cross-track descent search
     /// behind.
     track_bounds: BoundsMemo,
+    /// Clusters recomputed and member tracks fed to them over the cache's
+    /// life, so a test can assert the scaling claim by work done rather than
+    /// by wall-clock time. Built only for the synthetic test lane.
+    #[cfg(feature = "synthetic")]
+    #[serde(skip)]
+    recompute_work: (usize, usize),
 }
 
 /// Per-track lift candidate spans, each stamped with the stream it was
@@ -6781,6 +6787,14 @@ impl SectionEvidenceCache {
                 .collect(),
             leaves: LeafMemos::default(),
         }
+    }
+
+    /// `(clusters recomputed, member tracks they held)` summed over every fold
+    /// into this cache, for the cost gates.
+    #[cfg(feature = "synthetic")]
+    #[doc(hidden)]
+    pub fn recompute_work(&self) -> (usize, usize) {
+        self.leaves.recompute_work
     }
 
     /// Per-cluster `(sport, members, ref_lat, sections)` snapshot, for tests
@@ -7404,6 +7418,11 @@ fn recompute_cluster(
     leaves: &mut LeafMemos,
     starts: &HashMap<String, i64>,
 ) -> Vec<BoundaryRecord> {
+    #[cfg(feature = "synthetic")]
+    {
+        leaves.recompute_work.0 += 1;
+        leaves.recompute_work.1 += cluster.member_ids.len();
+    }
     if cluster.member_ids.len() < config.min_activities as usize {
         cluster.sections.clear();
         return Vec::new();

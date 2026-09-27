@@ -10,18 +10,16 @@
 //! the fold can lean on it for the "fold a new activity into an existing section"
 //! path without pulling in banned consensus averaging.
 //!
-//! PART B pins the CONVERGENCE TARGET and the cost that makes an incremental
-//! mandatory. A naive re-batch drip (re-run `detect_sections` over the
-//! whole accumulated pool on every add) is by construction the exact catalogue
-//! the fold must reproduce; its per-add cost grows with N, which is the O(N^2)
-//! bar a real incremental (target <= 150 ms/activity, flat) has to beat. A
-//! ready-to-arm `#[ignore]` gate is left as that incremental's drop-in.
+//! PART B pins the CONVERGENCE TARGET. A naive re-batch drip (re-run
+//! `detect_sections` over the whole accumulated pool on every add) is by
+//! construction the exact catalogue the fold must reproduce, and its per-add
+//! cost grows with N, which is why an incremental is mandatory.
 //!
-//! Green-by-default: the measurement tests never fail; the gate is `#[ignore]`d
-//! (RED under `--include-ignored`) because no incremental exists yet.
+//! PART C gates the cached fast path against that target, and gates its cost by
+//! counting the work each add does rather than timing it. The timings, and the
+//! cost curves this file used to print, are in `benches/fold_cost.rs`.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
 use tracematch::sections::find_sections_in_route;
@@ -433,54 +431,6 @@ fn naive_rebatch_convergence_and_order_free() {
     );
 }
 
-/// Cost curve: the per-add price of the naive re-batch as the pool grows. Each
-/// number is one `detect_sections` over N tracks, i.e. the cost the fold would
-/// pay for a single add if it re-batched at pool size N. The drip TOTAL to reach
-/// N is the running sum of these, which is quadratic. The incremental must make
-/// the per-add cost roughly flat and <= 150 ms. Debug timings; release is much
-/// faster but the growth shape is the point, not the absolute ms.
-#[test]
-fn naive_rebatch_cost_curve() {
-    let cfg = SectionConfig::default();
-    let sizes = [20usize, 40, 80];
-
-    // One corpus large enough to slice all sizes from, so every prefix is the
-    // same underlying data (fair growth comparison).
-    let corpus = corpus_with_bucket_a(sizes.iter().copied().max().unwrap());
-    let tracks = corpus.tracks_through_e();
-    let sports = corpus.sport_map_through_e();
-
-    println!("\n================ naive re-batch cost curve (debug) ================");
-    println!("(per-add = one detect_sections over N tracks; drip total = running sum)");
-    let mut prev: Option<(usize, u128)> = None;
-    for &n in &sizes {
-        let n = n.min(tracks.len());
-        let prefix = &tracks[..n];
-        // Warm one call is unnecessary; the grid build dominates and is stable.
-        let t0 = Instant::now();
-        let cat = detect_sections(prefix, &[], &sports, &cfg);
-        let ms = t0.elapsed().as_millis();
-        let growth = match prev {
-            Some((pn, pms)) if pms > 0 => format!("  x{:.2} vs N={}", ms as f64 / pms as f64, pn),
-            _ => String::new(),
-        };
-        println!(
-            "  N={:>3}  per-add={:>6}ms  sections={:<3}{}",
-            n,
-            ms,
-            cat.len(),
-            growth
-        );
-        prev = Some((n, ms));
-    }
-    println!("---------------------------------------------------------------------------");
-    println!(
-        "READ: per-add cost climbs with N (each add reprocesses the whole pool), so\n\
-         the re-batch drip is O(N^2) overall. That is why the fold needs a real incremental:\n\
-         constant work per add, target <= 150 ms/activity regardless of pool size.\n"
-    );
-}
-
 /// GATE (armed and live). The order-free Unified-aware incremental drips the
 /// pool one activity at a time, folding each into the prior catalogue, and must
 /// converge to the from-scratch Unified batch at >= 0.95 ground overlap.
@@ -748,20 +698,17 @@ fn multi_cluster_library(n_clusters: usize, bucket_a: usize) -> (Tracks, HashMap
     (tracks, sports)
 }
 
-/// COST gate — the O(touched-cluster) property. The cached add cost is governed
-/// by the size of the cluster a new activity TOUCHES, not the whole library:
-/// the win the naive re-batch cannot have (it re-processes the entire pool on
-/// every add). The library grows across many far-apart clusters, each the SAME
-/// fresh corpus at a new origin, dripped cluster by cluster. The cost to
-/// INTEGRATE a whole cluster (its adds summed — which averages out debug-build
-/// per-add noise) must be flat however many clusters already exist, while the
-/// naive re-batch of the whole library grows. Debug timings are inflated, so the
-/// SCALING SHAPE is asserted, never an absolute millisecond.
+/// COST gate, the O(touched-cluster) property. A cached add recomputes only
+/// the cluster the new activity touches, never the whole library: the win the
+/// naive re-batch cannot have, since it re-processes the entire pool on every
+/// add. The library grows across many far-apart clusters, each the same fresh
+/// corpus at a new origin, dripped cluster by cluster. The work of every add,
+/// counted as clusters recomputed and the member tracks they held, must stay
+/// bounded by one cluster however many clusters already exist.
 ///
-/// (A single unbounded cluster is a different, honest story: there the touched
-/// cluster IS the whole library, so the add is O(cluster)=O(N), dominated by the
-/// discovery scan — see the build-vs-discovery split in the report. Making that
-/// sub-linear needs incremental discovery, deliberately out of this optimisation.)
+/// A single unbounded cluster is a different, honest story: there the touched
+/// cluster IS the whole library, so the add is O(cluster) = O(N). The timings
+/// of both shapes are in `benches/fold_cost.rs`.
 #[test]
 fn gate_cached_incremental_cost_is_flat() {
     use tracematch::{
@@ -771,123 +718,15 @@ fn gate_cached_incremental_cost_is_flat() {
     let cfg = SectionConfig::default();
     let n_clusters = 9;
     let (tracks, sports) = multi_cluster_library(n_clusters, 8);
-    let cluster_size = tracks.len() / n_clusters; // identical clusters
+    let cluster_size = tracks.len() / n_clusters;
 
     let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
     let mut cache = SectionEvidenceCache::new();
     let mut cached_cat: Vec<FrequentSection> = Vec::new();
-    let mut it = tracks.iter();
-
-    // Integrate the library one cluster at a time. After each cluster, measure a
-    // naive re-batch of the SAME pool right next to the cached adds, so the
-    // cached-vs-naive comparison at each depth shares a thermal state (debug
-    // runs drift as the machine warms; a ratio taken adjacently cancels it).
-    // `mean_cached_add` = a bounded touched-cluster recompute; `naive_rebatch`
-    // re-processes the whole pool, so it grows with the library.
-    let mut samples: Vec<(usize, f64, f64)> = Vec::new(); // (pool_len, mean_cached_add_us, naive_us)
-    for _c in 0..n_clusters {
-        let t_cached = Instant::now();
-        for _ in 0..cluster_size {
-            let (id, pts) = it.next().unwrap();
-            pool.push((id.clone(), pts.clone()));
-            let new_ids = [pool.last().unwrap().0.as_str()];
-            let res = detect_sections_incremental_cached_with_policy(
-                &mut cache,
-                &cached_cat,
-                &pool,
-                &new_ids,
-                &[],
-                &sports,
-                &cfg,
-                &SectionUpdatePolicy::default(),
-            );
-            cached_cat = res.catalogue;
-        }
-        let mean_cached = t_cached.elapsed().as_micros() as f64 / cluster_size as f64;
-        let t_naive = Instant::now();
-        let _ = detect_sections(&pool, &[], &sports, &cfg);
-        let naive = t_naive.elapsed().as_micros() as f64;
-        samples.push((pool.len(), mean_cached, naive));
-    }
-
-    let shallow = &samples[1]; // library ~2 clusters deep
-    let deep = samples.last().unwrap(); // full library
-    let ratio_shallow = safe_ratio(shallow.1, shallow.2);
-    let ratio_deep = safe_ratio(deep.1, deep.2);
-
-    println!(
-        "\n================ PART C: cached add vs naive re-batch, by library depth (debug) ================"
-    );
-    println!(
-        "(library = {n_clusters} far-apart clusters of {cluster_size}; each cached add touches ONE bounded cluster)"
-    );
-    println!("  pool   mean cached add    naive re-batch    cached/naive");
-    for (n, c, na) in &samples {
-        println!(
-            "  {n:>4}   {c:>12.0}us   {na:>12.0}us   {:.3}",
-            safe_ratio(*c, *na)
-        );
-    }
-    println!(
-        "------------------------------------------------------------------------------------------------"
-    );
-    println!(
-        "READ: the mean cached add stays governed by the ONE bounded cluster it touches, while the\n\
-         naive re-batch re-processes the whole pool. So cached/naive SHRINKS with depth — a cached\n\
-         add is {:.0}x cheaper than a re-batch shallow, {:.0}x cheaper deep. Untouched clusters are\n\
-         reused verbatim, never recomputed. (Single-cluster is the honest O(N) case — see report.)\n",
-        safe_ratio(shallow.2, shallow.1),
-        safe_ratio(deep.2, deep.1),
-    );
-
-    assert!(
-        deep.1 > 0.0 && deep.2 > 0.0,
-        "cost samples must be non-zero"
-    );
-    // The O(touched-cluster) win: a cached add is far cheaper than a whole-pool
-    // re-batch, and the gap WIDENS with the library (the ratio shrinks), because
-    // the cached add's cost does not grow with the pool the way the re-batch does.
-    assert!(
-        ratio_deep < ratio_shallow,
-        "cached add must get RELATIVELY cheaper vs the naive re-batch as the library grows: \
-         deep ratio {ratio_deep:.3} must be < shallow ratio {ratio_shallow:.3}",
-    );
-    assert!(
-        deep.1 < 0.25 * deep.2,
-        "a cached add ({:.0}us) must be far cheaper than re-batching the whole library ({:.0}us)",
-        deep.1,
-        deep.2,
-    );
-}
-
-/// REPORT (not a gate): the single-cluster cached cost is honestly O(N). When a
-/// user's whole history sits in ONE cluster, every add recomputes that whole
-/// cluster, and its detection is O(cluster tracks) dominated by the discovery
-/// scan (measured ~35x the grid build, both O(cluster)). So the cached add grows
-/// with N here just as the naive re-batch does — cheaper by a constant (it skips
-/// re-clustering the pool and has no other cluster to reuse), NOT sub-linear.
-/// This is the remaining gap to the <=150ms/add budget for a single-cluster
-/// user; closing it needs incremental (sub-supernode) discovery, deferred as
-/// B1b. Printed so the O(N) shape stays visible next to the multi-cluster gate.
-#[test]
-fn cached_single_cluster_cost_curve_is_linear() {
-    use tracematch::{
-        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
-    };
-
-    let cfg = SectionConfig::default();
-    let corpus = corpus_with_bucket_a(36); // one home cluster, ~40 activities
-    let tracks = corpus.tracks_through_e();
-    let sports = corpus.sport_map_through_e();
-
-    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::with_capacity(tracks.len());
-    let mut cache = SectionEvidenceCache::new();
-    let mut cached_cat: Vec<FrequentSection> = Vec::new();
-    let mut per_add: Vec<(usize, u128)> = Vec::with_capacity(tracks.len());
     for (id, pts) in &tracks {
         pool.push((id.clone(), pts.clone()));
-        let new_ids = [pool.last().unwrap().0.as_str()];
-        let t0 = Instant::now();
+        let new_ids = [id.as_str()];
+        let before = cache.recompute_work();
         let res = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &cached_cat,
@@ -898,50 +737,38 @@ fn cached_single_cluster_cost_curve_is_linear() {
             &cfg,
             &SectionUpdatePolicy::default(),
         );
-        per_add.push((pool.len(), t0.elapsed().as_micros()));
         cached_cat = res.catalogue;
-    }
-    let median_around = |target: usize| -> f64 {
-        let mut xs: Vec<u128> = per_add
-            .iter()
-            .filter(|(n, _)| (*n as i64 - target as i64).abs() <= 3)
-            .map(|(_, us)| *us)
-            .collect();
-        xs.sort_unstable();
-        xs.get(xs.len() / 2).copied().unwrap_or(0) as f64
-    };
-    let (a10, a20, a40) = (median_around(10), median_around(20), median_around(40));
+        let after = cache.recompute_work();
+        let (clusters, members) = (after.0 - before.0, after.1 - before.1);
 
-    println!(
-        "\n================ PART C: cached SINGLE-cluster cost curve (debug, O(N)) ================"
-    );
-    println!(
-        "(one home cluster; every add recomputes it wholesale — the honest O(cluster)=O(N) case)"
-    );
-    println!(
-        "  N~10 {a10:>8.0}us   N~20 {a20:>8.0}us (x{:.2})   N~40 {a40:>8.0}us (x{:.2})",
-        safe_ratio(a20, a10),
-        safe_ratio(a40, a10)
-    );
-    println!(
-        "------------------------------------------------------------------------------------------"
-    );
-    println!(
-        "READ: unlike the multi-cluster gate, this GROWS with N — the touched cluster IS the whole\n\
-         library. Sub-linear single-cluster adds need incremental discovery (B1b), not shipped here.\n"
+        assert_eq!(
+            clusters,
+            1,
+            "add of {id} at pool {} recomputed {clusters} clusters; only the one it touches may be",
+            pool.len(),
+        );
+        assert!(
+            members <= cluster_size,
+            "add of {id} at pool {} fed {members} tracks to the recompute, more than one cluster \
+             of {cluster_size}: the work grew with the library",
+            pool.len(),
+        );
+    }
+    assert_eq!(
+        cache.debug_summary().len(),
+        n_clusters,
+        "the library must stay {n_clusters} disjoint clusters, or the bound above proves nothing",
     );
 }
 
-/// COLD-COST gate. A cold (empty) cache — every app start before the cache is
-/// persisted, and every bulk window-expand — receiving N brand-new activities in
-/// ONE call must cost ~LINEAR in N, not quadratic. The two-phase
-/// route-then-recompute rebuilds each touched cluster ONCE over its final
-/// membership, so a cold detect over N is O(sum of touched clusters) = O(N),
-/// comparable to (and it also warms the cache from) a plain
-/// `detect_sections(N)`. The earlier recompute-per-activity shape was
-/// O(N²): a cold/bulk add did k recomputes of a growing cluster — SLOWER than
-/// the single batch it replaced. Uses one growing home cluster: the WORST case
-/// for the old bug (every activity lands in the one cluster).
+/// COLD-COST gate. A cold (empty) cache, which is every app start before the
+/// cache is persisted and every bulk window-expand, receiving N brand-new
+/// activities in ONE call must recompute each touched cluster exactly once over
+/// its final membership, so the tracks fed to the recompute sum to N. The
+/// earlier recompute-per-activity shape was O(N²): k recomputes of a growing
+/// cluster, so the same count came to about N²/2. Uses one growing home
+/// cluster, the worst case for that shape. The timings against the plain batch
+/// are in `benches/fold_cost.rs`.
 #[test]
 fn gate_cached_cold_cache_cost_is_linear() {
     use tracematch::{
@@ -949,17 +776,14 @@ fn gate_cached_cold_cache_cost_is_linear() {
     };
 
     let cfg = SectionConfig::default();
-    let corpus = corpus_with_bucket_a(80);
+    let corpus = corpus_with_bucket_a(36);
     let tracks = corpus.tracks_through_e();
     let sports = corpus.sport_map_through_e();
 
-    // Cold detect over the first n activities: empty cache, all n are new in one
-    // call. Also time the plain batch over the same n, for the comparability note.
-    let cold = |n: usize| -> (u128, u128) {
-        let prefix: Vec<(String, Vec<GpsPoint>)> = tracks[..n.min(tracks.len())].to_vec();
+    for n in [20usize, 40] {
+        let prefix: Vec<(String, Vec<GpsPoint>)> = tracks[..n].to_vec();
         let new_ids: Vec<&str> = prefix.iter().map(|(id, _)| id.as_str()).collect();
         let mut cache = SectionEvidenceCache::new();
-        let t0 = Instant::now();
         let _ = detect_sections_incremental_cached_with_policy(
             &mut cache,
             &[],
@@ -970,59 +794,17 @@ fn gate_cached_cold_cache_cost_is_linear() {
             &cfg,
             &SectionUpdatePolicy::default(),
         );
-        let cached = t0.elapsed().as_micros();
-        let t1 = Instant::now();
-        let _ = detect_sections(&prefix, &[], &sports, &cfg);
-        let batch = t1.elapsed().as_micros();
-        (cached, batch)
-    };
-    let (c20, b20) = cold(20);
-    let (c40, b40) = cold(40);
-    let (c80, b80) = cold(80);
-
-    println!(
-        "\n================ PART C: COLD-cache detect cost (debug, must be O(N)) ================"
-    );
-    println!("(empty cache, all N new in one call — the app-start / bulk-expand path)");
-    println!(
-        "  cold cached  N=20 {c20:>8}us   N=40 {c40:>8}us (x{:.2})   N=80 {c80:>8}us (x{:.2})",
-        safe_ratio(c40 as f64, c20 as f64),
-        safe_ratio(c80 as f64, c20 as f64),
-    );
-    println!(
-        "  plain batch  N=20 {b20:>8}us   N=40 {b40:>8}us (x{:.2})   N=80 {b80:>8}us (x{:.2})",
-        safe_ratio(b40 as f64, b20 as f64),
-        safe_ratio(b80 as f64, b20 as f64),
-    );
-    println!(
-        "--------------------------------------------------------------------------------------"
-    );
-    println!(
-        "READ: cold cached TRACKS the plain batch — same cost and same growth — because it\n\
-         recomputes each touched cluster ONCE over its final membership, which IS the batch's\n\
-         per-cluster detect. The recompute-per-activity shape did k growing recomputes = O(N²),\n\
-         ~4x steeper than the batch. (The batch is itself super-linear on ONE cluster: geo_clusters\n\
-         and the lift veto are O(N²); the cache inherits that, it does not add to it.)\n"
-    );
-
-    assert!(c20 > 0 && c80 > 0, "cost samples must be non-zero");
-    // The gate: a cold pass must TRACK the plain batch it replaces at every size
-    // — recompute-once == the batch's per-cluster detect. The old O(N²)-per-add
-    // shape would be several times the batch at N=80. (A raw "linear in N" bound
-    // would be wrong here: the batch itself is super-linear on one cluster.)
-    for (c, b, n) in [(c20, b20, 20), (c40, b40, 40), (c80, b80, 80)] {
-        assert!(
-            (c as f64) < 1.6 * b as f64,
-            "cold-cache detect at N={n} ({c}us) must track the plain batch ({b}us), not O(N²)-per-add",
+        let (clusters, members) = cache.recompute_work();
+        let formed = cache.debug_summary().len();
+        assert_eq!(
+            clusters, formed,
+            "cold detect over {n} recomputed {clusters} clusters for the {formed} it formed; \
+             each must be cut once",
+        );
+        assert_eq!(
+            members, n,
+            "cold detect over {n} fed {members} tracks to the recompute; each activity must be \
+             read once, not once per activity that arrived after it",
         );
     }
-    // And its growth must not outrun the batch's growth (excludes the quadratic).
-    assert!(
-        safe_ratio(c80 as f64, c20 as f64) < 1.5 * safe_ratio(b80 as f64, b20 as f64),
-        "cold-cache growth must track the batch's, not the O(N²)-per-add's ~4x-steeper curve",
-    );
-}
-
-fn safe_ratio(a: f64, b: f64) -> f64 {
-    if b > 0.0 { a / b } else { 0.0 }
 }
