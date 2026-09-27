@@ -151,7 +151,7 @@ fn load_corpus(dir: &Path) -> Vec<Activity> {
     let mut activities = Vec::new();
     for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "gpx") {
+        if path.extension().is_none_or(|e| e != "gpx") {
             continue;
         }
         let (points, seconds, date) = load_gpx_full(&path);

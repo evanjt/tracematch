@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # core.hooksPath replaces .git/hooks entirely, so every gate runs from here.
 #
-# scripts/pre-commit also runs `cargo clippy -- -D warnings`, which the library
-# does not currently pass (src/sections/unified.rs). Run it by hand until that
-# is clean, then call it from here instead of duplicating the fmt check.
+# Only the fast gates run here. scripts/ci-local.sh runs clippy, the other
+# static lanes and the tests the way CI does.
 set -e
 
 ROOT="$(git rev-parse --show-toplevel)"
