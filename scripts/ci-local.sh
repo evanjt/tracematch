@@ -31,17 +31,19 @@ step() {
 # The release packages what is committed, and a working tree carries ignored
 # files cargo would package or refuse. Export the tracked and untracked
 # non-ignored files, which is what a checkout of the next commit holds.
+EXPORT_DIR=""
+trap '[ -n "$EXPORT_DIR" ] && rm -rf "$EXPORT_DIR"' EXIT
+
 publish_dry_run() {
-    local export_dir
-    export_dir="$(mktemp -d)"
-    trap 'rm -rf "$export_dir"' RETURN
+    EXPORT_DIR="$(mktemp -d)"
+    local export_dir="$EXPORT_DIR"
     git ls-files -z --cached --others --exclude-standard \
         | while IFS= read -r -d '' f; do
             [ -e "$f" ] && printf '%s\0' "$f"
         done \
         | xargs -0 cp --parents -t "$export_dir" || return 1
     # Keep the build warm between runs. It lives outside the export, which is
-    # deleted on return.
+    # deleted on exit.
     (cd "$export_dir" \
         && CARGO_TARGET_DIR="$ROOT/target/ci-local-publish" \
             cargo publish --dry-run --locked)
