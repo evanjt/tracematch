@@ -401,6 +401,24 @@ pub fn rank(
     proximity: f64,
     newest_day: Option<i64>,
 ) -> Vec<(String, RankFeatures)> {
+    let mut feats = rank_features(candidates, outings, proximity, newest_day);
+    score_features(&mut feats);
+    feats
+}
+
+/// The per-candidate features, unscored and in candidate order.
+///
+/// Measuring them is the whole cost of [`rank`], O(candidates x members x
+/// points) in haversines, and the score on top is a percentile within
+/// whatever set it is handed. A caller that ranks the same candidates in
+/// several contexts, pooled and then per sport, measures once here and
+/// scores each context with [`score_features`].
+pub fn rank_features(
+    candidates: &[Candidate],
+    outings: &HashMap<String, Outing>,
+    proximity: f64,
+    newest_day: Option<i64>,
+) -> Vec<(String, RankFeatures)> {
     let newest = newest_day.unwrap_or_else(|| {
         outings
             .values()
@@ -529,14 +547,22 @@ pub fn rank(
             },
         ));
     }
-    score(&mut feats);
+    feats
+}
+
+/// Score a set against itself and sort it best first, ties by id.
+///
+/// The score is a percentile within the set given, so the same features
+/// score differently in a pooled set and a per-sport one. Equal input gives
+/// equal output.
+pub fn score_features(feats: &mut [(String, RankFeatures)]) {
+    score(feats);
     feats.sort_by(|a, b| {
         b.1.score
             .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.0.cmp(&b.0))
     });
-    feats
 }
 
 /// Percentile-normalise each feature within the set, equal weights, ties
@@ -750,6 +776,74 @@ mod tests {
         assert!(ranked.iter().all(|(_, f)| (0.0..=1.0).contains(&f.score)));
         let again = rank(&[far, near], &outings, 100.0, None);
         assert_eq!(again, ranked, "input order must not change the ranking");
+    }
+
+    /// Scenario: a caller ranks the same candidates twice, pooled and then
+    /// per sport, which measured every feature twice over the same members.
+    /// Expected behaviour: measuring once and scoring each context gives the
+    /// same answer as ranking each context from scratch.
+    #[test]
+    fn measuring_once_and_scoring_each_context_matches_ranking_each() {
+        let track = line(200, 0.0001, |_| None);
+        let poly_near: Vec<GpsPoint> = track[0..40].to_vec();
+        let poly_far: Vec<GpsPoint> = track[150..190].to_vec();
+        let outings: HashMap<String, Outing> = [
+            (
+                "a".to_string(),
+                Outing {
+                    date: Some("2026-01-05"),
+                    points: &track,
+                },
+            ),
+            (
+                "b".to_string(),
+                Outing {
+                    date: Some("2026-03-05"),
+                    points: &track,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let near = candidate(
+            "near",
+            &poly_near,
+            vec![Member {
+                activity_id: "a",
+                traversals: vec![pass(5, 45, None)],
+            }],
+        );
+        let far = candidate(
+            "far",
+            &poly_far,
+            vec![
+                Member {
+                    activity_id: "a",
+                    traversals: vec![pass(150, 190, Some(0.9))],
+                },
+                Member {
+                    activity_id: "b",
+                    traversals: vec![pass(150, 190, Some(0.8))],
+                },
+            ],
+        );
+        let both = [near.clone(), far.clone()];
+
+        let measured = rank_features(&both, &outings, 100.0, None);
+        let mut pooled = measured.clone();
+        score_features(&mut pooled);
+        assert_eq!(pooled, rank(&both, &outings, 100.0, None));
+
+        // One context per candidate, the degenerate per-sport split.
+        for one in [near, far] {
+            let mut subset: Vec<(String, RankFeatures)> = measured
+                .iter()
+                .filter(|(id, _)| id == one.id)
+                .cloned()
+                .collect();
+            score_features(&mut subset);
+            assert_eq!(subset, rank(&[one], &outings, 100.0, None));
+        }
     }
 
     #[test]
