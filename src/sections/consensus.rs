@@ -271,15 +271,15 @@ pub fn build_accumulator_from_traces(
     accumulator
 }
 
+/// One traversal: the activity and its zero-based pass over the section.
+pub type TraceKey = (String, u32);
+
 /// Pre-built R-tree cache for new traces, shared across multiple
 /// `merge_traces_into_consensus_with_cache` calls within one detection
 /// pass. Use [`build_trace_rtree_cache`] to populate. Reusing this cache
 /// across multiple sections in the same incremental run amortises the
 /// R-tree construction cost, important when many sections are touched
 /// by the same handful of new activities.
-/// One traversal: the activity and its zero-based pass over the section.
-pub type TraceKey = (String, u32);
-
 pub type TraceRTreeCache = std::collections::HashMap<TraceKey, std::sync::Arc<RTree<IndexedPoint>>>;
 
 /// Build R-trees for every (id, points) pair in `traces`. Skips empty

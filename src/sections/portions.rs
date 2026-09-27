@@ -28,9 +28,6 @@ pub fn compute_activity_portions(
     compute_portions_over(representative_polyline, all_tracks, &candidates, config)
 }
 
-/// Track ids whose extent reaches the polyline's padded bounds, sorted. The
-/// complete input population of [`compute_portions_over`]: a track outside
-/// the padded bounds can contribute no portion.
 /// Raw bounding box of a track, `(lat0, lat1, lng0, lng1)`.
 pub(crate) fn track_bounds(track: &[GpsPoint]) -> (f64, f64, f64, f64) {
     let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
@@ -104,6 +101,9 @@ pub(crate) fn portions_per_track(
     }
 }
 
+/// Track ids whose extent reaches the polyline's padded bounds, sorted. The
+/// complete input population of [`compute_portions_over`]: a track outside
+/// the padded bounds can contribute no portion.
 pub(crate) fn portion_candidates<'a>(
     representative_polyline: &[GpsPoint],
     all_tracks: &std::collections::HashMap<&'a str, &[GpsPoint]>,
