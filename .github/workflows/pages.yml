@@ -30,9 +30,11 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # rust-toolchain.toml names the version, and this reads it from there.
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: tracematch-wasm

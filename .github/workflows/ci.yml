@@ -15,8 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml names the version, and this reads it from there.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
       - uses: swatinem/rust-cache@v2
+      # A stale lockfile used to surface at the publish dry run, eight minutes
+      # in. Resolving it first fails the same way in seconds.
+      - name: Fetch (locked)
+        run: cargo fetch --locked
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
@@ -37,8 +43,6 @@ jobs:
         run: cargo doc --no-deps --features synthetic
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: Test
-        run: cargo test
       # Every [[test]] in Cargo.toml with required-features = ["synthetic"] is
       # invisible to the default lane, which enables only `parallel`. They build
       # their corpora from `tracematch::synthetic`, and only that feature
@@ -60,9 +64,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # rust-toolchain.toml names the version, and this reads it from there.
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: tracematch-wasm
@@ -77,9 +83,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # rust-toolchain.toml names the version, and this reads it from there.
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: tracematch-wasm
@@ -117,7 +125,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml names the version, and this reads it from there.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
       - uses: swatinem/rust-cache@v2
       - name: Cache the GeoLife archive
         uses: actions/cache@v4

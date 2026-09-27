@@ -53,6 +53,12 @@ lto = true
 codegen-units = 1
 strip = false
 
+# Optimised dependencies in test builds. The veloq root declares the same
+# stanza, measured there on the synthetic tests, and like the release profile
+# this copy applies only when the crate is built standalone.
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 geo = "0.29"
 rstar = "0.12"
