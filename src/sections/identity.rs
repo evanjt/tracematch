@@ -25,12 +25,12 @@
 //!   It is a debounce, not a freeze: a genuinely sustained change still
 //!   applies (after `k`).
 //!
-//! Identity lives in the engine (veloqrs) in production; this is the lab-first
-//! prototype that proves the mechanism on the synthetic corpora before the
-//! stateful registry is built on top. The engine swaps the deterministic
-//! `s_<n>` mint here for its opaque `s_<ts>__<rand>` scheme and persists the
-//! state; the carry-forward structure is identical. Design:
-//! `~/.claude/plans/b2-identity-hysteresis-design.md`.
+//! In production the engine's (veloqrs) section registry holds a
+//! [`HysteresisState`] from this module, steps it and persists its state. The
+//! registry keeps its own ids beside the deterministic `s_<n>` keys minted
+//! here: a content id from the sport and the heart's cell with the next free
+//! ordinal, or a clock `s_<ts>__<seq>` for a section with no line. The
+//! carry-forward structure is identical.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -454,8 +454,9 @@ pub fn plan_identity_memo(
         .collect();
     let p_digest: Vec<u64> = prior.iter().map(|p| line_digest(&p.polyline)).collect();
     let c_digest: Vec<u64> = next.iter().map(|c| line_digest(&c.polyline)).collect();
-    // Only paid for when the size guard is on. Off, which is what ships, the
-    // tier test below short-circuits before either vector is read.
+    // Only paid for when the size guard is on. It is on by default
+    // (`merge_size_ratio` 0.3) and in the engine, so both vectors are built on
+    // every plan. At 0.0 the tier test below short-circuits before either is read.
     let guarded = params.merge_size_ratio > 0.0;
     let p_metres: Vec<f64> = if guarded {
         prior.iter().map(|p| polyline_metres(&p.polyline)).collect()

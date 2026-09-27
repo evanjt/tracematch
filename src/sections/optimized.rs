@@ -116,7 +116,8 @@ pub fn find_all_section_spans_in_route(
     dedupe_overlapping_spans(all_spans)
 }
 
-/// Remove overlapping spans, keeping the higher quality one when they conflict.
+/// Remove overlapping spans. Input is sorted by start index, and the first span
+/// wins a conflict: the quality field is never read.
 fn dedupe_overlapping_spans(
     spans: Vec<(usize, usize, f64, bool)>,
 ) -> Vec<(usize, usize, f64, bool)> {

@@ -1,8 +1,8 @@
 //! Progress callback for section detection phases.
 //!
-//! Implementations receive phase transitions and per-item progress updates
-//! during multi-scale section detection. Progress is emitted from parallel
-//! threads, so implementations must be `Send + Sync`.
+//! No detector in tracematch calls `on_phase` or `on_progress` today, so these
+//! types are a contract with no emitter: the Unified detector reports no
+//! phases through them. Implementations must be `Send + Sync`.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Detection phases, ordered by execution sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectionPhase {
-    /// Building R-tree spatial indices per track per scale
+    /// Building spatial indices
     BuildingRtrees,
-    /// Finding pairwise overlaps, O(N^2), dominates ~70% of detection time
+    /// Finding overlaps between tracks
     FindingOverlaps,
     /// Post-processing: fold splitting, heading/gradient splitting, merging, dedup
     Postprocessing,
