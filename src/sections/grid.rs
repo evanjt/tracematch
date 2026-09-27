@@ -41,7 +41,8 @@ impl CellGrid {
     }
 }
 
-/// Standard 2D Bresenham, 4-connected, every cell from start to end inclusive.
+/// Standard 2D Bresenham, 8-connected: a step can move x and y together, so
+/// the line takes diagonal steps. Every cell from start to end inclusive.
 pub(super) fn bresenham_cells(start: (i32, i32), end: (i32, i32)) -> Vec<(i32, i32)> {
     let (x0, y0) = start;
     let (x1, y1) = end;
