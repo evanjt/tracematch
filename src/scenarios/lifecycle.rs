@@ -330,24 +330,30 @@ impl<'a> CorpusGenerator<'a> {
             DirectionPick::Forward,
         );
 
-        // Bucket D: 3 activities with mixed character.
-        let bucket_d_delta = vec![
-            self.emit_overlap_activity(
-                "d",
-                now_day + 2,
-                "Run",
-                CorridorChoice::RunMain,
-                DirectionPick::Forward,
-            ),
-            self.emit_overlap_activity(
-                "d",
-                now_day + 3,
-                "Ride",
-                CorridorChoice::RideMain,
-                DirectionPick::Reverse,
-            ),
-            self.emit_one_off_activity("d", now_day + 4, "Ride"),
-        ];
+        // Bucket D: the configured count of activities with mixed character,
+        // cycling a forward run, a reverse ride and a one-off ride, one per day.
+        let bucket_d_delta: Vec<LifecycleActivity> = (0..self.config.bucket_d_delta_count)
+            .map(|i| {
+                let day = now_day + 2 + i as i64;
+                match i % 3 {
+                    0 => self.emit_overlap_activity(
+                        "d",
+                        day,
+                        "Run",
+                        CorridorChoice::RunMain,
+                        DirectionPick::Forward,
+                    ),
+                    1 => self.emit_overlap_activity(
+                        "d",
+                        day,
+                        "Ride",
+                        CorridorChoice::RideMain,
+                        DirectionPick::Reverse,
+                    ),
+                    _ => self.emit_one_off_activity("d", day, "Ride"),
+                }
+            })
+            .collect();
 
         let bucket_e_delta = self.emit_bucket(
             "e",
@@ -477,19 +483,13 @@ impl<'a> CorpusGenerator<'a> {
             if matches!(direction, DirectionPick::Reverse) {
                 canonical.reverse();
             }
-            // Approach segment heading toward the corridor start.
-            let start = canonical[0];
-            let approach_start = GpsPoint::with_elevation(
-                start.latitude + meters_to_deg_lat(400.0 * approach_heading.sin()),
-                start.longitude + meters_to_deg_lng(400.0 * approach_heading.cos(), start.latitude),
-                start.elevation.unwrap_or(300.0),
-            );
-            full.extend(generate_random_segment(
-                &approach_start,
-                350.0,
-                approach_heading + PI,
-                &mut self.rng,
-            ));
+            // Generated outward from the corridor start and reversed, so the
+            // approach ends where the corridor begins.
+            let mut approach =
+                generate_random_segment(&canonical[0], 350.0, approach_heading, &mut self.rng);
+            approach.reverse();
+            approach.pop();
+            full.extend(approach);
             let laps = if self.config.lapped_fraction > 0.0
                 && self.rng.r#gen::<f64>() < self.config.lapped_fraction
             {
@@ -715,6 +715,7 @@ fn generate_random_segment(
 
     let mut points = Vec::with_capacity(num_points + 1);
     let mut heading = initial_heading;
+    let base_elevation = start.elevation.unwrap_or(300.0);
     let mut current = *start;
     points.push(current);
 
@@ -722,7 +723,7 @@ fn generate_random_segment(
         heading += rng.gen_range(-0.3..0.3);
         let dlat = meters_to_deg_lat(POINT_SPACING_M * heading.sin());
         let dlng = meters_to_deg_lng(POINT_SPACING_M * heading.cos(), current.latitude);
-        let elev = current.elevation.unwrap_or(300.0) + 30.0 * (i as f64 * 0.01).sin();
+        let elev = base_elevation + 30.0 * (i as f64 * 0.01).sin();
         current = GpsPoint::with_elevation(current.latitude + dlat, current.longitude + dlng, elev);
         points.push(current);
     }
@@ -763,6 +764,27 @@ mod tests {
     }
 
     #[test]
+    fn tracks_have_no_jump_between_legs() {
+        let corpus = LifecycleCorpus::generate(&LifecycleConfig {
+            bucket_a_count: 10,
+            bucket_b_delta_count: 8,
+            bucket_d_delta_count: 3,
+            bucket_e_delta_count: 5,
+            parallel_street_count: 0,
+            lapped_fraction: 0.5,
+            gps_noise: GaussMarkovConfig {
+                sigma_meters: 0.0,
+                ..GaussMarkovConfig::default()
+            },
+            ..LifecycleConfig::default()
+        });
+        for (id, track) in corpus.tracks_through_e() {
+            let step = track.windows(2).map(polyline_length).fold(0.0, f64::max);
+            assert!(step <= POINT_SPACING_M * 1.01, "{id} jumps {step} m");
+        }
+    }
+
+    #[test]
     fn corpus_partitions_have_expected_counts() {
         let corpus = small_corpus();
         assert_eq!(corpus.bucket_a.len(), 10);
@@ -771,6 +793,44 @@ mod tests {
         assert_eq!(corpus.bucket_e_delta.len(), 5);
         // through_e should sum all of them plus the single C activity.
         assert_eq!(corpus.through_e().len(), 10 + 8 + 1 + 3 + 5);
+    }
+
+    #[test]
+    fn bucket_d_honours_its_configured_count() {
+        for count in [0usize, 1, 3, 8, 10] {
+            let cfg = LifecycleConfig {
+                bucket_a_count: 4,
+                bucket_b_delta_count: 3,
+                bucket_d_delta_count: count,
+                bucket_e_delta_count: 2,
+                parallel_street_count: 0,
+                ..LifecycleConfig::default()
+            };
+            let corpus = LifecycleCorpus::generate(&cfg);
+            assert_eq!(corpus.bucket_d_delta.len(), count);
+            assert_eq!(corpus.through_e().len(), 4 + 3 + 1 + count + 2);
+        }
+    }
+
+    #[test]
+    fn bucket_d_cycles_forward_run_reverse_ride_and_one_off() {
+        let cfg = LifecycleConfig {
+            bucket_a_count: 2,
+            bucket_b_delta_count: 2,
+            bucket_d_delta_count: 7,
+            bucket_e_delta_count: 2,
+            parallel_street_count: 0,
+            ..LifecycleConfig::default()
+        };
+        let d = LifecycleCorpus::generate(&cfg).bucket_d_delta;
+        let sports: Vec<&str> = d.iter().map(|a| a.sport_type.as_str()).collect();
+        assert_eq!(
+            sports,
+            ["Run", "Ride", "Ride", "Run", "Ride", "Ride", "Run"]
+        );
+        for pair in d.windows(2) {
+            assert!(pair[1].start_date_unix > pair[0].start_date_unix);
+        }
     }
 
     #[test]
@@ -945,5 +1005,21 @@ mod tests {
             assert_eq!(&e_ids[i], id, "ordering diverged at index {i}");
         }
         assert!(e_ids.len() > b_ids.len());
+    }
+
+    #[test]
+    fn random_segment_elevation_stays_within_the_sine_amplitude_of_its_start() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for length_m in [350.0, 2_500.0, 7_500.0] {
+            let start = GpsPoint::with_elevation(46.0, 7.0, 410.0);
+            let leg = generate_random_segment(&start, length_m, 0.0, &mut rng);
+            for (i, p) in leg.iter().enumerate() {
+                let elev = p.elevation.unwrap();
+                assert!(
+                    (elev - 410.0).abs() <= 30.0 + 1e-9,
+                    "point {i} of a {length_m} m leg is at {elev} m"
+                );
+            }
+        }
     }
 }

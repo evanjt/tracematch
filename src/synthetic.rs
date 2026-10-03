@@ -246,6 +246,25 @@ fn generate_random_segment(
     points
 }
 
+/// Points stepping from `from` to `to` at most `POINT_SPACING` apart, excluding `from`.
+fn straight_leg(from: &GpsPoint, to: &GpsPoint) -> Vec<GpsPoint> {
+    let steps = (approx_distance(from, to) / POINT_SPACING).ceil() as usize;
+    (1..=steps)
+        .map(|i| {
+            let t = i as f64 / steps as f64;
+            let elevation = match (from.elevation, to.elevation) {
+                (Some(a), Some(b)) => Some(a + (b - a) * t),
+                _ => None,
+            };
+            GpsPoint {
+                latitude: from.latitude + (to.latitude - from.latitude) * t,
+                longitude: from.longitude + (to.longitude - from.longitude) * t,
+                elevation,
+            }
+        })
+        .collect()
+}
+
 /// Add Gaussian GPS noise to a polyline.
 fn add_gps_noise(points: &[GpsPoint], sigma_meters: f64, rng: &mut StdRng) -> Vec<GpsPoint> {
     if sigma_meters <= 0.0 {
@@ -313,35 +332,19 @@ impl SyntheticScenario {
 
                     // Generate approach to corridor start
                     let approach_heading: f64 = rng.gen_range(0.0..(2.0 * PI));
-                    let approach_start = GpsPoint::new(
-                        corridor_polylines[ci][0].latitude
-                            + meters_to_deg_lat(
-                                corridor_config.approach_length * approach_heading.sin(),
-                            ),
-                        corridor_polylines[ci][0].longitude
-                            + meters_to_deg_lng(
-                                corridor_config.approach_length * approach_heading.cos(),
-                                corridor_polylines[ci][0].latitude,
-                            ),
-                    );
-
-                    let approach = generate_random_segment(
-                        &approach_start,
+                    // Generated outward from the corridor start and reversed, so the
+                    // leg ends where the corridor begins.
+                    let mut approach = generate_random_segment(
+                        &corridor_polylines[ci][0],
                         corridor_config.approach_length * 0.8,
-                        approach_heading + PI, // head toward corridor
+                        approach_heading,
                         &mut rng,
                     );
+                    approach.reverse();
+                    approach.pop();
 
-                    // Add approach (connect to corridor)
-                    if !full_track.is_empty() {
-                        // Connect previous portion to this approach
-                        let connector = generate_random_segment(
-                            full_track.last().unwrap(),
-                            200.0,
-                            rng.gen_range(0.0..(2.0 * PI)),
-                            &mut rng,
-                        );
-                        full_track.extend(connector);
+                    if let Some(last) = full_track.last().copied() {
+                        full_track.extend(straight_leg(&last, &approach[0]));
                     }
                     full_track.extend(approach);
 
@@ -631,6 +634,37 @@ mod tests {
             "Expected ~10km corridor, got {}m",
             length
         );
+    }
+
+    fn max_step_meters(track: &[GpsPoint]) -> f64 {
+        track
+            .windows(2)
+            .map(|w| approx_distance(&w[0], &w[1]))
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn tracks_have_no_jump_between_legs() {
+        let mut multi = SyntheticScenario::standard_cycling();
+        multi.corridors.push(CorridorConfig {
+            length_meters: 3_000.0,
+            overlap_fraction: 0.9,
+            pattern: CorridorPattern::Winding,
+            approach_length: 400.0,
+        });
+        multi.activity_count = 40;
+        for scenario in [
+            SyntheticScenario::standard_cycling(),
+            SyntheticScenario::long_sections(),
+            multi,
+        ] {
+            let bound = POINT_SPACING + 10.0 * scenario.gps_noise_sigma_meters;
+            let dataset = scenario.generate();
+            for (id, track) in &dataset.tracks {
+                let step = max_step_meters(track);
+                assert!(step <= bound, "{id} jumps {step} m, bound {bound} m");
+            }
+        }
     }
 
     #[test]
