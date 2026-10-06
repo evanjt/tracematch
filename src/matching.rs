@@ -450,7 +450,7 @@ pub fn calculate_checkpoint_match(
 }
 
 /// Calculate cumulative distances along a route.
-/// Returns a vector where dist[i] is the distance from start to point i.
+/// Returns a vector where `dist[i]` is the distance from start to point i.
 pub(crate) fn cumulative_distances(points: &[GpsPoint]) -> Vec<f64> {
     let mut distances = Vec::with_capacity(points.len());
     distances.push(0.0);
