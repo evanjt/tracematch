@@ -967,17 +967,6 @@
         minSectionLength,
         maxSectionLength,
         minActivities,
-        clusterTolerance: 80,
-        samplePoints: 50,
-        detectionMode: 'discovery',
-        includePotentials: true,
-        scalePresets: [
-          { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
-          { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
-          { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 }
-        ],
-        preserveHierarchy: true,
-        // Live under the unified detector.
         divergenceThreshold,
         poolSports,
       });

@@ -198,46 +198,19 @@ pub fn detect_sections(
         &tunables,
     );
 
-    // `UnifiedDetection` carries no serde derive, so mirror it here.
+    // `Detection` carries no serde derive, so mirror it here.
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct Detection {
+    struct DetectionJson {
         sections: Vec<tracematch::FrequentSection>,
         boundaries: Vec<tracematch::BoundaryRecord>,
     }
 
-    let out = Detection {
+    let out = DetectionJson {
         sections: detection.sections,
         boundaries: detection.boundaries,
     };
 
     let val = serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(val)
-}
-
-/// Find known sections within a GPS route.
-///
-/// Returns array of SectionMatch objects sorted by start_index.
-#[wasm_bindgen(js_name = "findSectionsInRoute")]
-pub fn find_sections_in_route(
-    route_json: &str,
-    sections_json: &str,
-    config_json: &str,
-) -> Result<JsValue, JsError> {
-    let route: Vec<tracematch::GpsPoint> =
-        serde_json::from_str(route_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let sections: Vec<tracematch::FrequentSection> =
-        serde_json::from_str(sections_json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let config: tracematch::SectionConfig = if config_json.is_empty() || config_json == "{}" {
-        tracematch::SectionConfig::default()
-    } else {
-        serde_json::from_str(config_json).map_err(|e| JsError::new(&e.to_string()))?
-    };
-
-    let matches = tracematch::find_sections_in_route(&route, &sections, &config);
-
-    let val = serde_wasm_bindgen::to_value(&matches).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(val)
 }
