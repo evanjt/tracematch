@@ -130,17 +130,6 @@ const sectionConfig = JSON.stringify({
   minSectionLength: 200,
   maxSectionLength: 200_000,
   minActivities: 3,
-  clusterTolerance: 80,
-  samplePoints: 50,
-  detectionMode: 'discovery',
-  includePotentials: true,
-  scalePresets: [
-    { name: 'short', minLength: 100, maxLength: 500, minActivities: 2 },
-    { name: 'medium', minLength: 500, maxLength: 2000, minActivities: 2 },
-    { name: 'long', minLength: 2000, maxLength: 5000, minActivities: 3 },
-    { name: 'extra_long', minLength: 5000, maxLength: 50000, minActivities: 3 },
-  ],
-  preserveHierarchy: false,
 });
 
 const tSec = performance.now();

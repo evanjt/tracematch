@@ -685,7 +685,7 @@ fn geojson_for_sections(
                 let round2 = |v: f64| (v * 100.0).round() / 100.0;
                 obj.insert("score".into(), serde_json::json!(round2(r.score)));
                 obj.insert("apex".into(), serde_json::json!(round2(r.apex)));
-                obj.insert("grade_pct".into(), serde_json::json!(round2(r.grade)));
+                obj.insert("grade_pct".into(), serde_json::json!(r.grade.map(round2)));
                 obj.insert("months".into(), serde_json::json!(r.months));
                 obj.insert("sinuosity".into(), serde_json::json!(round2(r.sinuosity)));
                 obj.insert("converge".into(), serde_json::json!(round2(r.converge)));
@@ -800,20 +800,20 @@ fn write_ranking_md(
         sections.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut out = String::new();
     out.push_str(&format!("# Interestingness ranking: {}\n\n", sport));
-    out.push_str("Score = equal-weight mean of seven percentile-normalised features.\n");
+    out.push_str("Score = equal-weight mean of eight percentile-normalised features.\n");
     out.push_str(
         "apex: share of outing roam at the section (was it the point of the ride).\n\
          grade: max sustained gradient over 300 m. months: distinct visit months.\n\
          sinu: 1 - chord/arc. conv: effective approach directions, counting only\n\
          outings not based within two matching tolerances of the section.\n\
          1way: direction purity. rec: days from last visit to the corpus head\n\
-         (fresher ranks higher).\n\n",
+         (fresher ranks higher). effort: mean pass effort percentile, neutral when unmeasured.\n\n",
     );
     out.push_str(
-        "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way | rec d |\n",
+        "| # | id | score | len m | visits | months | apex | grade% | sinu | conv | 1way | rec d | effort |\n",
     );
     out.push_str(
-        "|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|------:|\n",
+        "|--:|----|------:|------:|-------:|-------:|-----:|-------:|-----:|-----:|-----:|------:|-------:|\n",
     );
     for (i, (id, r)) in ranked.iter().enumerate() {
         let (len_m, visits) = by_id
@@ -821,7 +821,7 @@ fn write_ranking_md(
             .map(|s| (s.distance_meters, s.visit_count))
             .unwrap_or((0.0, 0));
         out.push_str(&format!(
-            "| {} | {} | {:.2} | {:.0} | {} | {} | {:.2} | {:.1} | {:.2} | {:.1} | {:.2} | {:.0} |\n",
+            "| {} | {} | {:.2} | {:.0} | {} | {} | {:.2} | {} | {:.2} | {:.1} | {:.2} | {:.0} | {} |\n",
             i + 1,
             id,
             r.score,
@@ -829,11 +829,13 @@ fn write_ranking_md(
             visits,
             r.months,
             r.apex,
-            r.grade,
+            r.grade
+                .map_or_else(|| "-".to_string(), |g| format!("{g:.1}")),
             r.sinuosity,
             r.converge,
             r.oneway,
             r.recency_days,
+            r.effort.map_or_else(|| "—".to_string(), |e| format!("{e:.4}")),
         ));
     }
     std::fs::write(path, out).ok();
@@ -1367,14 +1369,15 @@ fn main() {
                             .unwrap_or(0.0);
                         println!(
                             "    rank {:>2}  {}  score {:.2}  {:.0}m  months {}  apex {:.2}  \
-                             grade {:.1}%  sinu {:.2}  conv {:.1}  1way {:.2}  rec {:.0}d",
+                             grade {}%  sinu {:.2}  conv {:.1}  1way {:.2}  rec {:.0}d",
                             i + 1,
                             id,
                             r.score,
                             len_m,
                             r.months,
                             r.apex,
-                            r.grade,
+                            r.grade
+                                .map_or_else(|| "-".to_string(), |g| format!("{g:.1}")),
                             r.sinuosity,
                             r.converge,
                             r.oneway,

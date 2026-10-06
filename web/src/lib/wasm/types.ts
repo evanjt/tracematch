@@ -162,16 +162,7 @@ export interface Tunables {
 }
 
 // What detectSections returns.
-export interface UnifiedDetection {
+export interface Detection {
   sections: FrequentSection[];
   boundaries: BoundaryRecord[];
-}
-
-// SectionMatch has NO rename_all — stays snake_case
-export interface SectionMatch {
-  section_id: string;
-  start_index: number;
-  end_index: number;
-  match_quality: number;
-  same_direction: boolean;
 }
