@@ -144,14 +144,14 @@ pub fn compute_bounds(points: &[GpsPoint]) -> Bounds {
 /// filtering barometric and GPS noise between real rises.
 pub const ELEVATION_GAIN_HYSTERESIS_M: f64 = 3.0;
 
-/// Elevation gain (m) and net grade (%) of one real track slice.
+/// Elevation gain (m), loss (m) and net grade (%) of one real track slice.
 ///
 /// Returns `None` unless at least 90% of the points carry elevation.
 /// Elevations are conditioned by a 3-point mean, gain accumulates only
 /// when a rise clears [`ELEVATION_GAIN_HYSTERESIS_M`] above the last
-/// anchor, and grade is the net elevation change over the track's
+/// anchor and loss when a fall clears it, and grade is the net elevation change over the track's
 /// horizontal distance.
-pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
+pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64, f64)> {
     if points.len() < 2 {
         return None;
     }
@@ -170,7 +170,7 @@ pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
         })
         .collect();
 
-    let mut gain = 0.0;
+    let (mut gain, mut loss) = (0.0, 0.0);
     let mut anchor = smoothed[0];
     for &e in &smoothed[1..] {
         let delta = e - anchor;
@@ -178,6 +178,7 @@ pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
             gain += delta;
             anchor = e;
         } else if delta <= -ELEVATION_GAIN_HYSTERESIS_M {
+            loss -= delta;
             anchor = e;
         }
     }
@@ -187,13 +188,13 @@ pub fn elevation_stats(points: &[GpsPoint]) -> Option<(f64, f64)> {
         total_dist += haversine_distance(&w[0], &w[1]);
     }
     if total_dist < 1.0 {
-        return Some((gain, 0.0));
+        return Some((gain, loss, 0.0));
     }
     let first = points.iter().find_map(|p| p.elevation)?;
     let last = points.iter().rev().find_map(|p| p.elevation)?;
     let grade = ((last - first) / total_dist) * 100.0;
 
-    Some((gain, grade))
+    Some((gain, loss, grade))
 }
 
 #[cfg(test)]
@@ -216,7 +217,7 @@ mod tests {
     #[test]
     fn flat_track_reports_zero_gain_and_grade() {
         let pts = track(&[Some(500.0); 20]);
-        let (gain, grade) = elevation_stats(&pts).unwrap();
+        let (gain, _, grade) = elevation_stats(&pts).unwrap();
         assert_eq!(gain, 0.0);
         assert_eq!(grade, 0.0);
     }
@@ -225,7 +226,7 @@ mod tests {
     fn single_climb_reports_rise_and_positive_grade() {
         let elevs: Vec<Option<f64>> = (0..21).map(|i| Some(400.0 + i as f64 * 5.0)).collect();
         let pts = track(&elevs);
-        let (gain, grade) = elevation_stats(&pts).unwrap();
+        let (gain, _, grade) = elevation_stats(&pts).unwrap();
         // Smoothing halves the first and last steps; the middle rise survives.
         assert!((gain - 95.0).abs() < 5.0, "gain {gain}");
         assert!(grade > 4.0, "grade {grade}");
@@ -242,7 +243,7 @@ mod tests {
             })
             .collect();
         let pts = track(&elevs);
-        let (gain, _) = elevation_stats(&pts).unwrap();
+        let (gain, _, _) = elevation_stats(&pts).unwrap();
         assert!((40.0..=55.0).contains(&gain), "gain {gain}");
     }
 
@@ -250,9 +251,19 @@ mod tests {
     fn descent_reports_zero_gain_and_negative_grade() {
         let elevs: Vec<Option<f64>> = (0..21).map(|i| Some(600.0 - i as f64 * 5.0)).collect();
         let pts = track(&elevs);
-        let (gain, grade) = elevation_stats(&pts).unwrap();
+        let (gain, _, grade) = elevation_stats(&pts).unwrap();
         assert_eq!(gain, 0.0);
         assert!(grade < -4.0, "grade {grade}");
+    }
+
+    #[test]
+    fn descent_reports_loss_and_climb_reports_none() {
+        let down: Vec<Option<f64>> = (0..21).map(|i| Some(600.0 - i as f64 * 5.0)).collect();
+        let (_, loss, _) = elevation_stats(&track(&down)).unwrap();
+        assert!((loss - 95.0).abs() < 5.0, "loss {loss}");
+        let up: Vec<Option<f64>> = (0..21).map(|i| Some(400.0 + i as f64 * 5.0)).collect();
+        let (_, loss, _) = elevation_stats(&track(&up)).unwrap();
+        assert_eq!(loss, 0.0);
     }
 
     #[test]

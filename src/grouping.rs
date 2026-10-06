@@ -3,7 +3,7 @@
 //! This module provides functionality to group similar routes together
 //! using spatial indexing and Union-Find for efficient grouping.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::geo_utils::haversine_distance;
 use crate::grouping_filter::{
@@ -248,7 +248,7 @@ pub fn group_signatures_with_progress(
     on_progress(GROUPING_PHASE_COMPARING, total_pairs, total_pairs);
 
     let groups_map = uf.groups();
-    build_route_groups(groups_map, &sig_map)
+    build_route_groups(groups_map, &sig_map, config)
 }
 
 /// Group similar routes together and capture match info for each activity.
@@ -276,7 +276,7 @@ pub fn group_signatures_with_matches(
         .map(|s| (s.activity_id.as_str(), s))
         .collect();
 
-    compute_matches_and_split(&initial_groups, &sig_map, config)
+    compute_matches_and_split(&initial_groups, &sig_map, config, &HashSet::new())
 }
 
 /// Group signatures using parallel processing.
@@ -361,7 +361,7 @@ pub fn group_signatures_parallel(
     }
 
     let groups_map = uf.groups();
-    build_route_groups(groups_map, &sig_map)
+    build_route_groups(groups_map, &sig_map, config)
 }
 
 /// Group signatures in parallel and capture match info for each activity.
@@ -387,7 +387,7 @@ pub fn group_signatures_parallel_with_matches(
         .map(|s| (s.activity_id.as_str(), s))
         .collect();
 
-    compute_matches_and_split(&initial_groups, &sig_map, config)
+    compute_matches_and_split(&initial_groups, &sig_map, config, &HashSet::new())
 }
 
 /// Incremental grouping: efficiently add new signatures to existing groups.
@@ -424,7 +424,6 @@ pub fn group_incremental_with_matches(
     config: &MatchConfig,
 ) -> GroupingResult {
     use rayon::prelude::*;
-    use std::collections::HashSet;
 
     if new_signatures.is_empty() {
         return GroupingResult {
@@ -528,7 +527,8 @@ pub fn group_incremental_with_matches(
         .collect();
 
     let groups_map = uf.groups();
-    let groups = build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps);
+    let groups =
+        build_route_groups_with_existing_reps(groups_map, &sig_map, &existing_reps, config);
 
     let (touched, settled): (Vec<RouteGroup>, Vec<RouteGroup>) =
         groups.into_iter().partition(|g| {
@@ -537,7 +537,12 @@ pub fn group_incremental_with_matches(
                 .any(|id| new_ids.contains(id.as_str()))
         });
 
-    let mut result = compute_matches_and_split(&touched, &sig_map, config);
+    let kept_reps: HashSet<&str> = touched
+        .iter()
+        .filter(|g| existing_reps.get(&g.group_id) == Some(&g.representative_id))
+        .map(|g| g.group_id.as_str())
+        .collect();
+    let mut result = compute_matches_and_split(&touched, &sig_map, config, &kept_reps);
     result.groups.extend(settled);
     result.groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
     result
@@ -551,6 +556,7 @@ fn compute_matches_and_split(
     initial_groups: &[RouteGroup],
     sig_map: &HashMap<&str, &RouteSignature>,
     config: &MatchConfig,
+    kept_reps: &HashSet<&str>,
 ) -> GroupingResult {
     let mut final_groups: Vec<RouteGroup> = Vec::new();
     let mut activity_matches: HashMap<String, Vec<ActivityMatchInfo>> = HashMap::new();
@@ -565,27 +571,29 @@ fn compute_matches_and_split(
         };
 
         // Calculate match info for each activity using AMD-based matching
-        let matches: Vec<ActivityMatchInfo> = group
-            .activity_ids
-            .iter()
-            .filter_map(|activity_id| {
-                let activity_sig = sig_map.get(activity_id.as_str())?;
-                let result = compare_routes(activity_sig, representative_sig, config)?;
+        let mut group = group.clone();
+        let mut matches = measure_matches(&group.activity_ids, sig_map, representative_sig, config);
 
-                log::debug!(
-                    "tracematch: amd_match for {}: {:.1}% ({})",
-                    activity_id,
-                    result.match_percentage,
-                    result.direction
-                );
-
-                Some(ActivityMatchInfo {
-                    activity_id: activity_id.clone(),
-                    match_percentage: result.match_percentage,
-                    direction: result.direction,
-                })
-            })
-            .collect();
+        // A representative that fewer than MIN_SPLIT_GROUP_SIZE members reach would switch
+        // the split off, so a group built round it is never checked. Choose again, unless
+        // the representative was kept from an earlier run.
+        if !kept_reps.contains(group.group_id.as_str())
+            && matches
+                .iter()
+                .filter(|m| m.match_percentage >= SPLIT_THRESHOLD)
+                .count()
+                < MIN_SPLIT_GROUP_SIZE
+        {
+            let members: Vec<&str> = group.activity_ids.iter().map(String::as_str).collect();
+            let better = find_best_representative(&members, sig_map, config);
+            if better != group.representative_id
+                && let Some(better_sig) = sig_map.get(better.as_str())
+            {
+                matches = measure_matches(&group.activity_ids, sig_map, better_sig, config);
+                group.representative_id = better;
+            }
+        }
+        let group = &group;
 
         // Check if this group should be split
         let split_groups = split_divergent_routes(group, &matches, sig_map, config);
@@ -632,12 +640,42 @@ fn compute_matches_and_split(
     }
 }
 
+/// Match each member against a representative signature.
+fn measure_matches(
+    activity_ids: &[String],
+    sig_map: &HashMap<&str, &RouteSignature>,
+    representative_sig: &RouteSignature,
+    config: &MatchConfig,
+) -> Vec<ActivityMatchInfo> {
+    activity_ids
+        .iter()
+        .filter_map(|activity_id| {
+            let activity_sig = sig_map.get(activity_id.as_str())?;
+            let result = compare_routes(activity_sig, representative_sig, config)?;
+
+            log::debug!(
+                "tracematch: amd_match for {}: {:.1}% ({})",
+                activity_id,
+                result.match_percentage,
+                result.direction
+            );
+
+            Some(ActivityMatchInfo {
+                activity_id: activity_id.clone(),
+                match_percentage: result.match_percentage,
+                direction: result.direction,
+            })
+        })
+        .collect()
+}
+
 /// Build RouteGroup instances with full metadata from grouped activity IDs.
 fn build_route_groups(
     groups_map: BTreeMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
+    config: &MatchConfig,
 ) -> Vec<RouteGroup> {
-    build_route_groups_with_existing_reps(groups_map, sig_map, &HashMap::new())
+    build_route_groups_with_existing_reps(groups_map, sig_map, &HashMap::new(), config)
 }
 
 /// Build RouteGroup instances, preserving existing representatives when available.
@@ -646,17 +684,22 @@ fn build_route_groups_with_existing_reps(
     groups_map: BTreeMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
     existing_reps: &HashMap<String, String>,
+    config: &MatchConfig,
 ) -> Vec<RouteGroup> {
     groups_map
         .into_iter()
         .map(|(group_id, activity_ids)| {
-            // activity_ids is already sorted from union_find.groups()
-            // Preserve existing representative if still in group, otherwise use first (sorted)
+            // Preserve the existing representative while it is still a member.
+            // Otherwise the member that matches the others best represents the
+            // group: the sorted-first id says nothing about the track.
             let representative_id = existing_reps
                 .get(&group_id)
                 .filter(|rep| activity_ids.contains(rep))
                 .cloned()
-                .unwrap_or_else(|| activity_ids.first().cloned().unwrap_or_default());
+                .unwrap_or_else(|| {
+                    let members: Vec<&str> = activity_ids.iter().map(String::as_str).collect();
+                    find_best_representative(&members, sig_map, config)
+                });
 
             // Sentinel: route grouping doesn't know the sport. The caller
             // (engine, persistence, FFI) overrides with the authoritative
@@ -808,7 +851,7 @@ fn split_divergent_routes(
         .map(|m| m.activity_id.as_str())
         .collect();
 
-    let low_match: Vec<&str> = matches
+    let mut low_match: Vec<&str> = matches
         .iter()
         .filter(|m| m.match_percentage < SPLIT_THRESHOLD)
         .map(|m| m.activity_id.as_str())
@@ -824,6 +867,22 @@ fn split_divergent_routes(
     if high_match.len() < MIN_SPLIT_GROUP_SIZE {
         return vec![group.clone()];
     }
+
+    // A member the representative did not match at all has no percentage, but it is still a
+    // member. It joins the divergent side so the split never drops an activity.
+    let compared: HashSet<&str> = matches.iter().map(|m| m.activity_id.as_str()).collect();
+    low_match.extend(
+        group
+            .activity_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !compared.contains(id)),
+    );
+    debug_assert_eq!(
+        high_match.len() + low_match.len(),
+        group.activity_ids.len(),
+        "a split must keep every member"
+    );
 
     // Create original group (high match activities only)
     let original_group = RouteGroup {
@@ -866,19 +925,34 @@ fn split_divergent_routes(
     vec![original_group, split_group]
 }
 
+/// Members compared in `find_best_representative`. The comparison is quadratic in the
+/// members, so a larger group is thinned to this many, evenly spaced through its
+/// sorted ids.
+const REPRESENTATIVE_SAMPLE_SIZE: usize = 24;
+
 /// Find the best representative for a group of activities.
-/// Returns the activity with highest average checkpoint match to all others.
+/// Returns the activity with highest average checkpoint match to the others, which for
+/// a group over `REPRESENTATIVE_SAMPLE_SIZE` members is an evenly spaced sample of them.
 fn find_best_representative(
-    activity_ids: &[&str],
+    members: &[&str],
     sig_map: &HashMap<&str, &RouteSignature>,
     config: &MatchConfig,
 ) -> String {
-    if activity_ids.is_empty() {
+    if members.is_empty() {
         return String::new();
     }
-    if activity_ids.len() == 1 {
-        return activity_ids[0].to_string();
+    if members.len() == 1 {
+        return members[0].to_string();
     }
+    let sampled: Vec<&str>;
+    let activity_ids = if members.len() > REPRESENTATIVE_SAMPLE_SIZE {
+        sampled = (0..REPRESENTATIVE_SAMPLE_SIZE)
+            .map(|i| members[i * members.len() / REPRESENTATIVE_SAMPLE_SIZE])
+            .collect();
+        &sampled[..]
+    } else {
+        members
+    };
 
     let mut best_id = activity_ids[0];
     let mut best_avg_match = 0.0;
@@ -995,5 +1069,56 @@ mod middle_checkpoint_tests {
         let moving = straight_line(200);
 
         assert!(check_middle_points_match(&parked, &moving, 50.0));
+    }
+}
+
+#[cfg(test)]
+mod split_membership_tests {
+    use super::*;
+
+    fn group_of(ids: &[&str]) -> RouteGroup {
+        RouteGroup {
+            group_id: "g".to_string(),
+            representative_id: ids[0].to_string(),
+            activity_ids: ids.iter().map(|s| s.to_string()).collect(),
+            sport_type: "Run".to_string(),
+            bounds: None,
+            custom_name: None,
+            best_time: None,
+            avg_time: None,
+            best_pace: None,
+            best_activity_id: None,
+        }
+    }
+
+    fn matched(id: &str, pct: f64) -> ActivityMatchInfo {
+        ActivityMatchInfo {
+            activity_id: id.to_string(),
+            match_percentage: pct,
+            direction: crate::Direction::Same,
+        }
+    }
+
+    #[test]
+    fn a_member_that_failed_to_match_the_representative_stays_in_a_route() {
+        let group = group_of(&["a", "b", "c", "d", "e", "f"]);
+        let matches = vec![
+            matched("a", 100.0),
+            matched("b", 90.0),
+            matched("c", 90.0),
+            matched("d", 60.0),
+            matched("e", 75.0),
+        ];
+        let sig_map = HashMap::new();
+
+        let out = split_divergent_routes(&group, &matches, &sig_map, &MatchConfig::default());
+
+        assert_eq!(out.len(), 2, "the divergent members still split");
+        let mut ids: Vec<&str> = out
+            .iter()
+            .flat_map(|g| g.activity_ids.iter().map(String::as_str))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["a", "b", "c", "d", "e", "f"]);
     }
 }
