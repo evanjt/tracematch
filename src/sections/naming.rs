@@ -16,7 +16,7 @@
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 
-use super::identity::{CARRY_COVERAGE, GROUND_TOL_M};
+use super::identity::{CARRY_COVERAGE, COVERAGE_STEP_M, GROUND_TOL_M, resample_by_arc};
 
 /// Core floor: three ~100 m evidence cells, expressed through the ground
 /// tolerance anchor (`GROUND_TOL_M` is half a cell).
@@ -79,6 +79,8 @@ pub fn coverage_and_offset(core: &[GpsPoint], line: &[GpsPoint]) -> (f64, f64) {
     if core.is_empty() || line.is_empty() {
         return (0.0, f64::INFINITY);
     }
+    let core = &resample_by_arc(core, COVERAGE_STEP_M);
+    let line = &resample_by_arc(line, COVERAGE_STEP_M);
     let mut covered = 0usize;
     let mut offset_sum = 0.0;
     for s in core {

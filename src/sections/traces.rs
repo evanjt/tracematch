@@ -54,6 +54,8 @@ pub fn extract_activity_passes(
     let mut sequences: Vec<Vec<GpsPoint>> = Vec::new();
     let mut current_sequence: Vec<GpsPoint> = Vec::new();
     let mut gap_count = 0;
+    // Length of the current sequence up to and including its last near point.
+    let mut near_len = 0;
     const MAX_GAP: usize = super::TRACK_GAP_POINTS;
 
     for point in track {
@@ -72,24 +74,29 @@ pub fn extract_activity_passes(
             // Point is near section - reset gap counter
             gap_count = 0;
             current_sequence.push(*point);
+            near_len = current_sequence.len();
         } else {
             gap_count += 1;
             // Allow small gaps but still add the point if we're in a sequence
             if gap_count <= MAX_GAP && !current_sequence.is_empty() {
                 current_sequence.push(*point);
             } else if gap_count > MAX_GAP {
-                // End current sequence if valid
+                // End the sequence at its last near point; the trailing gap
+                // points are not part of the pass.
+                current_sequence.truncate(near_len);
                 if current_sequence.len() >= MIN_TRACE_POINTS {
                     sequences.push(std::mem::take(&mut current_sequence));
                 } else {
                     current_sequence.clear();
                 }
                 gap_count = 0;
+                near_len = 0;
             }
         }
     }
 
     // Don't forget the last sequence
+    current_sequence.truncate(near_len);
     if current_sequence.len() >= MIN_TRACE_POINTS {
         sequences.push(current_sequence);
     }
@@ -219,6 +226,62 @@ mod tests {
             1,
             "the collapse adapter serves callers that draw a single line"
         );
+    }
+
+    fn near_section(p: &GpsPoint, section: &[GpsPoint]) -> bool {
+        section.iter().any(|s| {
+            let dlat = (s.latitude - p.latitude) * 111_000.0;
+            let dlng = (s.longitude - p.longitude) * 111_000.0 * 0.7;
+            (dlat * dlat + dlng * dlng).sqrt() <= TRACE_PROXIMITY_THRESHOLD * 1.2
+        })
+    }
+
+    #[test]
+    fn a_pass_ends_at_its_last_near_point() {
+        let section = line(46.0, 46.005);
+        let track = line(46.0, 46.012);
+        let tree = build_rtree(&section);
+
+        let passes = extract_activity_passes(&track, &section, &tree);
+        assert_eq!(passes.len(), 1);
+        let last = passes[0].last().unwrap();
+        assert!(
+            near_section(last, &section),
+            "the pass must not carry off-section points past the section's end"
+        );
+    }
+
+    #[test]
+    fn trailing_off_points_do_not_make_a_short_run_a_pass() {
+        let section = line(46.0, 46.005);
+        let mut track = line(45.98, 45.99);
+        track.extend(line(46.0, 46.0).into_iter().take(1));
+        track.extend(line(46.02, 46.022));
+        let tree = build_rtree(&section);
+
+        assert!(extract_activity_passes(&track, &section, &tree).is_empty());
+    }
+
+    #[test]
+    fn a_short_gap_inside_a_pass_keeps_its_points() {
+        let section = line(46.0, 46.005);
+        let mut track = line(46.0, 46.002);
+        track.push(GpsPoint {
+            latitude: 46.0021,
+            longitude: 7.01,
+            elevation: None,
+        });
+        track.push(GpsPoint {
+            latitude: 46.0022,
+            longitude: 7.01,
+            elevation: None,
+        });
+        track.extend(line(46.0023, 46.005));
+        let tree = build_rtree(&section);
+
+        let passes = extract_activity_passes(&track, &section, &tree);
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].len(), track.len());
     }
 
     #[test]

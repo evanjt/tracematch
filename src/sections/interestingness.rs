@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::geo_utils::{ELEVATION_GAIN_HYSTERESIS_M, haversine_distance};
+use crate::geo_utils::haversine_distance;
 use crate::{Direction, GpsPoint};
 
 /// Window a gradient must hold to read as a climb rather than a spike:
@@ -108,40 +108,6 @@ pub struct Enrichment {
     pub klass: Option<SectionClass>,
     /// The line is carried ground (a lift) by its own geometry.
     pub is_lift: bool,
-}
-
-/// Elevation gain and loss with the same smoothing and hysteresis as the
-/// gain the detector already reports, so the two never disagree.
-fn elevation_gain_loss(points: &[GpsPoint]) -> Option<(f64, f64)> {
-    if points.len() < 2 {
-        return None;
-    }
-    let carrying = points.iter().filter(|p| p.elevation.is_some()).count();
-    if (carrying as f64) < 0.9 * points.len() as f64 {
-        return None;
-    }
-    let elevs: Vec<f64> = points.iter().filter_map(|p| p.elevation).collect();
-    let n = elevs.len();
-    let smoothed: Vec<f64> = (0..n)
-        .map(|i| {
-            let lo = i.saturating_sub(1);
-            let hi = (i + 1).min(n - 1);
-            elevs[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
-        })
-        .collect();
-    let (mut gain, mut loss) = (0.0, 0.0);
-    let mut anchor = smoothed[0];
-    for &e in &smoothed[1..] {
-        let delta = e - anchor;
-        if delta >= ELEVATION_GAIN_HYSTERESIS_M {
-            gain += delta;
-            anchor = e;
-        } else if delta <= -ELEVATION_GAIN_HYSTERESIS_M {
-            loss -= delta;
-            anchor = e;
-        }
-    }
-    Some((gain, loss))
 }
 
 /// Steepest absolute grade held over [`SUSTAIN_M`] (or the whole line
@@ -243,11 +209,11 @@ pub fn classify(
 /// without coverage; class stays None when neither terrain nor shape
 /// says anything.
 pub fn enrich(polyline: &[GpsPoint], distance_meters: f64) -> Enrichment {
-    let (gain, loss) = match elevation_gain_loss(polyline) {
-        Some((g, l)) => (Some(g), Some(l)),
-        None => (None, None),
+    let stats = crate::geo_utils::elevation_stats(polyline);
+    let (gain, loss, avg_grade) = match stats {
+        Some((g, l, grade)) => (Some(g), Some(l), Some(grade)),
+        None => (None, None, None),
     };
-    let avg_grade = crate::geo_utils::elevation_stats(polyline).map(|(_, grade)| grade);
     let max_grade = max_sustained_grade(polyline);
     let straight = straightness(polyline, distance_meters);
     let klass = classify(avg_grade, gain, loss, straight, distance_meters);
@@ -308,8 +274,8 @@ pub struct Outing<'a> {
 pub struct RankFeatures {
     /// Mean share of the outing's roam at which the line sits.
     pub apex: f64,
-    /// Steepest grade (%) held over [`SUSTAIN_M`], 0 without elevation.
-    pub grade: f64,
+    /// Steepest grade (%) held over [`SUSTAIN_M`], `None` without elevation.
+    pub grade: Option<f64>,
     /// Distinct calendar months with a visit.
     pub months: u32,
     /// 1 minus chord over arc.
@@ -320,7 +286,7 @@ pub struct RankFeatures {
     pub oneway: f64,
     /// Days from the newest visit to the newest outing anywhere.
     pub recency_days: f64,
-    /// Mean effort percentile over the passes that carried a sensor.
+    /// Mean effort percentile over all passes, with a sensorless pass at neutral.
     pub effort: Option<f64>,
     /// Equal-weight mean of the feature percentile ranks within the
     /// ranked set, 0..1. A set of one scores 0.5.
@@ -446,9 +412,7 @@ pub fn rank_features(
                     Direction::Reverse => rev += 1,
                     _ => {}
                 }
-                if let Some(e) = t.effort {
-                    efforts.push(e);
-                }
+                efforts.push(t.effort.unwrap_or(0.5));
             }
             let Some(o) = outings.get(m.activity_id) else {
                 continue;
@@ -531,7 +495,7 @@ pub fn rank_features(
             c.id.to_string(),
             RankFeatures {
                 apex,
-                grade: max_sustained_grade(c.polyline).unwrap_or(0.0),
+                grade: max_sustained_grade(c.polyline),
                 months: months.len() as u32,
                 sinuosity,
                 converge,
@@ -579,7 +543,7 @@ fn score(feats: &mut [(String, RankFeatures)]) {
     }
     let cols: Vec<fn(&RankFeatures) -> Option<f64>> = vec![
         |f| Some(f.apex),
-        |f| Some(f.grade),
+        |f| f.grade,
         |f| Some(f.months as f64),
         |f| Some(f.sinuosity),
         |f| Some(f.converge),
@@ -720,6 +684,48 @@ mod tests {
         }
     }
 
+    /// Scenario: two otherwise identical lines, one flat with elevation and
+    /// one with no elevation stream.
+    /// Expected behaviour: the missing grade reads as neutral, not as flat.
+    #[test]
+    fn a_line_without_elevation_has_no_grade_rather_than_zero() {
+        let track = line(200, 0.0001, |_| Some(100.0));
+        let bare = line(200, 0.0001, |_| None);
+        let flat = candidate("flat", &track[5..45], vec![]);
+        let none = candidate("none", &bare[150..190], vec![]);
+        let ranked = rank(&[flat, none], &HashMap::new(), 100.0, None);
+        let by_id = |id: &str| &ranked.iter().find(|(i, _)| i == id).unwrap().1;
+        assert_eq!(by_id("flat").grade, Some(0.0));
+        assert_eq!(by_id("none").grade, None);
+    }
+
+    #[test]
+    fn each_pass_without_a_sensor_contributes_neutral_effort() {
+        let track = line(80, 0.0001, |_| None);
+        let outings = HashMap::new();
+        let mut passes = vec![pass(10, 50, Some(0.95))];
+        passes.extend((0..39).map(|_| pass(10, 50, None)));
+        let mixed = candidate(
+            "mixed",
+            &track[10..50],
+            vec![Member {
+                activity_id: "outing",
+                traversals: passes,
+            }],
+        );
+        let bare = candidate(
+            "bare",
+            &track[10..50],
+            vec![Member {
+                activity_id: "outing",
+                traversals: vec![pass(10, 50, None)],
+            }],
+        );
+        let measured = rank_features(&[mixed, bare], &outings, 50.0, None);
+        assert!((measured[0].1.effort.unwrap() - 0.51125).abs() < 1e-12);
+        assert_eq!(measured[1].1.effort, Some(0.5));
+    }
+
     #[test]
     fn scores_are_percentiles_that_favour_the_richer_line() {
         let track = line(200, 0.0001, |_| None);
@@ -771,7 +777,7 @@ mod tests {
         assert!(f.apex > ranked[1].1.apex);
         assert_eq!(f.months, 2);
         assert!((f.effort.unwrap() - 0.85).abs() < 1e-9);
-        assert_eq!(ranked[1].1.effort, None);
+        assert_eq!(ranked[1].1.effort, Some(0.5));
         assert!(ranked[0].1.score > ranked[1].1.score);
         assert!(ranked.iter().all(|(_, f)| (0.0..=1.0).contains(&f.score)));
         let again = rank(&[far, near], &outings, 100.0, None);

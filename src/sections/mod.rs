@@ -18,7 +18,6 @@ mod naming;
 pub mod optimized;
 mod overlap;
 mod portions;
-pub mod progress;
 mod rtree;
 mod traces;
 mod unified;
@@ -27,10 +26,6 @@ use crate::GpsPoint;
 use crate::matching::calculate_route_distance;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-pub use progress::{
-    AtomicProgressTracker, DetectionPhase, DetectionProgressCallback, NoopProgress,
-};
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
@@ -76,21 +71,17 @@ pub use naming::{
 };
 
 pub use unified::{
-    BoundaryReason, BoundaryRecord, CLUSTER_GAP_M, ClusterFootprint, POOLED_SPORT,
-    SectionEvidenceCache, SectionGeometryChange, SectionMergedAway, SectionUpdatePolicy, Tunables,
-    UnifiedDetection, UnifiedIncrementalResult, bbox_of, clamped_divergence, cluster_cell_size,
-    clusters_touched_by, confirmed_lift_spans_tuned, detect_sections, detect_sections_dated,
-    detect_sections_explained, detect_sections_incremental,
+    BoundaryReason, BoundaryRecord, CLUSTER_GAP_M, ClusterFootprint, Detection, FoldStopped,
+    IncrementalResult, POOLED_SPORT, SectionEvidenceCache, SectionGeometryChange,
+    SectionMergedAway, SectionUpdatePolicy, Tunables, bbox_of, clamped_divergence,
+    cluster_cell_size, clusters_touched_by, confirmed_lift_spans_tuned, detect_sections,
+    detect_sections_dated, detect_sections_explained, detect_sections_incremental,
     detect_sections_incremental_cached_with_policy, detect_sections_incremental_dated,
     detect_sections_incremental_observed, detect_sections_tuned, lift_spans, lift_spans_tuned,
     pool_for_fold, required_visits_for_length, same_traffic_share, self_pass_penalty,
 };
 
-// Re-export single-route section utilities (find known sections).
-pub use optimized::{
-    SectionMatch, find_all_section_spans_in_route, find_sections_in_route,
-    recalculate_section_polyline,
-};
+pub use optimized::recalculate_section_polyline;
 
 /// Scale name for multi-scale section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -157,7 +148,7 @@ pub struct SectionConfig {
     #[serde(default = "default_divergence_threshold")]
     pub divergence_threshold: f64,
     /// Detect over one pool rather than one per sport, so a road two
-    /// sports share carries the traversals of both. Unified only. The
+    /// sports share carries the traversals of both. The
     /// sport label is derived from the traversals after the cut.
     #[serde(default = "default_pool_sports")]
     pub pool_sports: bool,

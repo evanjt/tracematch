@@ -4,7 +4,6 @@
 //! between the unified cut and the consensus layer (`process_cluster` to
 //! `select_medoid` and `compute_consensus_polyline`).
 
-use crate::GpsPoint;
 use std::collections::HashSet;
 
 /// A detected overlap between two full GPS tracks.
@@ -18,10 +17,6 @@ pub struct FullTrackOverlap {
     pub range_a: (usize, usize),
     /// Index range into track B's original points (start..end)
     pub range_b: (usize, usize),
-    /// Center point for clustering
-    pub center: GpsPoint,
-    /// Pre-computed overlap length in meters
-    pub overlap_length: f64,
 }
 
 /// A cluster of overlaps representing the same physical section

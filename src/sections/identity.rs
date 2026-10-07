@@ -73,7 +73,43 @@ pub const DISSOLVE_PRESSURE_HI: f64 = 0.7;
 /// normal backfill drip.
 pub const DEFAULT_K: u8 = 3;
 
-/// Fraction of `samples` within `tol_m` of any point on `line`. The directional
+/// Spacing of the points coverage is counted over. Well below
+/// [`GROUND_TOL_M`], so a covered fraction is a fraction of the line's length
+/// and not of its vertices, whatever the sampling density along it.
+pub const COVERAGE_STEP_M: f64 = 5.0;
+
+/// `line` re-sampled at equal arc-length steps of `step_m` (its first point
+/// and its last are kept), by linear interpolation between vertices. A line
+/// of fewer than two points, or a step that is not positive, is returned as
+/// it is.
+pub fn resample_by_arc(line: &[GpsPoint], step_m: f64) -> Vec<GpsPoint> {
+    if line.len() < 2 || step_m <= 0.0 {
+        return line.to_vec();
+    }
+    let mut out = vec![line[0]];
+    let mut next_at = step_m;
+    let mut run = 0.0;
+    for w in line.windows(2) {
+        let d = haversine_distance(&w[0], &w[1]);
+        while d > 0.0 && run + d >= next_at {
+            let t = (next_at - run) / d;
+            out.push(GpsPoint::new(
+                w[0].latitude + (w[1].latitude - w[0].latitude) * t,
+                w[0].longitude + (w[1].longitude - w[0].longitude) * t,
+            ));
+            next_at += step_m;
+        }
+        run += d;
+    }
+    let last = line[line.len() - 1];
+    if out.last() != Some(&last) {
+        out.push(last);
+    }
+    out
+}
+
+/// Fraction of the length of `samples` within `tol_m` of any point on `line`
+/// (`samples` is resampled by arc length first). The directional
 /// half of the coverage metric. Two empty grounds are indistinguishable, so
 /// both-empty is vacuously full coverage: a degenerate detector output carries
 /// its held copy instead of dissolving and re-minting an id every detect. One
@@ -85,6 +121,8 @@ fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
     if samples.is_empty() || line.is_empty() {
         return 0.0;
     }
+    let samples = &resample_by_arc(samples, COVERAGE_STEP_M);
+    let line = &resample_by_arc(line, COVERAGE_STEP_M);
     // Exact accelerator: bucket the line's points into a degree grid whose
     // cells span at least `tol_m` in both axes, so any line point within
     // tolerance of a sample must sit in the sample's 3x3 cell ring. The
@@ -948,8 +986,9 @@ impl HysteresisState {
     /// without re-deriving the graph. The fate carries the geometry contract:
     /// unless it is `CarriedFrozen`, the visible ground under that id is the
     /// candidate's polyline, and the caller's payload must follow it. The pure
-    /// layer's `s_<n>` id is the join key; the caller keeps the opaque
-    /// `s_<ts>__<rand>` id it persists on the side.
+    /// layer's `s_<n>` id is the join key; the caller keeps the content id it
+    /// persists on the side (sport and heart cell with the next free ordinal,
+    /// or a clock id for a section with no line).
     ///
     /// `loses(id, j)` is the caller's half of the agreement floor: whether
     /// adopting candidate `j` under held id `id` would lose evidence the pure
@@ -1433,6 +1472,8 @@ mod tests {
         if samples.is_empty() || line.is_empty() {
             return 0.0;
         }
+        let samples = resample_by_arc(samples, COVERAGE_STEP_M);
+        let line = &resample_by_arc(line, COVERAGE_STEP_M);
         let covered = samples
             .iter()
             .filter(|s| line.iter().any(|p| haversine_distance(s, p) <= tol_m))
@@ -1545,13 +1586,81 @@ mod tests {
         assert!(plan.retired.is_empty());
     }
 
+    // A north-heading line through the given metre marks along its length.
+    fn line_at_metres(lat0: f64, lng0: f64, marks: impl Iterator<Item = f64>) -> Vec<GpsPoint> {
+        marks
+            .map(|m| GpsPoint::new(lat0 + m / 111_132.0, lng0))
+            .collect()
+    }
+
+    fn stepped(from: f64, to: f64, step: f64) -> impl Iterator<Item = f64> {
+        let n = ((to - from) / step).round() as usize;
+        (0..=n).map(move |i| from + i as f64 * step)
+    }
+
+    #[test]
+    fn split_inheritance_follows_metres_of_ground_not_vertex_count() {
+        // The prior is 20 m between vertices over its first 2.4 km and 6 m
+        // over its last 0.6 km. Its 1.4 km middle holds more of the ground
+        // than its 0.55 km tail, but the tail holds more of the vertices.
+        let prior_line = line_at_metres(
+            46.0,
+            7.0,
+            stepped(0.0, 2400.0, 20.0).chain(stepped(2406.0, 3000.0, 6.0)),
+        );
+        let middle = line_at_metres(46.0, 7.0, stepped(800.0, 2200.0, 10.0));
+        let tail = line_at_metres(46.0, 7.0, stepped(2450.0, 3000.0, 10.0));
+        let prior = vec![prior("s_1", prior_line, 1, 9)];
+        let next = vec![cand(tail, 4), cand(middle, 4)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions,
+            vec![
+                Decision::Mint {
+                    split_from: Some("s_1".into())
+                },
+                Decision::SplitInherit { id: "s_1".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn split_inheritance_on_uniform_sampling_still_follows_the_longer_piece() {
+        let prior_line = line_at_metres(46.0, 7.0, stepped(0.0, 3000.0, 10.0));
+        let middle = line_at_metres(46.0, 7.0, stepped(800.0, 2200.0, 10.0));
+        let tail = line_at_metres(46.0, 7.0, stepped(2450.0, 3000.0, 10.0));
+        let prior = vec![prior("s_1", prior_line, 1, 9)];
+        let next = vec![cand(tail, 4), cand(middle, 4)];
+        let plan = plan_identity(&prior, &next);
+        assert_eq!(
+            plan.decisions[1],
+            Decision::SplitInherit { id: "s_1".into() }
+        );
+    }
+
+    #[test]
+    fn coverage_counts_ground_not_vertices() {
+        let uneven = line_at_metres(
+            46.0,
+            7.0,
+            stepped(0.0, 2400.0, 20.0).chain(stepped(2406.0, 3000.0, 6.0)),
+        );
+        let even = line_at_metres(46.0, 7.0, stepped(0.0, 3000.0, 10.0));
+        let first_half = line_at_metres(46.0, 7.0, stepped(0.0, 1500.0, 10.0));
+        let a = coverage(&uneven, &first_half, GROUND_TOL_M);
+        let b = coverage(&even, &first_half, GROUND_TOL_M);
+        assert!((a - b).abs() < 0.01, "uneven {a} vs even {b}");
+    }
+
     #[test]
     fn split_tie_break_is_total_and_order_free() {
         // Left half and right half of P: equal mutual overlap, equal metres,
         // equal visits. The only separator is the SW corner (smaller longitude),
         // so the western piece must inherit regardless of input order.
         let p = line(46.0, 7.0, 100);
-        let west: Vec<GpsPoint> = p[..50].to_vec();
+        // The halves share the middle vertex, so they are mirror images and
+        // cover equal lengths of the prior.
+        let west: Vec<GpsPoint> = p[..=50].to_vec();
         let east: Vec<GpsPoint> = p[50..].to_vec();
         let prior = vec![prior("s_1", p, 1, 9)];
 
