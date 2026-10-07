@@ -7249,6 +7249,8 @@ fn fold_by_sport(
         &mut cache.leaves.coverage,
     );
     phase!("resolve", t_resolve);
+    // Clearing a flag on every cluster does not depend on the order they are visited in.
+    #[allow(clippy::iter_over_hash_type)]
     for clusters in cache.sports.values_mut() {
         for c in clusters.iter_mut() {
             c.awaiting_resolve = false;
