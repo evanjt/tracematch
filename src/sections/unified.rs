@@ -74,12 +74,15 @@
 //!
 //! | Rule | Function |
 //! |------|----------|
-//! | 1 evidence grid | [`build_coverage_grid`], with lift ground removed by [`confirmed_lift_spans`] |
+//! | 1 evidence grid | [`build_coverage_grid`], whose build ([`build_coverage_grid_from`]) drops lift ground with [`lift_spans_tuned`] and restores confirmed ground with [`rescue_confirmed`] |
 //! | 2 traffic partition | [`partition_supernodes`] (per sport or pooled via [`partition_pooled`]) |
 //! | 3 visible boundaries | [`merge_non_fork_boundaries`], explained by [`explain_boundaries`] |
 //! | 4 support | [`has_support`] and [`required_visits_for_length`] |
 //! | 5 one real trace | [`simple_pass_range`] per member, [`render_leaf`] for the line |
 //! | 6 selection backoff | the candidate loop in [`detect_for_cluster_with_grid`] |
+//! | 7 chain-coherent references | [`unify_chain_references`] |
+//! | 8 lift exclusion | [`lift_spans_tuned`], confirmed across tracks by [`confirmed_lift_spans_tuned`] |
+//! | 9 reasons as data | [`BoundaryRecord`], filled by [`explain_boundaries`] |
 //! | passes and membership | [`LineMatcher`] through [`super::portions::track_portions`] |
 //!
 //! The source keeps the older physical order (lift functions first, the
@@ -94,6 +97,7 @@ use crate::union_find::UnionFind;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
 type Cell = (i32, i32);
 
@@ -290,7 +294,7 @@ pub enum BoundaryReason {
 }
 
 /// A detection outcome that carries its explanations.
-pub struct UnifiedDetection {
+pub struct Detection {
     pub sections: Vec<FrequentSection>,
     pub boundaries: Vec<BoundaryRecord>,
 }
@@ -2434,12 +2438,42 @@ pub(super) struct LineMatcher {
     grid: CellGrid,
     pass_grid: CellGrid,
     core: HashSet<Cell>,
+    /// The core grown by the lateral tolerance, in whole cells: where a
+    /// pass may begin and end, and how far from the line it may run.
+    reach: HashSet<Cell>,
+    reach_cells: i32,
     dilated: HashSet<Cell>,
     min_pass_m: f64,
 }
 
+/// `cells` and every cell within `rings` cells of one, square rings.
+fn grow_cells(cells: &HashSet<Cell>, rings: i32) -> HashSet<Cell> {
+    let side = (2 * rings + 1) as usize;
+    let mut grown: HashSet<Cell> = HashSet::with_capacity(cells.len() * side * side);
+    // Builds a set, so only membership survives.
+    #[allow(clippy::iter_over_hash_type)]
+    for c in cells {
+        for dy in -rings..=rings {
+            for dx in -rings..=rings {
+                grown.insert((c.0 + dy, c.1 + dx));
+            }
+        }
+    }
+    grown
+}
+
 impl LineMatcher {
     pub(super) fn new(line: &[GpsPoint], config: &SectionConfig) -> Self {
+        Self::with_lateral_tolerance(line, config, 0.0)
+    }
+
+    /// `lateral_m` is how far a pass may run from the line and still
+    /// count, rounded up to whole cells. Zero is the detection bar.
+    pub(super) fn with_lateral_tolerance(
+        line: &[GpsPoint],
+        config: &SectionConfig,
+        lateral_m: f64,
+    ) -> Self {
         let cell_size = cluster_cell_size(config);
         let ref_lat = line.first().map(|p| p.latitude).unwrap_or(0.0);
         let grid = CellGrid::new(cell_size, ref_lat);
@@ -2449,22 +2483,17 @@ impl LineMatcher {
             let b = grid.cell_of(w[1].latitude, w[1].longitude);
             core.extend(bresenham_cells(a, b));
         }
+        let reach_cells = (lateral_m.max(0.0) / cell_size).ceil() as i32;
+        let reach = grow_cells(&core, reach_cells);
         // One ring of jitter tolerance mid-run, as portions_for grants.
-        let mut dilated: HashSet<Cell> = HashSet::with_capacity(core.len() * 9);
-        // Builds a set, so only membership survives.
-        #[allow(clippy::iter_over_hash_type)]
-        for c in &core {
-            for dy in -1..=1i32 {
-                for dx in -1..=1i32 {
-                    dilated.insert((c.0 + dy, c.1 + dx));
-                }
-            }
-        }
+        let dilated = grow_cells(&reach, 1);
         let pass_grid = CellGrid::new(cell_size / Tunables::DEFAULT.pass_subgrid, ref_lat);
         Self {
             grid,
             pass_grid,
             core,
+            reach,
+            reach_cells,
             dilated,
             // The majority bar again, in metres: a line a couple of
             // cells long degenerates to "touched one cell" on the cell
@@ -2485,7 +2514,7 @@ impl LineMatcher {
             let mut s = run_s;
             let mut e = run_e;
             let in_core = |p: &GpsPoint| {
-                self.core
+                self.reach
                     .contains(&self.grid.cell_of(p.latitude, p.longitude))
             };
             while s < e && !in_core(&track[s]) {
@@ -2502,12 +2531,21 @@ impl LineMatcher {
                 if end <= start + 1 {
                     continue;
                 }
-                let covered = track[start..end]
+                let pass_cells: HashSet<Cell> = track[start..end]
                     .iter()
                     .map(|p| self.grid.cell_of(p.latitude, p.longitude))
-                    .filter(|c| self.core.contains(c))
-                    .collect::<HashSet<_>>()
-                    .len();
+                    .collect();
+                // A core cell is covered when the pass has a cell within
+                // the lateral tolerance of it, so the count only rises
+                // with the tolerance.
+                let covered = if self.reach_cells == 0 {
+                    pass_cells.iter().filter(|c| self.core.contains(c)).count()
+                } else {
+                    grow_cells(&pass_cells, self.reach_cells)
+                        .iter()
+                        .filter(|c| self.core.contains(c))
+                        .count()
+                };
                 if 2 * covered >= self.core.len()
                     && crate::matching::calculate_route_distance(&track[start..end])
                         >= self.min_pass_m
@@ -2522,7 +2560,7 @@ impl LineMatcher {
 
 /// [`portions_for`] through the per-track leaf memo: the node's cell set
 /// is interned once, then each member track hits on its own complete
-/// fingerprint or computes via the same [`track_portion`] the direct path
+/// fingerprint or computes via the same [`track_portions`] the direct path
 /// uses. Observationally identical to [`portions_for`] (the warm/cold
 /// certificate pins it); on saturated ground a new activity leaves every
 /// existing member's entry valid and pays only for its own cut.
@@ -2743,7 +2781,7 @@ fn opportunity(leaves: &mut LeafMemos, node: &Supernode, coverage: &CoverageGrid
 /// compact, routine stretches over weeks.
 fn occasion_support(portions: &[Portion], epochs: &[Option<i64>]) -> (usize, Option<i64>, usize) {
     let mut days: HashSet<i64> = HashSet::with_capacity(portions.len());
-    let mut undated = 0usize;
+    let mut undated_tracks: HashSet<usize> = HashSet::new();
     let (mut lo, mut hi) = (i64::MAX, i64::MIN);
     for &(t, ..) in portions {
         match epochs[t] {
@@ -2752,9 +2790,12 @@ fn occasion_support(portions: &[Portion], epochs: &[Option<i64>]) -> (usize, Opt
                 lo = lo.min(e);
                 hi = hi.max(e);
             }
-            None => undated += 1,
+            None => {
+                undated_tracks.insert(t);
+            }
         }
     }
+    let undated = undated_tracks.len();
     let span = (days.len() >= 2).then(|| hi - lo);
     (undated + days.len(), span, undated)
 }
@@ -2909,7 +2950,7 @@ fn minority_run_m(
 /// coverage grid's one-ring tolerance would). An end run is clipped
 /// only when it is a genuine BRANCH, not a taper or a low-traffic
 /// continuation:
-///   * short, under [`BRANCH_MAX_M`] and a third of the line, so a
+///   * short, under `BRANCH_MAX_M` and a third of the line, so a
 ///     section with a genuinely lower-traffic half or a long tapering
 ///     end (uneven but legitimate support) is left whole;
 ///   * under half the line's median support, sustained past a lone
@@ -4030,18 +4071,11 @@ fn consensus_leaf(
     let anchor = portions[0];
     let anchor_id = sport_tracks[anchor.0].0.to_string();
     let anchor_range = (anchor.1, anchor.2);
-    let anchor_pts =
-        &sport_tracks[anchor.0].1[anchor.1..anchor.2.min(sport_tracks[anchor.0].1.len())];
-    let center = if anchor_pts.is_empty() {
-        GpsPoint::new(0.0, 0.0)
-    } else {
-        anchor_pts[anchor_pts.len() / 2]
-    };
 
     let mut overlaps: Vec<FullTrackOverlap> = Vec::with_capacity(portions.len());
     let mut activity_ids: HashSet<String> = HashSet::with_capacity(portions.len());
     activity_ids.insert(anchor_id.clone());
-    for &(t_idx, s, e, dist) in portions.iter().skip(1) {
+    for &(t_idx, s, e, _) in portions.iter().skip(1) {
         let other_id = sport_tracks[t_idx].0.to_string();
         activity_ids.insert(other_id.clone());
         overlaps.push(FullTrackOverlap {
@@ -4049,8 +4083,6 @@ fn consensus_leaf(
             activity_b: other_id,
             range_a: anchor_range,
             range_b: (s, e),
-            center,
-            overlap_length: dist.min(anchor.3),
         });
     }
     if overlaps.is_empty() {
@@ -4059,8 +4091,6 @@ fn consensus_leaf(
             activity_b: anchor_id,
             range_a: anchor_range,
             range_b: anchor_range,
-            center,
-            overlap_length: anchor.3,
         });
     }
 
@@ -5744,7 +5774,7 @@ pub fn detect_sections_explained(
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     tun: &Tunables,
-) -> UnifiedDetection {
+) -> Detection {
     detect_sections_dated(tracks, seconds, sport_types, &HashMap::new(), config, tun)
 }
 
@@ -5761,7 +5791,7 @@ pub fn detect_sections_dated(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     tun: &Tunables,
-) -> UnifiedDetection {
+) -> Detection {
     if config.pool_sports {
         let pooled = pooled_sports(tracks);
         let mut out = detect_by_sport(tracks, seconds, &pooled, start_epochs, config, tun);
@@ -5801,7 +5831,7 @@ fn detect_by_sport(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     tun: &Tunables,
-) -> UnifiedDetection {
+) -> Detection {
     const NO_TIME: &[f64] = &[];
     // Partition tracks per sport; sections never span sports.
     type SportTracks<'a> = (Vec<(&'a str, &'a [GpsPoint])>, Vec<&'a [f64]>);
@@ -5851,7 +5881,7 @@ fn detect_by_sport(
         all_sections.len(),
         boundaries.len()
     );
-    UnifiedDetection {
+    Detection {
         sections: all_sections,
         boundaries,
     }
@@ -5870,7 +5900,7 @@ fn detect_by_sport(
 /// identity, hysteresis) is the engine layer's job, not the detector's:
 /// this layer converges to the churny truth, the layer above presents it
 /// calmly.
-pub struct UnifiedIncrementalResult {
+pub struct IncrementalResult {
     /// The catalogue after the fold. Under the default policy this is the
     /// fresh detection verbatim (order and ids included), so it converges
     /// to [`detect_sections`] over `pool` exactly, order-free by
@@ -5883,14 +5913,6 @@ pub struct UnifiedIncrementalResult {
     /// prior partly covered, where a sibling inherited the prior) counts
     /// as added, from the caller's side it is a new list entry.
     pub added: Vec<FrequentSection>,
-    /// Parallel to [`added`](Self::added): the prior id each added section was
-    /// carved from when it is a split loser (it shares a prior's corridor but a
-    /// sibling inherited that prior), else `None`. The caller records lineage
-    /// ("split into X and Y") without re-deriving the graph. On this path the
-    /// prior ids are the caller's own section ids, so no id translation is
-    /// needed; it mirrors [`crate::sections::Decision::split_from`] on the visible
-    /// path so the lab replay and the engine see the same lineage.
-    pub added_split_from: Vec<Option<String>>,
     /// Prior sections whose ground decisively left the catalogue (the
     /// non-monotone case). Ground that survived under another id is in
     /// `merged`, not here.
@@ -5944,7 +5966,7 @@ pub struct SectionMergedAway {
 /// "Materially different" is an absolute one-evidence-cell test
 /// (`cluster_cell_size`) on endpoint shift or length delta: did the
 /// drawn line move perceptibly. The identity layer's
-/// [`RECUT_AGREEMENT`](super::identity::RECUT_AGREEMENT) asks a
+/// [`RECUT_AGREEMENT`] asks a
 /// different, proportional question (is this re-cut material relative to
 /// the extent, worth debouncing); the two thresholds are deliberately
 /// not unified.
@@ -6021,7 +6043,7 @@ pub struct SectionUpdatePolicy {
 /// (`gate_unified_incremental_converges_to_batch`) and to hand the engine
 /// layer a passing baseline to optimise UNDER. The optimisation, a
 /// persisted per-cluster evidence grid folded in O(cluster) per add -
-/// keeps this delta contract ([`UnifiedIncrementalResult`]) unchanged;
+/// keeps this delta contract ([`IncrementalResult`]) unchanged;
 /// only the body and an added evidence-cache handle change.
 pub fn detect_sections_incremental(
     existing: &[FrequentSection],
@@ -6029,8 +6051,8 @@ pub fn detect_sections_incremental(
     seconds: &[&[f64]],
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
-) -> UnifiedIncrementalResult {
-    let UnifiedDetection {
+) -> IncrementalResult {
+    let Detection {
         sections: fresh,
         boundaries,
     } = detect_sections_explained(pool, seconds, sport_types, config, &Tunables::DEFAULT);
@@ -6127,7 +6149,7 @@ fn pair_leftovers(
 /// Turn a freshly detected catalogue plus the caller's prior one into the
 /// fold outcome, honouring `policy`.
 ///
-/// Pairing is delegated to the identity layer's [`plan_identity`]: one
+/// Pairing is delegated to the identity layer's [`super::identity::plan_identity`]: one
 /// notion of "same section" across the crate, permutation-stable, split
 /// and merge aware. From the plan: a carried candidate is the prior's
 /// successor (a `changed` entry when the geometry moved by more than one
@@ -6254,7 +6276,7 @@ fn resolve_fold(
     config: &SectionConfig,
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
     coverage_memo: &mut HashMap<(u64, u64), (f64, f64)>,
-) -> UnifiedIncrementalResult {
+) -> IncrementalResult {
     use super::identity::{CandidateSection, IdentityParams, PriorSection, plan_identity_memo};
 
     // The identity plan pairs priors to candidates. Seniority (merge
@@ -6396,7 +6418,6 @@ fn resolve_fold(
     let reserved: HashSet<String> = frozen_out.iter().map(|s| s.id.clone()).collect();
     let mut catalogue: Vec<FrequentSection> = Vec::with_capacity(fresh.len());
     let mut added = Vec::new();
-    let mut added_split_from = Vec::new();
     for (j, mut cand) in fresh.into_iter().enumerate() {
         if suppressed[j] {
             continue;
@@ -6414,7 +6435,6 @@ fn resolve_fold(
             }
             None => {
                 added.push(cand.clone());
-                added_split_from.push(plan.decisions[j].split_from().map(str::to_string));
             }
         }
         catalogue.push(cand);
@@ -6422,10 +6442,9 @@ fn resolve_fold(
     catalogue.extend(frozen_out);
     reorient_portion_flags(&mut catalogue, tracks);
 
-    UnifiedIncrementalResult {
+    IncrementalResult {
         catalogue,
         added,
-        added_split_from,
         dissolved,
         merged,
         changed,
@@ -6542,7 +6561,7 @@ pub struct SectionEvidenceCache {
 /// drops the whole cache when a track's GPS changes) and the tunables are
 /// fixed for a cache's lifetime. A track's time stream is held to that same
 /// contract, but it is fetched separately and arrives after the points, so the
-/// one leaf that reads it keys on whether it had one ([`LiftKey`]) and not on
+/// one leaf that reads it keys on whether it had one and not on
 /// the id alone. Entries for supernode shapes that stop
 /// occurring linger until the cache is dropped: the population is bounded by
 /// the distinct configurations the evidence has actually taken, and the
@@ -6601,7 +6620,7 @@ struct LeafMemos {
     /// only the tracks the grid gained. Per process: generations are.
     #[serde(skip)]
     opportunities: HashMap<u32, (u64, usize, usize)>,
-    /// Per-track [`track_portion`] results keyed by (activity id, interned
+    /// Per-track [`track_portions`] results keyed by (activity id, interned
     /// cell set, lift-free keep ranges, projection, length bounds). Portions
     /// are computed per track independently, so on saturated ground a new
     /// activity leaves every existing track's entry valid and pays only for
@@ -6616,7 +6635,7 @@ struct LeafMemos {
     /// `(activity, start, end, penalty, run)` row per portion.
     #[allow(clippy::type_complexity)]
     render: HashMap<RenderKey, Vec<(String, usize, usize, f64, f64)>>,
-    /// Drawn-line recounts ([`compute_portions_over`]) with the intersecting
+    /// Drawn-line recounts ([`super::portions::compute_portions_over`]) with the intersecting
     /// track ids they were computed over. Replayed while that population is
     /// unchanged: a track outside the line's padded bounds contributes
     /// nothing, so a distant new activity cannot change the count.
@@ -6660,7 +6679,7 @@ type Bbox = (f64, f64, f64, f64);
 /// Per-track raw bounding box by activity id.
 type BoundsMemo = HashMap<String, Bbox>;
 
-/// Complete input fingerprint of one [`track_portion`] call: the activity,
+/// Complete input fingerprint of one [`track_portions`] call: the activity,
 /// the supernode's interned cell set, the track's lift-free keep ranges,
 /// the projection, and the config fields the cut reads.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6757,6 +6776,21 @@ impl SectionEvidenceCache {
             .sum()
     }
 
+    /// Member ids of the clusters recomputed since the last resolve step: what
+    /// a fold's resolve reads beside the ids it routed. A checkpoint carries
+    /// the mark, so a resumed fold reads the clusters its interrupted run cut.
+    #[doc(hidden)]
+    pub fn resolve_pending_members(&self) -> Vec<String> {
+        let mut sports: Vec<&String> = self.sports.keys().collect();
+        sports.sort_unstable();
+        sports
+            .into_iter()
+            .flat_map(|s| self.sports[s].iter())
+            .filter(|c| c.awaiting_resolve)
+            .flat_map(|c| c.member_ids.iter().cloned())
+            .collect()
+    }
+
     /// The cache without its memos or grids: what a checkpoint persists
     /// mid-fold, small enough to write after every cluster. A fold resumed
     /// from it cuts exactly the clusters still marked dirty and rebuilds the
@@ -6780,6 +6814,7 @@ impl SectionEvidenceCache {
                                 sections: c.sections.clone(),
                                 grid: None,
                                 dirty: c.dirty,
+                                awaiting_resolve: c.awaiting_resolve,
                             })
                             .collect(),
                     )
@@ -6842,6 +6877,12 @@ struct ClusterEvidence {
     /// recompute pass clears it before the call returns.
     #[serde(default)]
     dirty: bool,
+    /// Set when the cluster is recomputed and cleared once the resolve step has
+    /// read its members. Persisted in a checkpoint, so a fold resumed after an
+    /// interruption still knows which clusters its earlier run cut; a cache
+    /// written before the field existed reads as none awaiting.
+    #[serde(default)]
+    awaiting_resolve: bool,
 }
 
 impl ClusterEvidence {
@@ -6854,6 +6895,7 @@ impl ClusterEvidence {
             sections: Vec::new(),
             grid: None,
             dirty: false,
+            awaiting_resolve: false,
         }
     }
 
@@ -6892,7 +6934,7 @@ impl ClusterEvidence {
 /// `pool` is the full accumulated pool (the new activities included) and is the
 /// source of truth for every touched cluster's tracks; `new_activity_ids` names
 /// the just-arrived entries, so only the clusters they touch are recomputed.
-/// The delta ([`UnifiedIncrementalResult`]) is computed against `existing`
+/// The delta ([`IncrementalResult`]) is computed against `existing`
 /// exactly as the naive baseline does (ground overlap), so the two agree.
 ///
 /// The cache is mutated in place: a touched cluster is rebuilt fresh from its
@@ -6916,7 +6958,7 @@ pub fn detect_sections_incremental_cached_with_policy(
     sport_types: &HashMap<String, String>,
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
-) -> UnifiedIncrementalResult {
+) -> IncrementalResult {
     detect_sections_incremental_dated(
         cache,
         existing,
@@ -6945,8 +6987,8 @@ pub fn detect_sections_incremental_dated(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
-) -> UnifiedIncrementalResult {
-    detect_sections_incremental_observed(
+) -> IncrementalResult {
+    match detect_sections_incremental_observed(
         cache,
         existing,
         pool,
@@ -6956,15 +6998,34 @@ pub fn detect_sections_incremental_dated(
         start_epochs,
         config,
         policy,
-        &mut |_, _, _| {},
-    )
+        &mut |_, _, _| ControlFlow::Continue(()),
+    ) {
+        Ok(result) => result,
+        Err(_) => unreachable!("an observer that never breaks cannot stop the fold"),
+    }
+}
+
+/// A fold ended by its observer before every dirty cluster was cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldStopped {
+    /// Clusters cut before the stop.
+    pub done: usize,
+    /// Dirty clusters the fold started with.
+    pub total: usize,
 }
 
 /// [`detect_sections_incremental_dated`] that reports after each
 /// cluster it cuts: `(done, total, cache)`, the cache as it stands with
 /// that cluster clean. A caller persisting [`SectionEvidenceCache::checkpoint`]
 /// there can resume a killed fold with no new activities and cut only
-/// what is left. The report changes nothing about the fold.
+/// what is left.
+///
+/// `observe` returns [`ControlFlow::Break`] to stop the fold at that
+/// boundary: no further cluster is cut, the catalogue is not assembled or
+/// resolved, and the call returns [`FoldStopped`]. The cache stays as `observe`
+/// last saw it, every cut cluster clean and the rest dirty, so
+/// [`SectionEvidenceCache::checkpoint`] resumes from it. A fold whose observer
+/// never breaks is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_sections_incremental_observed(
     cache: &mut SectionEvidenceCache,
@@ -6976,8 +7037,8 @@ pub fn detect_sections_incremental_observed(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
-    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache),
-) -> UnifiedIncrementalResult {
+    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache) -> ControlFlow<()>,
+) -> Result<IncrementalResult, FoldStopped> {
     if config.pool_sports {
         let pooled = pooled_sports(pool);
         let mut out = fold_by_sport(
@@ -6991,7 +7052,7 @@ pub fn detect_sections_incremental_observed(
             config,
             policy,
             observe,
-        );
+        )?;
         relabel_sports(&mut out.catalogue, sport_types);
         relabel_sports(&mut out.added, sport_types);
         // `previous` on every delta, and every dissolved prior, came from
@@ -6999,7 +7060,7 @@ pub fn detect_sections_incremental_observed(
         for c in out.changed.iter_mut().chain(out.held.iter_mut()) {
             relabel_sports(std::slice::from_mut(&mut c.current), sport_types);
         }
-        return out;
+        return Ok(out);
     }
     fold_by_sport(
         cache,
@@ -7026,8 +7087,8 @@ fn fold_by_sport(
     start_epochs: &HashMap<String, i64>,
     config: &SectionConfig,
     policy: &SectionUpdatePolicy,
-    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache),
-) -> UnifiedIncrementalResult {
+    observe: &mut dyn FnMut(usize, usize, &SectionEvidenceCache) -> ControlFlow<()>,
+) -> Result<IncrementalResult, FoldStopped> {
     let tun = Tunables::DEFAULT;
     let cell_size = cluster_cell_size(config);
 
@@ -7128,9 +7189,13 @@ fn fold_by_sport(
                 start_epochs,
             );
             boundaries.extend(records);
-            cache.sports.get_mut(sport).expect("sport just listed")[ci].dirty = false;
+            let cluster = &mut cache.sports.get_mut(sport).expect("sport just listed")[ci];
+            cluster.dirty = false;
+            cluster.awaiting_resolve = true;
             done += 1;
-            observe(done, total, &*cache);
+            if observe(done, total, &*cache).is_break() {
+                return Err(FoldStopped { done, total });
+            }
         }
     }
 
@@ -7142,10 +7207,10 @@ fn fold_by_sport(
     let t_assemble = web_time::Instant::now();
     let assembled = assemble_catalogue(cache);
     phase!("assemble", t_assemble);
-    // The resolve step reads the members of every cluster, not only the ones this
-    // call recomputed: a fold resumed from a checkpoint finds the clusters it cut
-    // before the checkpoint already clean, and narrowing to this call's set gave
-    // it a different catalogue from the uninterrupted fold.
+    // The resolve step reads the members of every cluster recomputed since the
+    // last resolve, not only this call's: a fold resumed from a checkpoint finds
+    // the clusters it cut before the checkpoint already clean, and `dirty` no
+    // longer names them, so the mark that outlives the checkpoint does.
     // Built against the pool rather than filtered out of `lookup`, so a loader
     // that decodes on demand has a set to decode and not a map to shrink.
     let wanted = tracks_the_resolve_reads(
@@ -7153,6 +7218,7 @@ fn fold_by_sport(
         sport_names
             .iter()
             .flat_map(|sport| cache.sports[sport].iter())
+            .filter(|c| c.awaiting_resolve)
             .flat_map(|c| c.member_ids.iter().map(String::as_str)),
     );
     if std::env::var("TRACEMATCH_RESOLVE_SET_REPORT").is_ok() {
@@ -7183,7 +7249,12 @@ fn fold_by_sport(
         &mut cache.leaves.coverage,
     );
     phase!("resolve", t_resolve);
-    out
+    for clusters in cache.sports.values_mut() {
+        for c in clusters.iter_mut() {
+            c.awaiting_resolve = false;
+        }
+    }
+    Ok(out)
 }
 
 /// Raw lat/lng bounding box of a track: `(lat0, lat1, lng0, lng1)`.
@@ -7792,6 +7863,33 @@ mod tests {
                 GpsPoint::with_elevation(46.0 + step_deg * i as f64, 7.0 + lng, ele_step * i as f64)
             })
             .collect()
+    }
+
+    #[test]
+    fn occasion_support_counts_an_undated_lapped_track_once() {
+        let portions: Vec<Portion> = vec![
+            (0, 0, 10, 1.0),
+            (0, 20, 30, 1.0),
+            (0, 40, 50, 1.0),
+            (1, 0, 10, 1.0),
+        ];
+        let (occasions, span, undated) = occasion_support(&portions, &[None, None]);
+        assert_eq!((occasions, span, undated), (2, None, 2));
+    }
+
+    #[test]
+    fn occasion_support_counts_dated_laps_by_day_and_undated_by_track() {
+        let day = 86_400;
+        let portions: Vec<Portion> = vec![
+            (0, 0, 10, 1.0),
+            (0, 20, 30, 1.0),
+            (1, 0, 10, 1.0),
+            (2, 0, 10, 1.0),
+            (2, 20, 30, 1.0),
+        ];
+        let epochs = [Some(5 * day), Some(9 * day), None];
+        let (occasions, span, undated) = occasion_support(&portions, &epochs);
+        assert_eq!((occasions, span, undated), (3, Some(4 * day), 1));
     }
 
     #[test]
@@ -9366,8 +9464,9 @@ mod narrowed_pool_plan {
                 &HashMap::new(),
                 &SectionConfig::default(),
                 &SectionUpdatePolicy::default(),
-                &mut |_, _, _| {},
-            );
+                &mut |_, _, _| ControlFlow::Continue(()),
+            )
+            .unwrap();
             assert!(
                 !folded.catalogue.is_empty(),
                 "the corpus at {size} detected nothing, so the plan means nothing"
@@ -9389,7 +9488,7 @@ mod narrowed_pool_plan {
                 &HashMap::new(),
                 &SectionConfig::default(),
                 &SectionUpdatePolicy::default(),
-                &mut |_, _, _| {},
+                &mut |_, _, _| ControlFlow::Continue(()),
             );
 
             let wanted = plan(

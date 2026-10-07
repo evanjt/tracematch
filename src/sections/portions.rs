@@ -155,13 +155,23 @@ pub struct PreparedLine<'a> {
 impl<'a> PreparedLine<'a> {
     /// `None` for a line too short to match against.
     pub fn new(line: &'a [GpsPoint], config: &SectionConfig) -> Option<Self> {
+        Self::with_lateral_tolerance(line, config, 0.0)
+    }
+
+    /// As [`Self::new`], counting a pass that runs up to `lateral_m` metres
+    /// (rounded up to whole cells) beside the line.
+    pub fn with_lateral_tolerance(
+        line: &'a [GpsPoint],
+        config: &SectionConfig,
+        lateral_m: f64,
+    ) -> Option<Self> {
         if line.len() < 2 {
             return None;
         }
         Some(Self {
             line,
-            bounds: polyline_bounds(line, config.proximity_threshold),
-            matcher: LineMatcher::new(line, config),
+            bounds: polyline_bounds(line, config.proximity_threshold.max(lateral_m)),
+            matcher: LineMatcher::with_lateral_tolerance(line, config, lateral_m),
             ref_tree: build_rtree(line),
         })
     }
@@ -265,8 +275,8 @@ fn intersects_bounds(track: &[GpsPoint], bounds: &(f64, f64, f64, f64)) -> bool 
     })
 }
 
-/// A contiguous segment of a track that overlaps with the reference
-struct OverlapSegment {
+/// A contiguous run of track points that overlaps with the reference
+struct OverlapRun {
     start_idx: usize,
     end_idx: usize,
     distance: f64,
@@ -302,8 +312,8 @@ pub fn find_all_track_portions_with_gap(
     let threshold_deg_sq = threshold_deg * threshold_deg;
     let ref_length = calculate_route_distance(reference);
 
-    // Find all contiguous overlapping segments
-    let mut segments: Vec<OverlapSegment> = Vec::new();
+    // Find all contiguous overlapping runs
+    let mut runs: Vec<OverlapRun> = Vec::new();
     let mut current_start: Option<usize> = None;
     let mut gap_count = 0;
 
@@ -323,12 +333,12 @@ pub fn find_all_track_portions_with_gap(
         } else if current_start.is_some() {
             gap_count += 1;
             if gap_count > max_gap {
-                // End this segment
+                // End this run
                 let start = current_start.unwrap();
                 let end = i - gap_count;
                 if end > start {
                     let distance = calculate_route_distance(&track[start..end]);
-                    segments.push(OverlapSegment {
+                    runs.push(OverlapRun {
                         start_idx: start,
                         end_idx: end,
                         distance,
@@ -340,12 +350,12 @@ pub fn find_all_track_portions_with_gap(
         }
     }
 
-    // Handle final segment
+    // Handle final run
     if let Some(start) = current_start {
         let end = track.len() - gap_count.min(track.len() - start - 1);
         if end > start {
             let distance = calculate_route_distance(&track[start..end]);
-            segments.push(OverlapSegment {
+            runs.push(OverlapRun {
                 start_idx: start,
                 end_idx: end,
                 distance,
@@ -353,26 +363,23 @@ pub fn find_all_track_portions_with_gap(
         }
     }
 
-    if segments.is_empty() {
+    if runs.is_empty() {
         return Vec::new();
     }
 
     let min_distance = ref_length * 0.5;
     let mut results: Vec<(usize, usize, Direction)> = Vec::new();
 
-    for segment in &segments {
+    for run in &runs {
         // Try to split into individual laps (handles out-and-back, loops)
-        let laps = split_segment_into_laps(track, segment, reference, &ref_tree, ref_length);
+        let laps = split_run_into_laps(track, run, reference, &ref_tree, ref_length);
         if !laps.is_empty() {
             results.extend(laps);
-        } else if segment.distance >= min_distance {
+        } else if run.distance >= min_distance {
             // Fallback: single traversal (original behavior)
-            let direction = detect_direction_robust(
-                &track[segment.start_idx..segment.end_idx],
-                reference,
-                &ref_tree,
-            );
-            results.push((segment.start_idx, segment.end_idx, direction));
+            let direction =
+                detect_direction_robust(&track[run.start_idx..run.end_idx], reference, &ref_tree);
+            results.push((run.start_idx, run.end_idx, direction));
         }
     }
 
@@ -437,7 +444,7 @@ pub(crate) fn detect_direction_robust(
 }
 
 // ---------------------------------------------------------------------------
-// Lap splitting: detect individual passes within a contiguous overlap segment
+// Lap splitting: detect individual passes within a contiguous overlap run
 // ---------------------------------------------------------------------------
 
 /// Apply a 5-point moving median to smooth a sequence of reference indices.
@@ -456,23 +463,23 @@ fn moving_median(values: &[usize], window: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Split a contiguous overlap segment into individual laps.
+/// Split a contiguous overlap run into individual laps.
 /// Handles both linear sections (out-and-back) and loop sections (ovals/tracks).
 /// Returns empty if no multi-lap pattern is detected (caller should fall back).
-fn split_segment_into_laps(
+fn split_run_into_laps(
     track: &[GpsPoint],
-    segment: &OverlapSegment,
+    run: &OverlapRun,
     reference: &[GpsPoint],
     ref_tree: &RTree<IndexedPoint>,
     ref_length: f64,
 ) -> Vec<(usize, usize, Direction)> {
-    let seg_len = segment.end_idx - segment.start_idx;
-    if seg_len < 10 || reference.len() < 5 {
+    let run_len = run.end_idx - run.start_idx;
+    if run_len < 10 || reference.len() < 5 {
         return Vec::new();
     }
 
-    // 1. Map each track point in segment to nearest reference index
-    let ref_indices: Vec<usize> = (segment.start_idx..segment.end_idx)
+    // 1. Map each track point in run to nearest reference index
+    let ref_indices: Vec<usize> = (run.start_idx..run.end_idx)
         .map(|i| {
             let point = &track[i];
             let query = [point.latitude, point.longitude];
@@ -502,14 +509,14 @@ fn split_segment_into_laps(
         return Vec::new();
     }
 
-    // 5. Build sub-segments from boundary positions
+    // 5. Build sub-ranges from boundary positions
     let min_distance = ref_length * 0.5;
     let mut results = Vec::new();
 
     let mut split_points = Vec::with_capacity(boundary_positions.len() + 2);
     split_points.push(0usize);
     split_points.extend_from_slice(&boundary_positions);
-    split_points.push(seg_len);
+    split_points.push(run_len);
 
     for window in split_points.windows(2) {
         let local_start = window[0];
@@ -519,8 +526,8 @@ fn split_segment_into_laps(
             continue;
         }
 
-        let track_start = segment.start_idx + local_start;
-        let track_end = segment.start_idx + local_end;
+        let track_start = run.start_idx + local_start;
+        let track_end = run.start_idx + local_end;
 
         let distance = calculate_route_distance(&track[track_start..track_end]);
         if distance >= min_distance {
@@ -856,6 +863,67 @@ mod tests {
 
         assert!(PreparedLine::new(&reference[..1], &config).is_none());
         assert!(track_portions("a", &tracks[0].1, &reference[..1], &config).is_empty());
+    }
+
+    /// Scenario: a ride runs parallel to a straight line, offset east by a
+    /// whole number of metres, and the line is matched with an explicit
+    /// lateral tolerance.
+    /// Expected behaviour: the verdict only widens as the tolerance grows,
+    /// every offset inside the tolerance (less one cell of grid rounding)
+    /// counts, every offset beyond it (by a cell) does not, and the same
+    /// offset gets the same verdict wherever the line sits in the grid.
+    #[test]
+    fn lateral_tolerance_widens_the_verdict_monotonically_whatever_the_alignment() {
+        let config = SectionConfig::default();
+        let cell = line_match_cell_m(&config);
+        let m_per_deg_lat = 111_320.0;
+        let lat0: f64 = 46.2;
+        let m_per_deg_lon = m_per_deg_lat * lat0.to_radians().cos();
+        let build = |east_m: f64, align_m: f64| -> Vec<GpsPoint> {
+            (0..=110)
+                .map(|i| {
+                    GpsPoint::new(
+                        lat0 + (i as f64 * 20.0) / m_per_deg_lat,
+                        7.3 + (east_m + align_m) / m_per_deg_lon,
+                    )
+                })
+                .collect()
+        };
+        let passes = |tol: f64, offset: f64, align: f64| -> bool {
+            let line = build(0.0, align);
+            let ride = build(offset, align);
+            let prepared = PreparedLine::with_lateral_tolerance(&line, &config, tol)
+                .expect("a 111-point line prepares");
+            !prepared.portions("ride", &ride).is_empty()
+        };
+
+        let alignments = [0.0, cell * 0.25, cell * 0.5, cell * 0.75];
+        let tolerances = [0.0, 100.0, 200.0, 300.0, 400.0];
+        for &align in &alignments {
+            for offset in (0..=400).step_by(20).map(|o| o as f64) {
+                let mut seen = false;
+                for &tol in &tolerances {
+                    let now = passes(tol, offset, align);
+                    assert!(
+                        now || !seen,
+                        "offset {offset} at alignment {align} passed at a smaller tolerance and not at {tol}"
+                    );
+                    seen |= now;
+                    if offset + cell <= tol {
+                        assert!(
+                            now,
+                            "offset {offset} sits inside tolerance {tol} at alignment {align}"
+                        );
+                    }
+                    if offset >= tol + 2.0 * cell {
+                        assert!(
+                            !now,
+                            "offset {offset} sits beyond tolerance {tol} at alignment {align}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
