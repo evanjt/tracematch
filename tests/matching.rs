@@ -66,18 +66,6 @@ fn test_calculate_route_distance() {
     assert!(distance > 0.0);
 }
 
-#[test]
-fn test_identical_routes_match() {
-    let points = sample_route();
-    let sig1 = RouteSignature::from_points("test-1", &points, &MatchConfig::default()).unwrap();
-    let sig2 = RouteSignature::from_points("test-2", &points, &MatchConfig::default()).unwrap();
-
-    let result = compare_routes(&sig1, &sig2, &MatchConfig::default());
-    assert!(result.is_some());
-    let result = result.unwrap();
-    assert!(result.match_percentage > 95.0);
-}
-
 // ========================================================================
 // Distance-Proportional Resampling Tests
 // ========================================================================

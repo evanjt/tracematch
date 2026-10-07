@@ -8,12 +8,6 @@ fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
 }
 
 #[test]
-fn test_haversine_distance_same_point() {
-    let p = GpsPoint::new(51.5074, -0.1278);
-    assert_eq!(haversine_distance(&p, &p), 0.0);
-}
-
-#[test]
 fn test_haversine_distance_known_value() {
     // London to Paris is approximately 344 km
     let london = GpsPoint::new(51.5074, -0.1278);

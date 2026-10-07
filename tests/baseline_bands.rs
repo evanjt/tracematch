@@ -409,3 +409,39 @@ fn the_bare_switch_never_reaches_the_file() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), untouched);
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn a_missing_golden_is_refused_and_nothing_is_written() {
+    let path = std::env::temp_dir().join(format!("tracematch-absent-{}.txt", std::process::id()));
+    std::fs::remove_file(&path).ok();
+
+    let refused = std::panic::catch_unwind(|| {
+        let _guard = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+        check(&path, &["A fedcba9876543210".to_string()], &[], &band());
+    });
+
+    assert!(
+        refused.is_err(),
+        "an absent golden is not a first recording"
+    );
+    assert!(!path.exists(), "a refused check writes nothing");
+}
+
+#[test]
+fn a_first_recording_through_the_switch_carries_its_reason() {
+    let path = std::env::temp_dir().join(format!("tracematch-first-{}.txt", std::process::id()));
+    std::fs::remove_file(&path).ok();
+
+    with_switch("first recording of a new corpus", || {
+        check(&path, &["A fedcba9876543210".to_string()], &[], &band());
+    });
+
+    let written = std::fs::read_to_string(&path).unwrap();
+    let history = comment_lines(&written);
+    assert_eq!(history.len(), 1, "{written}");
+    assert!(
+        history[0].ends_with(", first recording of a new corpus"),
+        "{written}"
+    );
+    std::fs::remove_file(&path).ok();
+}
