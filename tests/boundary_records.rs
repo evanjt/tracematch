@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
     BoundaryReason, Detection, FrequentSection, GpsPoint, SectionConfig, Tunables,
-    detect_sections_explained,
+    detect_sections_dated, detect_sections_explained,
 };
 
 fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Detection {
@@ -19,6 +19,21 @@ fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Detection {
         tracks,
         &[],
         &shapes::pooled(tracks),
+        &SectionConfig::default(),
+        &Tunables::DEFAULT,
+    )
+}
+
+fn detect_dated(tracks: &[(String, Vec<GpsPoint>)], days: &[(&str, i64)]) -> Detection {
+    let starts: HashMap<String, i64> = days
+        .iter()
+        .map(|&(id, day)| (id.to_string(), day * 86_400 + 8 * 3_600))
+        .collect();
+    detect_sections_dated(
+        tracks,
+        &[],
+        &shapes::pooled(tracks),
+        &starts,
         &SectionConfig::default(),
         &Tunables::DEFAULT,
     )
@@ -432,6 +447,73 @@ fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
     assert!(
         haversine_distance(&at, &mid) < 200.0,
         "the record must sit on the dropped corridor"
+    );
+}
+
+/// Scenario: the candidate qualifies on four contributors across four
+/// days, and the drawn line admits the two through riders, who rode on
+/// the same day. Two activities meet the activity count but they are one
+/// visit to the ground.
+///
+/// Expected behaviour: the drawn population is held to the day floor the
+/// section had to clear to exist, so the section is dropped and the
+/// record counts days.
+#[test]
+fn a_drawn_population_on_one_day_is_recorded_and_dropped() {
+    let tracks = shapes::split_population_corridor(2);
+    let out = detect_dated(
+        &tracks,
+        &[
+            ("through_0", 100),
+            ("through_1", 100),
+            ("local_0", 110),
+            ("local_1", 120),
+            ("local_2", 130),
+        ],
+    );
+    assert!(
+        out.sections.is_empty(),
+        "two rides on one day must not stand: {:?}",
+        out.sections
+            .iter()
+            .map(|s| (&s.id, s.activity_ids.len()))
+            .collect::<Vec<_>>()
+    );
+    let rec = out
+        .boundaries
+        .iter()
+        .find(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. }))
+        .unwrap_or_else(|| panic!("no drawn-population record: {:?}", out.boundaries));
+    let BoundaryReason::DrawnPopulation { kept, floor } = rec.reason else {
+        unreachable!()
+    };
+    assert_eq!(kept, 1, "the through riders are one day");
+    assert_eq!(floor, 2, "the record names the floor in days");
+}
+
+/// The same corridor with the two through riders a fortnight apart
+/// reaches the day floor exactly, and stands.
+#[test]
+fn a_drawn_population_on_two_days_is_kept() {
+    let tracks = shapes::split_population_corridor(2);
+    let out = detect_dated(
+        &tracks,
+        &[
+            ("through_0", 100),
+            ("through_1", 114),
+            ("local_0", 110),
+            ("local_1", 120),
+            ("local_2", 130),
+        ],
+    );
+    assert_eq!(out.sections.len(), 1, "{:?}", out.boundaries);
+    assert_eq!(out.sections[0].activity_ids.len(), 2);
+    assert!(
+        !out.boundaries
+            .iter()
+            .any(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. })),
+        "{:?}",
+        out.boundaries
     );
 }
 
