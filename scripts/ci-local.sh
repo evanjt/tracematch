@@ -51,6 +51,8 @@ publish_dry_run() {
 
 started=$SECONDS
 
+step "Private data (fixtures)" scripts/test-check-no-private-data.sh
+step "Private data" scripts/check-no-private-data.sh --all
 step "Fetch (locked)" cargo fetch --locked
 step "Check formatting" cargo fmt --check
 step "Clippy" cargo clippy --all-targets --all-features -- -D warnings

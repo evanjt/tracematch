@@ -10,7 +10,7 @@
 #
 # Usage:
 #   INTERVALS_API_KEY=xxxxxxxx scripts/fetch_corpus.sh
-#   INTERVALS_API_KEY=xxxxxxxx scripts/fetch_corpus.sh --oldest 2024-01-01 --dest mycorpus
+#   INTERVALS_API_KEY=xxxxxxxx scripts/fetch_corpus.sh --oldest 2024-01-01 --dest ../fullcorpus
 #
 # Options (env or flag):
 #   INTERVALS_API_KEY   required, your key. Never pass it as a flag: flags land
@@ -19,7 +19,8 @@
 #                       the key's own athlete.
 #   --oldest DATE       earliest activity date, YYYY-MM-DD. Default 3 years ago.
 #   --newest DATE       latest activity date, YYYY-MM-DD. Default today.
-#   --dest DIR          output directory. Default "corpus".
+#   --dest DIR          output directory. Default "corpus", ignored at the root.
+#                       The tests read fullcorpus or citycorpus, by that name.
 #   --sport NAME        keep only this sport (e.g. Run, Ride). Default all.
 #   --limit N           stop after N activities. Default unlimited.
 #
@@ -42,7 +43,7 @@ while [ $# -gt 0 ]; do
     --dest)   DEST="$2";   shift 2 ;;
     --sport)  SPORT="$2";  shift 2 ;;
     --limit)  LIMIT="$2";  shift 2 ;;
-    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,7 +60,7 @@ for tool in curl jq; do
 done
 
 # The API takes HTTP Basic with the literal username API_KEY.
-auth() { curl -sS --fail-with-body -u "API_KEY:${INTERVALS_API_KEY}" "$@"; }
+auth() { curl -sS --compressed --fail-with-body -u "API_KEY:${INTERVALS_API_KEY}" "$@"; }
 
 mkdir -p "$DEST"
 
@@ -111,7 +112,7 @@ for id in $ids; do
 
   # Activities without GPS return an error rather than a track. That is normal
   # for indoor work, so it is counted and skipped rather than treated as fatal.
-  if auth -o "$out.part" "$API/activity/$id/gpx" 2>/dev/null && [ -s "$out.part" ] \
+  if auth -o "$out.part" "$API/activity/$id/gpx-file" 2>/dev/null && [ -s "$out.part" ] \
      && grep -q '<trkpt' "$out.part"; then
     mv "$out.part" "$out"
     got=$((got + 1))
@@ -125,8 +126,29 @@ printf '\n'
 
 echo "$got GPX files in $DEST/ ($skipped activities had no GPS)"
 echo
+
+# tests/corpus/mod.rs joins a corpus name onto TRACEMATCH_CORPUS, so the
+# variable names the directory above this one, and this one has to carry the
+# name a test asks for.
+parent="$(cd "$(dirname "$DEST")" && pwd)"
+name="$(basename "$DEST")"
+echo "The tests read a corpus by name from under TRACEMATCH_CORPUS: fullcorpus"
+echo "for the bitwise and drip gates, citycorpus for grouping and sections."
+case "$name" in
+  fullcorpus|citycorpus) ;;
+  *) echo "No test reads \"$name\", so rename it to one of those first." ;;
+esac
 echo "Point the tests at it with:"
-echo "  export TRACEMATCH_CORPUS=\"$(cd "$(dirname "$DEST")" && pwd)/$(basename "$DEST")\""
+echo "  export TRACEMATCH_CORPUS=\"$parent\""
 echo
-echo "This data is yours and stays local. It is gitignored, and"
-echo "scripts/check-no-private-data.sh refuses to stage it."
+
+top="$(git -C "$parent" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$top" ]; then
+  echo "This data is yours and stays local. It sits outside any repository."
+elif git -C "$parent" check-ignore -q "$name/"; then
+  echo "This data is yours and stays local. It is gitignored, and"
+  echo "scripts/check-no-private-data.sh refuses to stage it."
+else
+  echo "WARNING: $DEST/ is inside $top and is not gitignored, so one"
+  echo "\`git add .\` would commit it. Move it out, or ignore it first."
+fi

@@ -22,18 +22,22 @@ run() {
     output="$("$@" --no-fail-fast 2>&1)"
     local status=$?
     printf '%s\n' "$output"
-    local reported
-    reported="$(printf '%s\n' "$output" | grep -c '^test result:')"
-    if [ "$reported" -eq 0 ]; then
-        if [ "$status" -ne 0 ]; then
-            failed=$((failed + 1))
-        fi
-        return
-    fi
+    local before=$failed
     local counted
     counted="$(printf '%s\n' "$output" | awk '/^test result:/ { for (i = 1; i < NF; i++) if ($(i + 1) == "failed;" || $(i + 1) == "failed") sum += $i } END { print sum + 0 }')"
     failed=$((failed + counted))
+    # A binary killed by a signal prints no result line, so the tally alone misses it.
+    local signalled
+    signalled="$(printf '%s\n' "$output" | grep -c "process didn't exit successfully.*(signal:")"
+    failed=$((failed + signalled))
+    if [ "$status" -ne 0 ] && [ "$failed" -eq "$before" ]; then
+        failed=$((failed + 1))
+    fi
 }
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
 
 run "workspace" cargo test --workspace
 run "veloqrs synthetic" cargo test -p veloqrs --features synthetic
