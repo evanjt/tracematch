@@ -18,9 +18,10 @@
 #                         $TRACEMATCH_CORPUS, else the crate root.
 #   --out DIR             where the runs land. Default
 #                         ROOT/unified-lab/runs/<stamp>. Never the repository.
-#   --rebase              after a gate diverges, copy what it measured over
-#                         its golden, with a dated header line naming the
-#                         range. Without this the goldens are never written.
+#   --rebase              after a gate diverges, rerun it so the harness
+#                         writes the golden it compared to, with a dated
+#                         header line naming the range. Without this the
+#                         goldens are never written.
 #   --no-geolife          skip GeoLife, lab and gate.
 #   --no-gates            lab and tables only.
 #   --lab-args "..."      extra flags for every lab invocation, quoted.
@@ -277,6 +278,9 @@ run_gate() {
   echo
   echo "=== gate: $label"
   local build="${END_DIRS[-1]}"
+  # The gate is built in the B worktree for a range, so the golden it reads
+  # and rebases is named explicitly rather than taken from that tree.
+  set -- "$@" TRACEMATCH_GEOLIFE_GOLDEN="$GEOLIFE_GOLDEN"
   local pkg=()
   if [ "$build" = "$RUN_DIR" ]; then pkg=("${PKG[@]}"); fi
   (cd "$build" && env "$@" $(target_dir "$build") TRACEMATCH_BITWISE_RECORD="$record" \
@@ -290,8 +294,9 @@ run_gate() {
     return 1
   fi
   if [ ! -f "$golden" ]; then
-    echo "  no golden at $golden: the gate recorded one there on this run"
-    return 0
+    echo "  no golden at $golden: a missing golden is a failure, restore it or record it with TRACEMATCH_BITWISE_REBASE" >&2
+    failed=$((failed + 1))
+    return 1
   fi
   local digest_diff
   digest_diff="$(diff <(grep -vE '^(perf_|#)' "$golden") <(grep -vE '^(perf_|#)' "$record"))"
@@ -318,9 +323,15 @@ run_gate() {
       (cd "$build" && env "$@" $(target_dir "$build") \
           TRACEMATCH_BITWISE_REBASE="corpus_run.sh, $moved" \
           cargo test "${pkg[@]}" --release --features "$feature" --test "$target" -- --nocapture) \
-          >> "$dir/$label.log" 2>&1 \
-        && echo "  REBASED $golden" \
-        || echo "  the rebase run FAILED, see $dir/$label.log"
+          >> "$dir/$label.log" 2>&1
+      local rebase_status=$?
+      if [ "$rebase_status" -ne 0 ]; then
+        echo "  the rebase run FAILED, see $dir/$label.log"
+      elif grep '^# rebased' "$golden" | grep -qF "$moved"; then
+        echo "  REBASED $golden"
+      else
+        echo "  the rebase run passed but $golden carries no header naming $moved, nothing was rebased" >&2
+      fi
       case "$golden" in
         "$TM_DIR"/*) echo "    this golden is in the repository: commit it with the change that moved it" ;;
       esac

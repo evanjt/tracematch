@@ -108,3 +108,39 @@ fn comments_and_cost_lines_are_not_scenarios() {
     );
     baseline::check(&path, &digests(&["A 0000000000000001"]), &[], &BAND);
 }
+
+/// Scenario: a golden carrying a signed-off rebase is re-derived because the
+/// corpus changed shape.
+///
+/// Expected behaviour: the rebase line survives, a dated re-derived line naming
+/// both shapes sits at the head, and the new shape replaces the old one.
+#[test]
+fn re_deriving_on_a_new_shape_keeps_the_rebase_history() {
+    let path = golden(
+        "rederive",
+        "# rebased 2026-09-01, the memoised rescue pass\nC 10 500\nperf_cold_ms 100\n",
+    );
+    baseline::check_rederiving(&path, &digests(&["C 11 560"]), &[], &BAND);
+    let text = std::fs::read_to_string(&path).expect("read golden");
+    let comments = baseline::comment_lines(&text);
+    assert_eq!(comments.len(), 2, "{text}");
+    assert!(
+        comments[0].starts_with("# re-derived ")
+            && comments[0].ends_with(", corpus was C 10 500, now C 11 560"),
+        "{text}"
+    );
+    assert_eq!(
+        comments[1],
+        "# rebased 2026-09-01, the memoised rescue pass"
+    );
+    assert_eq!(baseline::digest_lines(&text), vec!["C 11 560"]);
+}
+
+#[test]
+fn re_deriving_a_missing_golden_adds_no_history() {
+    let path = golden("rederive-none", "");
+    std::fs::remove_file(&path).expect("remove golden");
+    baseline::check_rederiving(&path, &digests(&["C 11 560"]), &[], &BAND);
+    let text = std::fs::read_to_string(&path).expect("read golden");
+    assert!(baseline::comment_lines(&text).is_empty(), "{text}");
+}
