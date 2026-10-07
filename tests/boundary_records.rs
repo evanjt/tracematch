@@ -10,11 +10,11 @@ mod shapes;
 use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
-    BoundaryReason, FrequentSection, GpsPoint, SectionConfig, Tunables, UnifiedDetection,
+    BoundaryReason, Detection, FrequentSection, GpsPoint, SectionConfig, Tunables,
     detect_sections_explained,
 };
 
-fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> UnifiedDetection {
+fn detect(tracks: &[(String, Vec<GpsPoint>)]) -> Detection {
     detect_sections_explained(
         tracks,
         &[],

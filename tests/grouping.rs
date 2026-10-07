@@ -1,7 +1,7 @@
 //! Tests for grouping module
 
 use tracematch::grouping::*;
-use tracematch::{GpsPoint, MatchConfig, RouteSignature};
+use tracematch::{GpsPoint, GroupingResult, MatchConfig, RouteGroup, RouteSignature};
 
 fn create_long_route() -> Vec<GpsPoint> {
     // Create a route long enough to meet min_route_distance (500m)
@@ -206,4 +206,231 @@ fn test_grouping_load_order_independence() {
         get_reps(&result3),
         "Representatives differ for order 1 vs 3"
     );
+}
+
+const BASE_LAT: f64 = 47.0;
+const BASE_LNG: f64 = 8.0;
+
+/// A point `east` and `north` metres from the base, on a flat-earth approximation.
+fn offset_point(east: f64, north: f64) -> GpsPoint {
+    let metres_per_degree = 111_320.0;
+    GpsPoint::new(
+        BASE_LAT + north / metres_per_degree,
+        BASE_LNG + east / (metres_per_degree * BASE_LAT.to_radians().cos()),
+    )
+}
+
+/// Points every ~25 m along the polyline through `corners`.
+fn trace_through(corners: &[(f64, f64)]) -> Vec<GpsPoint> {
+    let mut points = Vec::new();
+    for pair in corners.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let length = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        let steps = (length / 25.0).ceil() as usize;
+        for step in 0..steps {
+            let t = step as f64 / steps as f64;
+            points.push(offset_point(
+                from.0 + (to.0 - from.0) * t,
+                from.1 + (to.1 - from.1) * t,
+            ));
+        }
+    }
+    let last = corners[corners.len() - 1];
+    points.push(offset_point(last.0, last.1));
+    points
+}
+
+/// A 2.5 km rectangular loop starting and ending at the origin.
+fn plain_loop_corners() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0),
+        (600.0, 0.0),
+        (600.0, 650.0),
+        (0.0, 650.0),
+        (0.0, 0.0),
+    ]
+}
+
+/// The same loop with a straight lead-in and lead-out of `lead` metres.
+fn loop_with_lead_corners(lead: f64) -> Vec<(f64, f64)> {
+    let mut corners = vec![(0.0, -lead)];
+    corners.extend(plain_loop_corners());
+    corners.push((0.0, -lead));
+    corners
+}
+
+fn signature(id: &str, corners: &[(f64, f64)], config: &MatchConfig) -> RouteSignature {
+    RouteSignature::from_points(id, &trace_through(corners), config).unwrap()
+}
+
+fn loop_recordings(config: &MatchConfig) -> Vec<RouteSignature> {
+    vec![
+        signature("a1", &loop_with_lead_corners(200.0), config),
+        signature("a2", &plain_loop_corners(), config),
+        signature("a3", &plain_loop_corners(), config),
+        signature("a4", &plain_loop_corners(), config),
+    ]
+}
+
+/// The loop with its north edge pushed `shift` metres north.
+fn loop_with_shifted_north_edge(shift: f64) -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0),
+        (600.0, 0.0),
+        (600.0, 650.0 + shift),
+        (0.0, 650.0 + shift),
+        (0.0, 0.0),
+    ]
+}
+
+/// `a1` and `a2` drift from the plain loop by different amounts, so `a1` joins the group
+/// only through `a2` and reads under the grouping threshold against `a3` and `a4`.
+fn chained_recordings(config: &MatchConfig) -> Vec<RouteSignature> {
+    vec![
+        signature("a1", &loop_with_shifted_north_edge(250.0), config),
+        signature("a2", &loop_with_shifted_north_edge(120.0), config),
+        signature("a3", &plain_loop_corners(), config),
+        signature("a4", &plain_loop_corners(), config),
+    ]
+}
+
+fn single_group(result: &GroupingResult) -> &RouteGroup {
+    assert_eq!(
+        result.groups.len(),
+        1,
+        "expected one route: {:?}",
+        result.groups
+    );
+    &result.groups[0]
+}
+
+fn assert_loop_represented_by_plain_recording(result: &GroupingResult) {
+    let group = single_group(result);
+    assert_eq!(group.activity_ids.len(), 4);
+    assert_ne!(
+        group.representative_id, "a1",
+        "the recording with the lead-in must not represent the route"
+    );
+}
+
+fn assert_chain_represented_by_member_others_match(result: &GroupingResult) {
+    let group = single_group(result);
+    assert_eq!(group.activity_ids.len(), 4);
+    assert_ne!(group.representative_id, "a1");
+    let matches = &result.activity_matches[&group.group_id];
+    for id in ["a2", "a3", "a4"] {
+        let read = matches
+            .iter()
+            .find(|m| m.activity_id == id)
+            .unwrap_or_else(|| panic!("{id} has no match against the representative"));
+        assert!(
+            read.match_percentage >= 80.0,
+            "{id} reads {}",
+            read.match_percentage
+        );
+    }
+}
+
+#[test]
+fn parallel_representative_is_not_the_sorted_first_recording_with_a_detour() {
+    let config = MatchConfig::default();
+    let result = group_signatures_parallel_with_matches(&loop_recordings(&config), &config);
+    assert_loop_represented_by_plain_recording(&result);
+}
+
+#[test]
+fn sequential_representative_is_not_the_sorted_first_recording_with_a_detour() {
+    let config = MatchConfig::default();
+    let result = group_signatures_with_matches(&loop_recordings(&config), &config);
+    assert_loop_represented_by_plain_recording(&result);
+}
+
+#[test]
+fn incremental_representative_is_not_the_sorted_first_recording_with_a_detour() {
+    let config = MatchConfig::default();
+    let far_away: Vec<GpsPoint> = (0..10)
+        .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
+        .collect();
+    let existing = vec![RouteSignature::from_points("far", &far_away, &config).unwrap()];
+    let existing_groups = group_signatures(&existing, &config);
+
+    let result = group_incremental_with_matches(
+        &loop_recordings(&config),
+        &existing_groups,
+        &existing,
+        &config,
+    );
+
+    let loop_group = result
+        .groups
+        .iter()
+        .find(|g| g.activity_ids.len() == 4)
+        .expect("the loop recordings form one route");
+    assert_ne!(loop_group.representative_id, "a1");
+}
+
+#[test]
+fn parallel_chained_group_is_represented_by_a_member_the_others_match() {
+    let config = MatchConfig::default();
+    let result = group_signatures_parallel_with_matches(&chained_recordings(&config), &config);
+    assert_chain_represented_by_member_others_match(&result);
+}
+
+#[test]
+fn incremental_chained_group_is_represented_by_a_member_the_others_match() {
+    let config = MatchConfig::default();
+    let far_away: Vec<GpsPoint> = (0..10)
+        .map(|i| GpsPoint::new(40.7128 + i as f64 * 0.001, -74.0060))
+        .collect();
+    let existing = vec![RouteSignature::from_points("far", &far_away, &config).unwrap()];
+    let existing_groups = group_signatures(&existing, &config);
+
+    let result = group_incremental_with_matches(
+        &chained_recordings(&config),
+        &existing_groups,
+        &existing,
+        &config,
+    );
+
+    let chain = result
+        .groups
+        .iter()
+        .find(|g| g.activity_ids.len() == 4)
+        .expect("the chained recordings form one route");
+    assert_ne!(chain.representative_id, "a1");
+}
+
+#[test]
+fn incremental_keeps_an_existing_representative_that_matches_poorly() {
+    let config = MatchConfig::default();
+    let existing = vec![
+        signature("a1", &loop_with_lead_corners(150.0), &config),
+        signature("a2", &plain_loop_corners(), &config),
+        signature("a3", &plain_loop_corners(), &config),
+    ];
+    let mut existing_groups = group_signatures(&existing, &config);
+    assert_eq!(existing_groups.len(), 1);
+    existing_groups[0].representative_id = "a1".to_string();
+    let new = vec![signature("a4", &plain_loop_corners(), &config)];
+
+    let result = group_incremental_with_matches(&new, &existing_groups, &existing, &config);
+
+    assert_eq!(single_group(&result).representative_id, "a1");
+}
+
+#[test]
+fn a_large_group_picks_its_representative_within_the_sample() {
+    let config = MatchConfig::default();
+    let mut recordings = vec![signature("a000", &loop_with_lead_corners(150.0), &config)];
+    for i in 1..60 {
+        recordings.push(signature(
+            &format!("a{i:03}"),
+            &plain_loop_corners(),
+            &config,
+        ));
+    }
+    let result = group_signatures_parallel_with_matches(&recordings, &config);
+    let group = single_group(&result);
+    assert_eq!(group.activity_ids.len(), 60);
+    assert_ne!(group.representative_id, "a000");
 }

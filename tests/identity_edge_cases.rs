@@ -12,7 +12,7 @@
 //! the veloqrs registry and the change emitter build on.
 
 use tracematch::geo_utils::haversine_distance;
-use tracematch::sections::{CARRY_COVERAGE, DEFAULT_K, GROUND_TOL_M, RECUT_AGREEMENT};
+use tracematch::sections::{CARRY_COVERAGE, DEFAULT_K, GROUND_TOL_M};
 use tracematch::{
     CandidateFate, CandidateSection, Decision, GpsPoint, HysteresisParams, HysteresisState,
     PriorSection, RetireReason, Retirement, StepOutcome, mutual_overlap, plan_identity,
@@ -204,15 +204,21 @@ fn k_zero_and_one_disable_debounce() {
 
 #[test]
 fn recut_agreement_boundary_is_inclusive() {
-    // 85 of 100 sparse points: coverage is exactly 85.0/100.0, the same f64 as
-    // the RECUT_AGREEMENT literal, so this pins the boundary as inclusive.
+    // The agreement threshold is set to exactly the mutual overlap of a
+    // chosen prefix, so the boundary is hit to the bit whatever the overlap
+    // is measured in. A prefix at the threshold adopts; one vertex shorter
+    // debounces.
     let full = sparse(46.0, 7.0, 100);
     let at: Vec<GpsPoint> = full[..85].to_vec();
     let below: Vec<GpsPoint> = full[..84].to_vec();
-    assert_eq!(mutual_overlap(&full, &at), RECUT_AGREEMENT);
-    assert!(mutual_overlap(&full, &below) < RECUT_AGREEMENT);
+    let boundary = mutual_overlap(&full, &at);
+    assert!(mutual_overlap(&full, &below) < boundary);
+    let params = HysteresisParams {
+        recut_agreement: boundary,
+        ..HysteresisParams::default()
+    };
 
-    let mut state = HysteresisState::default();
+    let mut state = HysteresisState::new(params);
     let (_, r) = state.step_assign(&[cand(full.clone(), 5)]);
     let id = r[0].id.clone();
     let (out, r) = state.step_assign(&[cand(at.clone(), 6)]);
@@ -225,7 +231,7 @@ fn recut_agreement_boundary_is_inclusive() {
     assert_eq!(state.pending_len(), 0);
     assert_eq!(state.ground_of(&id), Some(at.as_slice()));
 
-    let mut state = HysteresisState::default();
+    let mut state = HysteresisState::new(params);
     let (_, r) = state.step_assign(&[cand(full.clone(), 5)]);
     let id = r[0].id.clone();
     let (out, r) = state.step_assign(&[cand(below, 6)]);
@@ -993,7 +999,7 @@ fn a_diverging_prior_must_not_capture_a_neighbour_on_superseded_ground() {
 #[test]
 fn a_tail_carved_off_a_re_cutting_trunk_still_names_its_parent() {
     let corridor = sparse(46.0, 7.0, 100);
-    let head = corridor[..50].to_vec();
+    let head = corridor[..=50].to_vec();
     let tail = corridor[50..].to_vec();
 
     let mut state = HysteresisState::default();

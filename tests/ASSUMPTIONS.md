@@ -163,6 +163,40 @@ tie-break is therefore a guard against a case observed only in ordering
 audits, kept because the cost is one comparison and the failure it
 prevents is a catalogue that differs between runs on the same input.
 
+## Heart cells under GPS noise (2026-09-27)
+
+Measured on tracematch `bc1855e` through `detect_sections_dated`, with
+`SectionConfig::default()` and `Tunables::DEFAULT`. The synthetic lifecycle
+pool held 24 activities and 16,167 points, no initial noise, eight configured
+parallel-street activities and a 25 m street offset. Only bucket A was used.
+Each amplitude had three independent pairs of Gauss-Markov perturbations,
+seeds 1000 through 1005, time constant 30 s and sample interval 2 s. The
+amplitude is standard deviation per horizontal axis, not a maximum error.
+
+| Sigma (m) | Sections A / B | Paired | Heart cell changed | Fresh id changed |
+|---|---:|---:|---:|---:|
+| 0 | 21 / 21 | 21 | 0 | 0 |
+| 5 | 22 / 26 | 19 | 10 | 10 |
+| 10 | 34 / 37 | 23 | 9 | 10 |
+| 20 | 43 / 41 | 18 | 11 | 12 |
+| 25 | 51 / 43 | 23 | 15 | 15 |
+| 30 | 55 / 50 | 27 | 18 | 18 |
+| 40 | 65 / 58 | 30 | 25 | 25 |
+
+Counts sum the three pairs. Pairs are same-sport `shares_ground` matches,
+greedily assigned by nearest heart. Unpaired sections remain in the section
+totals; parallel corridors can make this pairing ambiguous. Fresh ids use
+Veloq's `content_id_for` function from `2bc7f2914`, extracted unchanged into
+the diagnostic, with a new taken set per catalogue. Total same-cell/sport
+collisions across both arms were 0, 0, 1, 4, 0, 1 and 2 respectively. Those
+ordinals account for the additional id changes at 10 and 20 m. A second
+complete run produced byte-identical output.
+
+The proposed midpoint-by-arc-length null model is already `section_heart`,
+so it is the same arm. The sweep measures sensitivity to changed input
+coordinates, not determinism for identical bytes, persisted carry-first ids,
+or a real-library failure rate. No heart, cell size or golden changed.
+
 ## Laps inside one activity (2026-08-26)
 
 Three rules about repeated passes in a single outing, each pinned by a
