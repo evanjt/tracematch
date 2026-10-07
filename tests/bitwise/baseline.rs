@@ -265,15 +265,50 @@ pub fn civil_date(days: u64) -> String {
 }
 
 /// Compare `digests` and `measured` with the golden at `path`, or record them
-/// there when it is absent or a rebase is asked for.
+/// there when a rebase is asked for. An absent golden is refused unless one is.
 ///
 /// Digests are compared for equality, costs against `band`. A debug build
 /// cannot say anything useful about a time, so it compares the digests only
 /// and preserves whatever costs the golden already holds.
 pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &Band) {
+    check_as(path, digests, measured, band, false);
+}
+
+/// `check` for a golden recorded on other input: the old digests are not
+/// compared, the new ones are recorded, and the golden's history is kept with
+/// a line naming the old shape and the new at its head.
+pub fn check_rederiving(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &Band) {
+    check_as(path, digests, measured, band, true);
+}
+
+/// The line a re-derivation puts at the head of the golden's history.
+pub fn rederive_header(old: &[&str], new: &[String]) -> String {
+    format!(
+        "{COMMENT} re-derived {}, corpus was {}, now {}",
+        today(),
+        old.join(", "),
+        new.join(", ")
+    )
+}
+
+fn check_as(
+    path: &Path,
+    digests: &[String],
+    measured: &[(&str, u64)],
+    band: &Band,
+    rederive: bool,
+) {
     let timed = !cfg!(debug_assertions);
     let existing = std::fs::read_to_string(path).ok();
     let rebase = rebase_asked();
+    assert!(
+        existing.is_some() || rebase.is_some() || rederive,
+        "no golden at {}. A missing golden is not a first recording: it would \
+         pass with no history line, so deleting one would be an unrecorded \
+         rebase. Restore it, or record it on purpose with \
+         {REBASE_ENV}=\"<why it is recorded>\"",
+        path.display()
+    );
 
     let costs = if timed {
         lines(measured)
@@ -300,6 +335,7 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
 
     if let Some(golden) = existing.as_deref()
         && rebase.is_none()
+        && !rederive
     {
         let want = digest_lines(golden);
         let got: Vec<&str> = digests.iter().map(|s| s.as_str()).collect();
@@ -362,6 +398,9 @@ pub fn check(path: &Path, digests: &[String], measured: &[(&str, u64)], band: &B
     let mut history = comments;
     if let Some(reason) = &rebase {
         history.insert(0, rebase_header(reason));
+    }
+    if rederive && let Some(golden) = existing.as_deref() {
+        history.insert(0, rederive_header(&digest_lines(golden), digests));
     }
     std::fs::write(path, compose(&history, digests, &costs)).expect("write golden baseline");
     println!(

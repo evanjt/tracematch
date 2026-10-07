@@ -22,6 +22,18 @@ use std::path::PathBuf;
 use bitwise::{Corpus, Shape, baseline::Band};
 
 const ENV: &str = "LAB_GEOLIFE_DIR";
+const GOLDEN_ENV: &str = "TRACEMATCH_GEOLIFE_GOLDEN";
+
+/// The golden this gate compares to and rebases. A caller that builds the
+/// gate in a throwaway tree names the golden it means, because the manifest
+/// directory is that tree and a rebase written there is deleted with it.
+fn golden_path(named: Option<std::ffi::OsString>) -> PathBuf {
+    match named.filter(|n| !n.is_empty()) {
+        Some(n) => PathBuf::from(n),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/geolife_bitwise_golden.txt"),
+    }
+}
 
 /// This gate runs on shared CI runners with a quarter of the cores that
 /// recorded the golden, so the clock band is wide enough to catch only an
@@ -136,7 +148,19 @@ fn geolife_output_is_bitwise_stable() {
             bulk_base: 40,
         },
         BAND,
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/geolife_bitwise_golden.txt"),
+        &golden_path(std::env::var_os(GOLDEN_ENV)),
     );
+}
+
+#[test]
+fn golden_path_follows_the_named_file() {
+    let named = PathBuf::from("/elsewhere/geolife_bitwise_golden.txt");
+    assert_eq!(golden_path(Some(named.clone().into())), named);
+}
+
+#[test]
+fn golden_path_defaults_to_the_committed_fixture() {
+    for unset in [None, Some(std::ffi::OsString::new())] {
+        assert!(golden_path(unset).ends_with("tests/fixtures/geolife_bitwise_golden.txt"));
+    }
 }

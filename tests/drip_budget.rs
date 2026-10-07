@@ -80,6 +80,7 @@ fn a_warm_add_stays_inside_the_budget() {
     let points: usize = c.tracks.iter().map(|(_, t)| t.len()).sum();
     let shape = format!("C {} {points}", c.tracks.len());
     let mut golden = std::fs::read_to_string(&path).ok();
+    let mut rederive = false;
     if let Some(existing) = golden.as_deref()
         && baseline::digests_differ(existing, std::slice::from_ref(&shape))
     {
@@ -87,8 +88,8 @@ fn a_warm_add_stays_inside_the_budget() {
             "corpus changed shape, was {:?}, now {shape:?}: re-deriving the baseline",
             baseline::digest_lines(existing)
         );
-        std::fs::remove_file(&path).expect("remove stale golden baseline");
         golden = None;
+        rederive = true;
     }
     let recording = golden.is_none() || baseline::rebase_asked().is_some();
 
@@ -149,7 +150,11 @@ fn a_warm_add_stays_inside_the_budget() {
         ("perf_add_p95_ms", p95),
         ("perf_peak_bytes", baseline::peak_rise_bytes()),
     ];
-    baseline::check(&path, &[shape], &measured, &BAND);
+    if rederive {
+        baseline::check_rederiving(&path, &[shape], &measured, &BAND);
+    } else {
+        baseline::check(&path, &[shape], &measured, &BAND);
+    }
     assert!(
         !over_ceiling,
         "the recorded warm-add median {recorded} ms is past the {BUDGET_MS} ms ceiling. \
