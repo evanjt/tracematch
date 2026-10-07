@@ -15,6 +15,8 @@ target
 /sections_out/
 /citycorpus/
 /citycorpus_sections/
+# fetch_corpus.sh's default destination.
+/corpus/
 /skeleton_comparison_sections/
 /docs/
 
