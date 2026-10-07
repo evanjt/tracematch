@@ -3,7 +3,7 @@
 //! Every generator is a pure function of its arguments: no RNG, no clock.
 //! GPS realism comes from a perpendicular sinusoidal wobble whose phase
 //! varies per activity, which braids traces like receiver noise while
-//! keeping corpora byte-reproducible — the order-free parity contract
+//! keeping corpora byte-reproducible, the order-free parity contract
 //! depends on that.
 //!
 //! Geometry is authored in a local metre frame (x east, y north) around
@@ -263,7 +263,7 @@ pub fn cliff_tail(heavy: usize, light: usize) -> Vec<(String, Vec<GpsPoint>)> {
 /// x 0..1200 along y=0, but the first `divert` swap onto a parallel
 /// strand 180 m north between x 400 and 800. The strand is real
 /// repeated ground for its minority; the body keeps the majority. The
-/// braid mouths are the only joins — no turnaround, no third corridor.
+/// braid mouths are the only joins, no turnaround, no third corridor.
 pub fn minority_braid(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
         .map(|i| {
@@ -290,7 +290,7 @@ pub fn minority_braid(outings: usize, divert: usize) -> Vec<(String, Vec<GpsPoin
 }
 
 /// The short-strand braid: every outing runs the same busy line, but
-/// the first `divert` swap onto a ~90 m variant 120 m north — far below
+/// the first `divert` swap onto a ~90 m variant 120 m north, far below
 /// section length, so the strand can only ever be a fragment. Its
 /// ground is real minority evidence, but the sections around it belong
 /// to the majority line.
@@ -370,7 +370,7 @@ pub fn split_population_corridor(through: usize) -> Vec<(String, Vec<GpsPoint>)>
 /// path collects travellers who each join and leave at their own
 /// points. Local traffic is steady through the interior and changes by
 /// single tracks along the way, so no join is ever a cliff and the
-/// ground is one corridor — but the longest single pass covers barely
+/// ground is one corridor, but the longest single pass covers barely
 /// a third of it.
 pub fn sliding_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
@@ -427,7 +427,7 @@ pub fn scattered_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
 /// Two parallel streets 180 m apart spanning the same corridor, west
 /// of them a much busier trunk ending where the busy street begins.
 /// The trunk is accepted first and edge-trims the busy street's
-/// candidate, so the busy street's default becomes its LONGEST pass —
+/// candidate, so the busy street's default becomes its LONGEST pass,
 /// and the longest passes are the swap outings, which cross onto the
 /// quiet street for the middle stretch and run unbroken through the
 /// busy street's capture ring. The shape of a displaced render
@@ -767,7 +767,7 @@ pub fn welded_tail() -> Vec<(String, Vec<GpsPoint>)> {
 /// A corridor where every outing folds mid-line: forward, back over
 /// its own ground, forward again (interval reps). Rep windows shift
 /// 40 m per outing so no coherent pass-class boundary forms and the
-/// fold stays inside one candidate's portions — every pass is legal
+/// fold stays inside one candidate's portions, every pass is legal
 /// but none is clean.
 pub fn interval_reps(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
     (0..outings)
@@ -890,7 +890,7 @@ pub fn small_oval_stem_deviant() -> Vec<(String, Vec<GpsPoint>)> {
     ));
     // A busy crossing street near the stem: accepted first, it masks
     // the oval candidate's west end, so the node is TRIMMED and the
-    // default falls to the longest pass — the deviant — exactly the
+    // default falls to the longest pass, the deviant, exactly the
     // structure that let the outlier lap win on the real oval.
     for i in 0..20 {
         let road = densify(&[

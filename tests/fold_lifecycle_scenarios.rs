@@ -73,7 +73,7 @@ fn assert_same_catalogue(left: &[FrequentSection], right: &[FrequentSection], ct
         };
         assert!(
             dist <= ENDPOINT_TOL_M,
-            "{ctx}: section SHAPE differs — {} endpoints are {dist:.0} m from the nearest \
+            "{ctx}: section SHAPE differs, {} endpoints are {dist:.0} m from the nearest \
              unmatched batch section (tolerance {ENDPOINT_TOL_M} m)",
             a.id
         );
@@ -83,7 +83,7 @@ fn assert_same_catalogue(left: &[FrequentSection], right: &[FrequentSection], ct
         );
         assert!(
             (la - lb).abs() <= 0.05 * la.max(lb).max(1.0),
-            "{ctx}: section LENGTH differs — {} is {la:.0} m, batch partner {lb:.0} m",
+            "{ctx}: section LENGTH differs, {} is {la:.0} m, batch partner {lb:.0} m",
             a.id
         );
         used[j] = true;
@@ -149,7 +149,7 @@ fn replay(tracks: &[(String, Vec<GpsPoint>)], chunks: &[usize], label: &str) -> 
 /// exist until activity seven. If incrementality were an accumulation,
 /// the through-line detected in the first half would survive and the drip
 /// would end up with different shapes and a different count from the
-/// batch — the exact drift this design is claimed to avoid.
+/// batch, the exact drift this design is claimed to avoid.
 #[test]
 fn scenario_late_branch_recuts_the_trunk() {
     let tracks = shapes::late_fork(6, 6);
@@ -168,7 +168,7 @@ fn scenario_late_branch_recuts_the_trunk() {
     assert!(
         after > before,
         "the late branch must change the catalogue: {before} sections before it arrived, \
-         {after} after — if these are equal the scenario is not exercising a re-cut"
+         {after} after, if these are equal the scenario is not exercising a re-cut"
     );
     println!(
         "-----------------------------------------------------------------------\n\

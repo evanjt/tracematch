@@ -251,7 +251,7 @@ impl Bounds {
 /// A simplified route signature for efficient matching.
 ///
 /// The signature contains a simplified version of the original GPS track,
-/// optimized for comparison by Average Minimum Distance (AMD).
+/// optimised for comparison by Average Minimum Distance (AMD).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteSignature {
     /// Unique identifier for the activity/route
@@ -264,7 +264,7 @@ pub struct RouteSignature {
     pub start_point: GpsPoint,
     /// Ending point of the route
     pub end_point: GpsPoint,
-    /// Pre-computed bounding box (normalized, ready for use)
+    /// Pre-computed bounding box (normalised, ready for use)
     pub bounds: Bounds,
     /// Pre-computed center point (for map rendering without JS calculation)
     pub center: GpsPoint,

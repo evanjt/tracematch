@@ -20,7 +20,7 @@ use tracematch::{
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
 
 // ============================================================================
-// Ground-match maths — inlined so this test binary owns its geometry (Rust
+// Ground-match maths, inlined so this test binary owns its geometry (Rust
 // integration test files are independent crates; the sibling parity test keeps
 // its own identical copy).
 // ============================================================================
@@ -111,7 +111,7 @@ fn corpus_with_bucket_a(n: usize) -> LifecycleCorpus {
 }
 
 // ============================================================================
-// PART B — pure-layer parity + cost contract for the incremental fold
+// PART B: pure-layer parity + cost contract for the incremental fold
 // ============================================================================
 
 /// GATE. The order-free Unified-aware incremental drips the pool one activity
@@ -152,13 +152,13 @@ fn gate_unified_incremental_converges_to_batch() {
 }
 
 // ============================================================================
-// PART C — the CACHED cluster-recompute fast path: oracle + cost
+// PART C: the CACHED cluster-recompute fast path: oracle + cost
 // ============================================================================
 //
 // The optimisation under the same convergence contract. The oracle drips a
 // corpus one activity at a time through BOTH the cached fast path (threading one
 // &mut cache) and the naive re-batch baseline, and asserts cached == naive ==
-// batch at EVERY step — on a single-cluster corpus and on a two-cluster corpus
+// batch at EVERY step, on a single-cluster corpus and on a two-cluster corpus
 // (so routing, verbatim reuse, and the bridge merge are all exercised). The
 // cost test proves the add cost is flat/sublinear in library size, not linear
 // like the naive.
@@ -295,7 +295,7 @@ fn assert_cached_tracks_naive_and_batch(
 
 /// ORACLE (single cluster). Every add touches the one home cluster, so the
 /// cached path recomputes it wholesale each fold (no untouched cluster to
-/// reuse) — this is the pure fold-and-recompute correctness proof, tracking the
+/// reuse), this is the pure fold-and-recompute correctness proof, tracking the
 /// batch's non-monotone dissolve/reform walk step for step.
 #[test]
 fn gate_cached_incremental_single_cluster_matches_batch() {
@@ -308,7 +308,7 @@ fn gate_cached_incremental_single_cluster_matches_batch() {
 
 /// ORACLE (multi cluster). Two disjoint origins interleaved, then a bridge
 /// track that merges them. Exercises cluster routing, verbatim reuse of the
-/// untouched cluster on each add, and the bridge merge — all under the same
+/// untouched cluster on each add, and the bridge merge, all under the same
 /// cached == naive == batch assertion.
 #[test]
 fn gate_cached_incremental_multi_cluster_and_bridge_matches_batch() {

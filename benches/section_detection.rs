@@ -30,7 +30,7 @@ fn make_dataset(activity_count: usize) -> Dataset {
 fn bench_section_detection(c: &mut Criterion) {
     let mut group = c.benchmark_group("section_detection");
 
-    // Section detection at these sizes takes seconds, not microseconds —
+    // Section detection at these sizes takes seconds, not microseconds,
     // use Flat sampling and a generous measurement window.
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(10);

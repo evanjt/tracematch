@@ -426,7 +426,7 @@
     pane.classList.add('dimmed');
 
     // Highlight section polyline layers (they are in sectionLayerGroup)
-    // All section layers get .hl — we rely on them being in the section layer group
+    // All section layers get .hl, we rely on them being in the section layer group
     // For now, highlight all matching trace polylines + create portion overlays
     for (const portion of section.activityPortions) {
       const trace = traceStore.traces.find((t) => t.id === portion.activityId);
@@ -802,7 +802,7 @@
     if (total === 0) return;
 
     // Show progress IMMEDIATELY so the user gets feedback the moment
-    // they confirm the file picker — before any parsing/IDB work runs.
+    // they confirm the file picker, before any parsing/IDB work runs.
     importProgress = { current: 0, total };
     // Yield once so Svelte renders the overlay before we start the
     // synchronous-ish parse loop.

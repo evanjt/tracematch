@@ -5,7 +5,7 @@
 //   node bench/city_wasm.mjs
 //
 // Compares apples-to-apples with the native corpus report example
-// — same data, same configs, same operations, but executing the WASM module
+// Same data, same configs, same operations, but executing the WASM module
 // instead of the native Rust library. Use this to see the WASM-vs-native gap
 // without browser overhead (no message passing, no JSON re-serialisation
 // across worker boundaries, no JS event loop scheduling).

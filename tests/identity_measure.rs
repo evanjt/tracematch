@@ -296,7 +296,7 @@ fn b2_identity_and_churn_measurement() {
     println!(
         "READ: the raw batch renumbers ids positionally, so its retention dips whenever a cluster\n\
          count/order shifts; the visible view carries ids, so it stays at 1.000. And the visible\n\
-         view churns far less than the raw batch — the dissolve/reform thrash is debounced away.\n"
+         view churns far less than the raw batch, the dissolve/reform thrash is debounced away.\n"
     );
 
     // Invariants (true by construction, safe to lock):
@@ -304,7 +304,7 @@ fn b2_identity_and_churn_measurement() {
     //    A step that fires a dissolve or a re-cut may legitimately move
     //    ground between ids (a dissolved corridor's ground taken over by
     //    a neighbour's fired re-cut is the hysteresis layer converging
-    //    to the batch, announced through the outcome) — only an
+    //    to the batch, announced through the outcome), only an
     //    unannounced id change is a violation.
     for r in &run.rows {
         if let Some(vr) = r.visible_retention
