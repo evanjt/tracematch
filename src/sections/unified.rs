@@ -259,13 +259,14 @@ pub enum BoundaryReason {
     /// at once. Rule 9's majority usage change measured as volume,
     /// where [`BoundaryReason::UsageChange`] measures it as pass class.
     TrafficCliff { thin: u32, thick: u32 },
-    /// The redraw onto one real pass admitted fewer of the candidate's
-    /// contributors than the floor that created it: the drawn line's
-    /// own population is under `min_activities`, so what the section
-    /// shows is not repeated ground. The section is dropped and its
-    /// cells go back to the orphan pool. Distinct from
-    /// [`BoundaryReason::LowSupport`], which cuts a thin stretch and
-    /// keeps the section on the remnant.
+    /// The redraw onto one real pass admitted fewer occasions than the
+    /// floor that created the section: `kept` is the distinct days the
+    /// drawn line's own population rode it, `floor` the days the
+    /// candidate had to clear (its length tier, never below
+    /// `min_activities`). What the section shows is not repeated
+    /// ground, so it is dropped and its cells go back to the orphan
+    /// pool. Distinct from [`BoundaryReason::LowSupport`], which cuts a
+    /// thin stretch and keeps the section on the remnant.
     DrawnPopulation { kept: u32, floor: u32 },
     /// The section's one real pass ended here but its corridor's
     /// ground runs on. The ground beyond re-entered the candidate
@@ -2817,6 +2818,15 @@ fn cell_support_days(epochs: &[Option<i64>]) -> usize {
     undated + days.len()
 }
 
+/// Visits a stretch must be seen on to be a section: the length tier
+/// of the portions' median distance, scaled by the opportunity.
+fn required_for_portions(portions: &[Portion], fallback_len: f64, corpus: usize) -> usize {
+    let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
+    lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_len = lens.get(lens.len() / 2).copied().unwrap_or(fallback_len);
+    required_visits_for_length(median_len, corpus) as usize
+}
+
 fn has_support(
     portions: &[Portion],
     fallback_len: f64,
@@ -2825,10 +2835,21 @@ fn has_support(
     epochs: &[Option<i64>],
     span_s: i64,
 ) -> bool {
-    let mut lens: Vec<f64> = portions.iter().map(|p| p.3).collect();
-    lens.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median_len = lens.get(lens.len() / 2).copied().unwrap_or(fallback_len);
-    let required = required_visits_for_length(median_len, corpus) as usize;
+    let required = required_for_portions(portions, fallback_len, corpus);
+    has_support_at(portions, required, config, epochs, span_s)
+}
+
+/// The support test against a visit floor already derived, so a caller
+/// that must hold a population to the floor that created its section
+/// can pass that number instead of re-deriving it from distances
+/// measured along a different line.
+fn has_support_at(
+    portions: &[Portion],
+    required: usize,
+    config: &SectionConfig,
+    epochs: &[Option<i64>],
+    span_s: i64,
+) -> bool {
     let (days, span, undated) = occasion_support(portions, epochs);
     if days < required.max(config.min_activities as usize) {
         return false;
@@ -4262,6 +4283,11 @@ fn detect_for_cluster_with_grid(
 
     let track_map: HashMap<&str, &[GpsPoint]> =
         sport_tracks.iter().map(|(id, pts)| (*id, *pts)).collect();
+    let track_index: HashMap<&str, usize> = sport_tracks
+        .iter()
+        .enumerate()
+        .map(|(t, (id, _))| (*id, t))
+        .collect();
     let track_nums: Vec<u32> = sport_tracks
         .iter()
         .map(|(id, _)| track_num(leaves, id))
@@ -4570,8 +4596,21 @@ fn detect_for_cluster_with_grid(
             }
         }
         let near = mask.iter().filter(|&&m| m).count();
-        let (portions, approx_len, was_trimmed) = if near == 0 {
-            (portions, node.cells.len() as f64 * cell_size, false)
+        // The visit floor the portions being drawn cleared to exist, fixed
+        // here: the redraw measures its own distances along another line,
+        // and re-deriving from those would let the floor move with it.
+        let (portions, approx_len, was_trimmed, creating_required) = if near == 0 {
+            let required = required_for_portions(
+                &portions,
+                node.cells.len() as f64 * cell_size,
+                opportunity(leaves, &node, coverage),
+            );
+            (
+                portions,
+                node.cells.len() as f64 * cell_size,
+                false,
+                required,
+            )
         } else {
             let mut cum = Vec::with_capacity(probe.len());
             let mut acc = 0.0;
@@ -4605,7 +4644,17 @@ fn detect_for_cluster_with_grid(
                 continue;
             };
             if re - rs == probe.len() {
-                (portions, node.cells.len() as f64 * cell_size, false)
+                let required = required_for_portions(
+                    &portions,
+                    node.cells.len() as f64 * cell_size,
+                    opportunity(leaves, &node, coverage),
+                );
+                (
+                    portions,
+                    node.cells.len() as f64 * cell_size,
+                    false,
+                    required,
+                )
             } else {
                 // One ring of dilation keeps the corridor's full lane
                 // width: the probe is a single track's line, and
@@ -4639,16 +4688,14 @@ fn detect_for_cluster_with_grid(
                     cell_size,
                     tun,
                 );
+                let required = required_for_portions(
+                    &trimmed,
+                    approx,
+                    opportunity(leaves, &reduced, coverage),
+                );
                 if reduced.cells.is_empty()
                     || trimmed.is_empty()
-                    || !has_support(
-                        &trimmed,
-                        approx,
-                        config,
-                        opportunity(leaves, &reduced, coverage),
-                        &epochs,
-                        span_s,
-                    )
+                    || !has_support_at(&trimmed, required, config, &epochs, span_s)
                 {
                     let mid = probe[probe.len() / 2];
                     records.push(BoundaryRecord {
@@ -4677,7 +4724,7 @@ fn detect_for_cluster_with_grid(
                         },
                     });
                 }
-                (trimmed, approx, true)
+                (trimmed, approx, true, required)
             }
         };
 
@@ -5367,21 +5414,36 @@ fn detect_for_cluster_with_grid(
                 orphaned.extend(node.cells.iter().copied());
                 continue;
             }
-            // Every floor the candidate cleared was measured on the
+            // The floor the candidate cleared was measured on the
             // pre-redraw evidence. The redraw swaps the consensus
             // geometry for one real pass and rebuilds the population
             // under a different admission rule, so the survivors can
-            // sit under the floor that created the section. Drop it
-            // before it claims its ground, or a section nobody will
-            // see still pushes its neighbours off.
-            if (section.activity_ids.len() as u32) < config.min_activities {
+            // sit under the floor that created the section. Hold them
+            // to that floor, in the days it counted, before the section
+            // claims its ground, or a section nobody will see still
+            // pushes its neighbours off.
+            let drawn: Vec<Portion> = section
+                .activity_portions
+                .iter()
+                .filter_map(|p| {
+                    track_index.get(p.activity_id.as_str()).map(|&t| {
+                        (
+                            t,
+                            p.start_index as usize,
+                            p.end_index as usize,
+                            p.distance_meters,
+                        )
+                    })
+                })
+                .collect();
+            if !has_support_at(&drawn, creating_required, config, &epochs, span_s) {
                 let mid = section.polyline[section.polyline.len() / 2];
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
                     reason: BoundaryReason::DrawnPopulation {
-                        kept: section.activity_ids.len() as u32,
-                        floor: config.min_activities,
+                        kept: occasion_support(&drawn, &epochs).0 as u32,
+                        floor: creating_required.max(config.min_activities as usize) as u32,
                     },
                 });
                 orphaned.extend(node.cells.iter().copied());
@@ -7865,6 +7927,24 @@ mod tests {
                 GpsPoint::with_elevation(46.0 + step_deg * i as f64, 7.0 + lng, ele_step * i as f64)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_pinned_requirement_does_not_follow_the_portions_median() {
+        let day = 86_400;
+        let epochs = [Some(0), Some(30 * day), Some(60 * day)];
+        let config = SectionConfig::default();
+        let span_s = 168 * 3600;
+        // Three portions on three days, each 1000 m: the length tier
+        // alone asks for two visits.
+        let portions: Vec<Portion> =
+            vec![(0, 0, 10, 1000.0), (1, 0, 10, 1000.0), (2, 0, 10, 1000.0)];
+        assert!(has_support(&portions, 1000.0, &config, 10, &epochs, span_s));
+        assert_eq!(required_for_portions(&portions, 1000.0, 10), 2);
+        // A floor of four, fixed before the line was redrawn, is not met
+        // by three days however long the redrawn portions measure.
+        assert!(!has_support_at(&portions, 4, &config, &epochs, span_s));
+        assert!(has_support_at(&portions, 3, &config, &epochs, span_s));
     }
 
     #[test]
