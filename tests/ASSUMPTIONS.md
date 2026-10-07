@@ -24,7 +24,7 @@ present. The algorithm and its rules live in `src/sections/unified.rs`.
 | A rendered representative was a real trace yet not a single pass: a mid-line spin too tight for the cell-event cut to catch, or a junction where every visit mills | single-pass render guard (`straight_line_has_no_self_pass`, `out_and_back_revisits_its_outbound_leg`, `closed_loop_join_is_exempt`, unit). The render takes the cleanest contributing pass; a candidate with no pass under the floor backs off. Verified 2026-07-24: two spins re-render straight and the 178-visit junction blob backs off, every other section holds. Section-level `self_overlap` was blind to a tight spin (read 0.00 on a 40%-revisiting line), so the render metric is now the reported one |
 | A forward-and-reverse over the same ground rendered as a section: a closed out-and-back whose short spurs slip the self-pass arc gap | `out_and_back_scores_high_but_a_through_line_does_not`, `switchback_climb_is_not_an_out_and_back` (unit). Only CLOSED lines are scored (endpoints within a fifth of the length), so a switchback climbs away and keeps its antiparallel hairpins (`switchback_climb_survives_as_one_section`). Verified 2026-07-24: the flagged out-and-back and one 4-visit twin re-render one-way, every loop and climb byte-identical, no out-and-back survives on either corpus |
 | A section rendered a minority end-branch that most of its own traffic skips: a wrong-way turn at a junction (short, well-supported, but off the through-flow) drawn as if it were the section's extent | `a_minority_branch_behind_a_cliff_clips_but_a_taper_does_not` (unit). The rendered line is clipped, display only, where metre-resolution support falls under half the line's median across a short end run behind a cliff (the body sample abutting it carries at least double), so a genuine wrong-turn branch is dropped from the drawing while a gradual taper or a legitimately lower-traffic half is left whole. Counts, extent, and occupied footprint keep the full portion. The clean signal is directed flow continuation through a junction, which the coarse coverage grid cannot express (its one-ring tolerance leaks through-traffic onto the branch); the metre-resolution end clip is the interim, and the exact query lands with the incremental fold's per-portion alignment. Verified 2026-07-24: sec_all_113's SE tail is clipped so it connects to its neighbour, six more wrong-turn branches drop elsewhere, gradients and tapers are untouched, no new display overlaps on either corpus |
-| Support held only at the supernode total, so a near-private spur welded onto a busy corridor through the traffic gradient at their junction (adjacent thin cells always pass the one-missing-track rule), inherited its visit count, and could be rendered | `one_off_tail_is_cut_where_its_own_support_ends` (contract), `support_counts_contributor_passes_not_strangers_or_clips` (unit). Support binds along the length: every cell must be traversed by the section's own floor of its OWN contributors' qualifying passes (all runs count, so a fragmented loop traversal is not read as absent; stranger traffic and corner clips lend nothing). The floor is fixed pre-trim (re-deriving it as portions shorten ratchets the length tier and spirals short sections to death) and ordering uses the pre-trim score (the trim corrects extent, never priority — score-reordering was probed 2026-07-24 and reshuffled a whole city's catalogue). Verified 2026-07-24: the flagged welded section re-renders as its uniformly-traversed corridor under a new representative, four 3-visit stitched lines whose middles were one outing's private ground dissolve, one inflated count de-inflates (11 to 3 on identical geometry), jackknife improves on the full corpus and holds on the city corpus, disjointness 0 violations both corpora |
+| Support held only at the supernode total, so a near-private spur welded onto a busy corridor through the traffic gradient at their junction (adjacent thin cells always pass the one-missing-track rule), inherited its visit count, and could be rendered | `one_off_tail_is_cut_where_its_own_support_ends` (contract), `support_counts_contributor_passes_not_strangers_or_clips` (unit). Support binds along the length: every cell must be traversed by the section's own floor of its OWN contributors' qualifying passes (all runs count, so a fragmented loop traversal is not read as absent; stranger traffic and corner clips lend nothing). The floor is fixed pre-trim (re-deriving it as portions shorten ratchets the length tier and spirals short sections to death) and ordering uses the pre-trim score (the trim corrects extent, never priority, score-reordering was probed 2026-07-24 and reshuffled a whole city's catalogue). Verified 2026-07-24: the flagged welded section re-renders as its uniformly-traversed corridor under a new representative, four 3-visit stitched lines whose middles were one outing's private ground dissolve, one inflated count de-inflates (11 to 3 on identical geometry), jackknife improves on the full corpus and holds on the city corpus, disjointness 0 violations both corpora |
 
 ## Identity and hysteresis contracts (2026-07-29)
 
@@ -57,14 +57,14 @@ mirror, pinned after the corpus gate. Pure-layer contracts live in
 
 The identity layer assumes each step's candidates obey rule 8
 (corridor-disjoint at the matching tolerance), which one pooled detection
-guarantees. Violating it — feeding per-sport catalogues into one registry,
-so two or three sports' sections duplicate the same corridor — produces a
+guarantees. Violating it, feeding per-sport catalogues into one registry,
+so two or three sports' sections duplicate the same corridor, produces a
 zombie rotation observed on both real corpora: a senior neighbour contained
 in a foreign duplicate candidate wins that candidate's containment-tier
 nomination but nominates its own candidate, so the duplicate never confirms
 a carrier, the plan dissolves the visible holder (reason Dissolved), and
 the uncarried candidate immediately restores the freshest tombstone in the
-same step — twin ids cycling fire-and-restore forever, phase-shifted. No
+same step, twin ids cycling fire-and-restore forever, phase-shifted. No
 pure-layer guard is added: under disjoint candidates the containment tier
 cannot be poisoned (a disjoint neighbour is never contained), and the
 duplicate-mint tripwire row above already pins duplicate-candidate
@@ -76,7 +76,7 @@ of rediscovering the defect; corpus evidence from the corpus gate replay is
 quoted in the histories below.
 
 Ungated by the grave sweep: veloqrs
-`durable_claim_mid_tombstone_clears_the_grave` — the apply sweeps
+`durable_claim_mid_tombstone_clears_the_grave`, the apply sweeps
 tombstoned ground against the durable-intent grounds, so a user claim on
 dead ground clears the grave/tombstone pair that relinquish (by real id)
 could never reach.
@@ -93,7 +93,7 @@ mints, never resurrects a dead id) and
 `fired_changes_report_ids_and_reasons` (per-id retirements with fire-time
 reasons plus fired re-cut ids on `StepOutcome`, the change emitter's feed).
 
-Ungated earlier: veloqrs `grave_restore_survives_restart` is green — the
+Ungated earlier: veloqrs `grave_restore_survives_restart` is green, the
 identity blob is rmp-encoded (blob version 2), whose length-prefixed arrays
 recover the trailing skip-if-None fields that desynced postcard's positional
 stream. A v1 blob reseeds by version tag, the same outcome it always got.

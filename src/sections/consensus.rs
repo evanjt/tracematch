@@ -5,7 +5,7 @@
 //! where weight = 1 / (distance_to_reference + epsilon).
 //!
 //! Algorithm:
-//! 1. Normalize each track to distance parameterization
+//! 1. Normalise each track to distance parameterization
 //! 2. For each position along the reference, find nearby points from all tracks
 //! 3. Compute weighted centroid of nearby points
 //! 4. Track observation density for confidence scoring
@@ -585,7 +585,7 @@ fn fold_resolved_into_accumulator(
     accumulator.trace_count += resolved.len() as u32;
 }
 
-/// Materialize the current accumulator state into a [`ConsensusResult`].
+/// Materialise the current accumulator state into a [`ConsensusResult`].
 fn accumulator_to_result(
     accumulator: &ConsensusAccumulator,
     proximity_threshold: f64,

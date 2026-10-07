@@ -180,7 +180,7 @@ fn commuter_corridor_holds_across_pass_neighbours() {
     // no pass tunable should have anything to decide: one section at
     // the default. A neighbour that reads the corner as a re-entry
     // (reach 2 triples the lateral reach) may split the road's passes
-    // there and draw it as a two-link chain — what it must never do is
+    // there and draw it as a two-link chain, what it must never do is
     // lose the road: before remainder re-queue that same neighbour
     // silently dropped a 560 m stretch of a 12-track road, and a
     // count-only assertion could not see it.

@@ -45,7 +45,7 @@ const TRK_CLOSE_RE = /<\/trk>/;
 const NAME_RE = /<name[^>]*>([\s\S]*?)<\/name>/;
 const TYPE_RE = /<type[^>]*>([\s\S]*?)<\/type>/;
 // Captures lat, lon, optional ele. Tolerant of attribute order and any
-// quote style. We don't bother with full XML validity — this is
+// quote style. We don't bother with full XML validity, this is
 // strictly the format we know users export.
 const TRKPT_RE = /<trkpt\s+[^>]*?lat\s*=\s*["']([\-\d.]+)["'][^>]*?lon\s*=\s*["']([\-\d.]+)["'][^>]*?>([\s\S]*?)<\/trkpt>|<trkpt\s+[^>]*?lon\s*=\s*["']([\-\d.]+)["'][^>]*?lat\s*=\s*["']([\-\d.]+)["'][^>]*?>([\s\S]*?)<\/trkpt>|<trkpt\s+[^>]*?lat\s*=\s*["']([\-\d.]+)["'][^>]*?lon\s*=\s*["']([\-\d.]+)["'][^>]*?\/>|<trkpt\s+[^>]*?lon\s*=\s*["']([\-\d.]+)["'][^>]*?lat\s*=\s*["']([\-\d.]+)["'][^>]*?\/>/g;
 const ELE_RE = /<ele[^>]*>([\-\d.]+)<\/ele>/;
@@ -117,7 +117,7 @@ export function parseGpx(xmlString: string): ParsedTrace[] {
 
       points.push({ latitude: lat, longitude: lng, elevation });
 
-      // Inline haversine — cheap relative to regex matching, no function call overhead.
+      // Inline haversine, cheap relative to regex matching, no function call overhead.
       if (hasPrev) {
         const dLat = ((lat - prevLat) * Math.PI) / 180;
         const dLon = ((lng - prevLng) * Math.PI) / 180;

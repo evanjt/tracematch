@@ -835,7 +835,7 @@ fn write_ranking_md(
             r.converge,
             r.oneway,
             r.recency_days,
-            r.effort.map_or_else(|| "—".to_string(), |e| format!("{e:.4}")),
+            r.effort.map_or_else(|| "-".to_string(), |e| format!("{e:.4}")),
         ));
     }
     std::fs::write(path, out).ok();
@@ -1243,7 +1243,7 @@ fn main() {
         }
     }
 
-    // Pooled pass: the ground is sport-agnostic — a trace is a trace.
+    // Pooled pass: the ground is sport-agnostic, a trace is a trace.
     // "All" detects over every activity; sport filtering belongs to the
     // comparison layer, not to detection.
     let mut all_list: Vec<(&str, usize)> = sport_list.clone();
@@ -1930,7 +1930,7 @@ fn main() {
 
                 // Settle phase. The loading-window replay ends right after the
                 // largest (final) reshuffle, so retirements are left mid-debounce
-                // (streak < k) and re-cuts unsnapped — the visible count is frozen
+                // (streak < k) and re-cuts unsnapped, the visible count is frozen
                 // in transit, not converged. A real drip keeps detecting; here we
                 // feed the FINAL window a few more detects so the plan-retirement
                 // debounce drains stale-but-covered duplicates and re-cuts snap to

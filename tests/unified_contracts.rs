@@ -116,14 +116,14 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
             .fold(0.0, f64::max);
         assert!(
             worst < 25.0,
-            "{}: polyline strays {:.0} m from its representative trace — geometry must be a real single cutout, never synthesised",
+            "{}: polyline strays {:.0} m from its representative trace, geometry must be a real single cutout, never synthesised",
             s.id,
             worst
         );
         let so = self_overlap_frac(&s.polyline);
         assert!(
             so < 0.25,
-            "{}: self-overlap {:.2} — geometry must be single-passed",
+            "{}: self-overlap {:.2}, geometry must be single-passed",
             s.id,
             so
         );
@@ -135,8 +135,8 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
             }
             // Corridor-disjointness binds per population: two lines on
             // the same ground are a duplicate only when they carry the
-            // same users. A distinct population's parallel path — the
-            // other bank of a river — is its own corridor.
+            // same users. A distinct population's parallel path, the
+            // other bank of a river, is its own corridor.
             let shared_acts = a
                 .activity_ids
                 .iter()
@@ -154,7 +154,7 @@ fn assert_catalogue_invariants(tracks: &[(String, Vec<GpsPoint>)], sections: &[F
                 / a.polyline.iter().step_by(3).count().max(1) as f64;
             assert!(
                 within < 0.6,
-                "{} vs {}: {:.0}% shared corridor — represented ground must be trimmed, not re-emitted",
+                "{} vs {}: {:.0}% shared corridor, represented ground must be trimmed, not re-emitted",
                 a.id,
                 b.id,
                 within * 100.0
@@ -280,7 +280,7 @@ fn chain_members_share_one_reference_and_meet_exactly() {
     // Rule 7: the stick and head tile one physical line and every
     // outing covers both, so both sections must cut their geometry
     // from the same activity and their joint must be a shared trace
-    // point — never splices from different days with an offset seam.
+    // point, never splices from different days with an offset seam.
     let tracks = shapes::lollipop(6);
     let sections = detect(&tracks);
     assert_catalogue_invariants(&tracks, &sections);
@@ -296,7 +296,7 @@ fn chain_members_share_one_reference_and_meet_exactly() {
         .fold(f64::INFINITY, f64::min);
     assert!(
         joint < 0.5,
-        "joint gap {joint:.1} m — chain joints must meet on a shared trace point"
+        "joint gap {joint:.1} m, chain joints must meet on a shared trace point"
     );
 }
 
@@ -335,7 +335,7 @@ fn deviation_emerges_from_unique_outings() {
 fn usage_cliff_ends_the_busy_corridor() {
     // Scenario: ten outings share a corridor; three continue past its
     // end for another 1.5 km while seven disperse on unique exits. No
-    // turnaround, no shared third corridor — the visible reason the
+    // turnaround, no shared third corridor, the visible reason the
     // busy section ends is that most of its traffic stops there.
     // Expected behaviour: no section spans the cliff; the busy stretch
     // keeps its own honest visit count and any quiet-tail section
@@ -419,7 +419,7 @@ fn corridor_no_one_runs_end_to_end_is_still_covered() {
     // its own 1.5 km window, joining and leaving at its own points.
     // Interior traffic is 8-14 tracks and only ever changes by one
     // track at a join, so no boundary fires and the ground is one
-    // corridor — while the longest single pass spans barely a third.
+    // corridor, while the longest single pass spans barely a third.
     // Expected behaviour: a section draws one real pass, so the
     // corridor is covered by a chain of honest single-pass sections.
     // Ground a section owns but cannot draw must re-enter the
@@ -446,7 +446,7 @@ fn displaced_render_does_not_pinch_the_parallel_street() {
     // ring, so its longest pass walks the quiet street's middle while
     // the drawn line stays on the busy street (rule B).
     // Expected behaviour: ground is occupied by the line a section
-    // SHOWS. The quiet street keeps its whole extent — its middle must
+    // SHOWS. The quiet street keeps its whole extent, its middle must
     // not back off against a line nobody sees.
     let tracks = shapes::parallel_street(16, 5, 3);
     let sections = detect(&tracks);
@@ -472,7 +472,7 @@ fn minority_braid_strand_stays_off_the_body() {
     // Scenario: fourteen outings run one body; five swap onto a strand
     // 180 m north for the middle stretch. The strand is real minority
     // ground; the body keeps the majority everywhere.
-    // Expected behaviour: no emitted line mixes the two — a body
+    // Expected behaviour: no emitted line mixes the two, a body
     // section stays on the body with the majority's count, and any
     // strand section carries only its minority's.
     let tracks = shapes::minority_braid(14, 5);
@@ -599,10 +599,10 @@ fn majority_bar_ignores_non_contributor_traffic() {
 #[test]
 fn short_strand_fragment_does_not_bend_the_line() {
     // Scenario: fourteen outings on one busy line; five swap onto a
-    // 200 m variant strand mid-way — real minority evidence, but far
+    // 200 m variant strand mid-way, real minority evidence, but far
     // too short to ever be a section of its own.
     // Expected behaviour: the fragment is not absorbed into the busy
-    // sections around it — no rendered line leaves the majority path,
+    // sections around it, no rendered line leaves the majority path,
     // and no extent quietly carries the strand's ground.
     let tracks = shapes::short_strand(14, 5);
     let sections = detect(&tracks);
@@ -629,7 +629,7 @@ fn short_strand_fragment_does_not_bend_the_line() {
 #[test]
 fn braid_variants_read_as_real_lines_not_a_midline() {
     // Two lanes 30 m apart, every outing rides both. Whatever extent is
-    // emitted, its points must lie on one real lane at a time — a
+    // emitted, its points must lie on one real lane at a time, a
     // consensus midline (~15 m from both) is the banned v1 geometry.
     let tracks = shapes::parallel_variants(6, 30.0);
     let sections = detect(&tracks);
@@ -686,7 +686,7 @@ fn separated_variants_stay_distinct_ground() {
             / s.polyline.len() as f64;
         assert!(
             real >= 0.85,
-            "{}: {:.0}% of points off every real line — midline geometry",
+            "{}: {:.0}% of points off every real line, midline geometry",
             s.id,
             real * 100.0
         );
@@ -698,7 +698,7 @@ fn separated_variants_stay_distinct_ground() {
 #[test]
 fn switchback_climb_survives_as_one_section() {
     // Hairpin legs 30 m apart in plan revisit coarse cells, but at
-    // elevation levels 25 m apart — beyond the 15 m tolerance, so the
+    // elevation levels 25 m apart, beyond the 15 m tolerance, so the
     // single-pass walk must not cut the climb into legs.
     let tracks = shapes::switchback_climb(6);
     let sections = detect(&tracks);
@@ -723,7 +723,7 @@ fn switchback_climb_survives_as_one_section() {
         .expect("switchback climb missing from the catalogue");
     assert!(
         climb.distance_meters >= 1000.0,
-        "climb cut down to {:.0} m — legs must not fragment",
+        "climb cut down to {:.0} m, legs must not fragment",
         climb.distance_meters
     );
 }
@@ -762,7 +762,7 @@ fn grid_city_respects_floors_and_forks() {
     // cell): quiet ground is IN a section when a line runs within its
     // corridor. Remainder re-queue surfaces the 3-visit bottom-street
     // continuation, whose honest end may stop one ring short of the
-    // quiet stretch — outside the corridor, but nearer than padding
+    // quiet stretch, outside the corridor, but nearer than padding
     // would allow.
     let silent = [
         shapes::to_gps(625.0, 0.0),   // 1 visit: never hot ground
@@ -780,7 +780,7 @@ fn grid_city_respects_floors_and_forks() {
 
 #[test]
 fn one_trip_ground_is_not_a_section() {
-    // Scenario: the same corridor walked twice — once as a single
+    // Scenario: the same corridor walked twice, once as a single
     // weekend trip (two recordings 25 h apart), once as a fortnightly
     // habit. The evidence is identical; only the calendar differs.
     // Expected behaviour: a trip's files chain into one occasion and
@@ -820,7 +820,7 @@ fn one_trip_ground_is_not_a_section() {
 fn a_daily_habit_is_repetition_but_one_stay_is_not() {
     // Scenario: the same corridor walked every day. Ten days of it is
     // routine (the days stretch past one stay); six days of it is a
-    // holiday's jogging loop — one visit to a place, however many
+    // holiday's jogging loop, one visit to a place, however many
     // recordings the stay produced. Day gaps cannot draw this line
     // (trip days and commute days are both ~24 h apart); the span can.
     use tracematch::{Tunables, detect_sections_dated};
@@ -865,7 +865,7 @@ fn a_daily_habit_is_repetition_but_one_stay_is_not() {
 fn a_trip_plus_a_later_return_clears_the_floor() {
     // Three recordings: two on consecutive days (one trip), a third a
     // fortnight later. The trip collapses to one occasion; the return
-    // makes two — the ground was genuinely returned to.
+    // makes two, the ground was genuinely returned to.
     use tracematch::{Tunables, detect_sections_dated};
     let tracks = shapes::plain_corridor(3);
     const DAY: i64 = 86_400;
@@ -1023,7 +1023,7 @@ fn persona_racer_hill_is_single_passed() {
         .expect("hill section missing");
     assert!(
         hill.distance_meters <= 700.0,
-        "hill geometry {:.0} m — repeats leaked into the cut",
+        "hill geometry {:.0} m, repeats leaked into the cut",
         hill.distance_meters
     );
     let approach_mid = shapes::to_gps(250.0, 0.0);
@@ -1220,7 +1220,7 @@ fn far_ground_changes_nothing_local() {
 #[test]
 fn catalogue_is_a_pure_function_of_the_activity_set() {
     // The same activity set in three arrival orders must produce the
-    // identical catalogue — ids, geometry, everything. This is the
+    // identical catalogue, ids, geometry, everything. This is the
     // parity spec the incremental path must meet. The three shape
     // families sit on disjoint ground so each keeps its own topology.
     let mut tracks = shapes::grid_city();
@@ -1335,7 +1335,7 @@ fn one_off_tail_is_cut_where_its_own_support_ends() {
 #[test]
 fn folded_reps_render_their_longest_clean_stretch() {
     // Scenario: every outing runs a corridor with interval reps mid
-    // way — forward, back over the same ground, forward again — at a
+    // way, forward, back over the same ground, forward again, at a
     // window that shifts per outing, so no pass-class boundary forms
     // and every pass carries a legal but visibly folded knot.
     // Expected behaviour: the drawn line is the pass's longest
@@ -1368,8 +1368,8 @@ fn junction_shredded_middle_pools_back_into_a_section() {
     // (cliff + fork boundaries) and a crossing path inflates one
     // middle cell's track set, so the strict same-traffic partition
     // shreds the 12-track middle into sub-length pieces. Each piece
-    // alone dies — under the length floor or backed off against the
-    // flanks' render bleed — while the middle carries 12 through
+    // alone dies, under the length floor or backed off against the
+    // flanks' render bleed, while the middle carries 12 through
     // tracks end to end.
     // Expected behaviour: ground orphaned by dead candidates pools at
     // visible-boundary granularity and re-enters the queue, so the
@@ -1388,7 +1388,7 @@ fn junction_shredded_middle_pools_back_into_a_section() {
 
 #[test]
 fn lapped_small_oval_renders_the_closed_lap() {
-    // Scenario: interval sessions on a small athletics oval — stem in,
+    // Scenario: interval sessions on a small athletics oval, stem in,
     // many laps, stem home. The oval spans only a couple of evidence
     // cells, so the mouth cell blends lap and stem ground, the usage
     // boundary cannot separate them, and the default pass is the stem
@@ -1440,7 +1440,7 @@ fn lapped_oval_counts_every_revolution() {
     // Expected behaviour: a visit is a pass over the ground, not an
     // outing. Counting outings tells an athlete they ran the oval six
     // times when they ran it sixty, and it starves the render of
-    // candidates — only the first lap of each session can ever be
+    // candidates, only the first lap of each session can ever be
     // drawn, and a first lap carries the entry from the stem.
     let tracks = shapes::small_oval_stem(6);
     let sections = detect(&tracks);
@@ -1461,7 +1461,7 @@ fn lapped_oval_counts_every_revolution() {
         .expect("oval section");
     assert!(
         oval.visit_count >= 50,
-        "oval counts {} visits for sixty real revolutions — laps inside an \
+        "oval counts {} visits for sixty real revolutions, laps inside an \
          activity are being discarded",
         oval.visit_count
     );
@@ -1471,11 +1471,11 @@ fn lapped_oval_counts_every_revolution() {
 fn a_deviating_lap_does_not_render_the_circuit() {
     // Scenario: five clean interval sessions lap the small oval; a
     // sixth outing cuts a chord across it every lap, and its longer
-    // stem makes its pass the longest — the default. The deviant's
+    // stem makes its pass the longest, the default. The deviant's
     // revolution is one real single pass, but it is minority ground
     // against five faithful circuits.
     // Expected behaviour: the loop render is judged like any other
-    // render — faithfulness on the final line — so the circuit
+    // render, faithfulness on the final line, so the circuit
     // renders from a faithful lap, not the deviant default.
     let tracks = shapes::small_oval_stem_deviant();
     let sections = detect(&tracks);

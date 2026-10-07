@@ -189,7 +189,7 @@ fn near_duplicate_corridor_backs_off_with_a_record() {
     // A busy lane and a quieter twin 90 m away, used by riders who go
     // out on the busy lane and come home on the twin: they CONTRIBUTE
     // to the busy section, so its line carries them and the twin is represented
-    // ground — one section on the busy lane, no section on the twin,
+    // ground, one section on the busy lane, no section on the twin,
     // and a Backoff record on the twin whose numbers say the entire
     // probe was covered. A twin with its OWN population stands instead
     // (see the distinct-population contract below).
@@ -271,7 +271,7 @@ fn near_duplicate_corridor_backs_off_with_a_record() {
 fn partly_represented_candidate_is_trimmed_to_its_own_run() {
     // The elbow's users ride the busy lane out (contributing to its
     // section), come home along its corridor 90 m
-    // off (represented ground — the busy line carries them), then head
+    // off (represented ground, the busy line carries them), then head
     // north on ground of their own. The candidate is cut back to the
     // north remnant and stands there, and the Trim record carries the
     // kept and dropped metres of that cut.
@@ -374,7 +374,7 @@ fn milling_ground_with_no_single_pass_is_refused_with_a_record() {
 #[test]
 fn a_distinct_populations_parallel_path_stands() {
     // A busy lane and a parallel path 90 m away used by its OWN
-    // population — the other bank of a river. The busy line carries
+    // population, the other bank of a river. The busy line carries
     // none of the path's users, so it cannot represent their corridor:
     // both stand. Regression: the south Rhone bank (99 tracks that
     // never touch the north line) had no section.

@@ -11,7 +11,7 @@ use tracematch::synthetic::SyntheticScenario;
 use tracematch::{SectionConfig, detect_sections};
 
 // ============================================================================
-// 1. Scaling Curve (Multiscale) — Find the N^2 cliff
+// 1. Scaling Curve (Multiscale): Find the N^2 cliff
 // ============================================================================
 
 fn bench_scaling_curve(c: &mut Criterion) {
@@ -42,7 +42,7 @@ fn bench_scaling_curve(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 2. Route Length Impact — Does downsampling hold for long routes?
+// 2. Route Length Impact: Does downsampling hold for long routes?
 // ============================================================================
 
 fn bench_route_length_impact(c: &mut Criterion) {
@@ -71,7 +71,7 @@ fn bench_route_length_impact(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 4. Overlap Density — How does sparsity affect detection?
+// 4. Overlap Density: How does sparsity affect detection?
 // ============================================================================
 
 fn bench_overlap_density(c: &mut Criterion) {
@@ -100,7 +100,7 @@ fn bench_overlap_density(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 5. No Overlap Worst Case — Pure overhead measurement
+// 5. No Overlap Worst Case: Pure overhead measurement
 // ============================================================================
 
 fn bench_no_overlap_worst_case(c: &mut Criterion) {
@@ -133,7 +133,7 @@ fn bench_no_overlap_worst_case(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 6. Component Breakdown — Profile each stage
+// 6. Component Breakdown: Profile each stage
 // ============================================================================
 
 fn bench_component_breakdown(c: &mut Criterion) {

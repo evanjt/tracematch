@@ -151,7 +151,7 @@ fn fork_split_larger_piece_inherits_and_is_order_free() {
     // mid re-cut competes on its target footprint, not its stale full one) stops
     // the retained piece capturing the carved candidate on its held geometry, so
     // it no longer mints phantom duplicates each detect. This holds at the
-    // default floor 0.0 — the fold fix, not the merge floor, resolves it.
+    // default floor 0.0, the fold fix, not the merge floor, resolves it.
     let run = |floor: f64| -> (String, usize, Vec<(usize, usize)>) {
         let mut state = HysteresisState::new(HysteresisParams {
             merge_mutual_floor: floor,

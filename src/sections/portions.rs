@@ -376,7 +376,7 @@ pub fn find_all_track_portions_with_gap(
         if !laps.is_empty() {
             results.extend(laps);
         } else if run.distance >= min_distance {
-            // Fallback: single traversal (original behavior)
+            // Fallback: single traversal (original behaviour)
             let direction =
                 detect_direction_robust(&track[run.start_idx..run.end_idx], reference, &ref_tree);
             results.push((run.start_idx, run.end_idx, direction));

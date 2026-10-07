@@ -462,7 +462,7 @@ pub fn group_incremental_with_matches(
         .map(|s| s.activity_id.as_str())
         .collect();
 
-    // Initialize Union-Find with existing group structure
+    // Initialise Union-Find with existing group structure
     let mut uf = UnionFind::with_capacity(all_signatures.len());
     for group in existing_groups {
         if group.activity_ids.len() > 1 {
