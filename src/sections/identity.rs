@@ -32,7 +32,7 @@
 //! ordinal, or a clock `s_<ts>__<seq>` for a section with no line. The
 //! carry-forward structure is identical.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -462,6 +462,17 @@ fn line_digest(line: &[GpsPoint]) -> u64 {
     h.finish()
 }
 
+thread_local! {
+    static PLANS_RUN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many identity plans this thread has run. A work counter, so a caller
+/// can assert that an edit which should not plan against the catalogue did
+/// not, without reading a clock.
+pub fn identity_plans_run() -> u64 {
+    PLANS_RUN.with(Cell::get)
+}
+
 /// [`plan_identity_tuned`] with a memo of pairwise ground coverage keyed
 /// by line digests, `(prior, candidate) -> (prior over candidate,
 /// candidate over prior)`. Coverage is a pure function of the two lines,
@@ -473,6 +484,7 @@ pub fn plan_identity_memo(
     params: &IdentityParams,
     memo: &mut HashMap<(u64, u64), (f64, f64)>,
 ) -> IdentityPlan {
+    PLANS_RUN.with(|n| n.set(n.get() + 1));
     let np = prior.len();
     let nc = next.len();
 
@@ -1228,6 +1240,37 @@ impl HysteresisState {
         self.visible.remove(id);
         self.pending.remove(id);
         self.tombstones.remove(id);
+    }
+
+    /// Add one visible prior under a fresh id without planning it against the
+    /// held view, and return that id. The ground is held as given, as a mint
+    /// would hold it, junior to every id already minted, and every other
+    /// visible, pending and tombstoned entry is left exactly as it was. A caller re-admitting ground it let go uses
+    /// this so the cost is the one section, not the catalogue. The next step
+    /// plans it like any other prior.
+    ///
+    /// Refuses, returning `None` and changing nothing, when the id it would
+    /// mint is already held, visible or tombstoned. The ordinal only grows, so
+    /// that happens only on a state whose ordinal fell behind its ids.
+    pub fn admit(&mut self, cand: &CandidateSection) -> Option<String> {
+        let ordinal = self.ordinal + 1;
+        let id = format!("s_{ordinal:06}");
+        if self.visible.contains_key(&id)
+            || self.tombstones.contains_key(&id)
+            || self.pending.contains_key(&id)
+        {
+            return None;
+        }
+        self.ordinal = ordinal;
+        self.visible.insert(
+            id.clone(),
+            HeldSection {
+                polyline: cand.polyline.clone(),
+                visit_count: cand.visit_count,
+                first_seen: ordinal,
+            },
+        );
+        Some(id)
     }
 
     /// Lower a visible id's held visit count after the caller removed `n`
@@ -2189,6 +2232,65 @@ mod tests {
         let out = state.step(&[cand(line(46.0, 7.0, 100), 5), cand(line(46.0, 9.0, 100), 3)]);
         assert_eq!(out.minted, 1, "genuinely new ground appears at once");
         assert_eq!(state.visible_len(), 2);
+    }
+
+    #[test]
+    fn an_admit_holds_one_prior_without_planning_and_touches_nothing_else() {
+        let mut state = HysteresisState::default();
+        let held = line(46.0, 7.0, 100);
+        let gone = line(46.0, 8.0, 100);
+        state.step(&[cand(held.clone(), 5), cand(gone, 4)]);
+        state.step(&[cand(held.clone(), 5)]);
+        assert_eq!(state.pending_len(), 1, "one id is mid dissolve");
+        let before = serde_json::to_value(&state).unwrap();
+
+        let plans = identity_plans_run();
+        let admitted = line(46.0, 9.0, 100);
+        let id = state.admit(&cand(admitted.clone(), 3)).expect("a fresh id");
+
+        assert_eq!(identity_plans_run(), plans, "an admit plans nothing");
+        assert_eq!(state.ground_of(&id), Some(admitted.as_slice()));
+        let mut after = serde_json::to_value(&state).unwrap();
+        assert!(before["visible"].get(&id).is_none());
+        after["visible"].as_object_mut().unwrap().remove(&id);
+        for field in ["visible", "pending", "tombstones", "decisive", "params"] {
+            assert_eq!(after[field], before[field], "{field} is unchanged");
+        }
+
+        // The next step carries the admitted ground under the admitted id.
+        let out = state.step(&[cand(held, 5), cand(admitted, 3)]);
+        assert_eq!(out.minted, 0);
+        assert!(state.visible_ids().contains(&id));
+    }
+
+    #[test]
+    fn an_admit_mints_past_every_id_already_held() {
+        let mut state = HysteresisState::default();
+        state.step(&[cand(line(46.0, 7.0, 100), 5)]);
+        let first = state.visible_ids()[0].clone();
+        let id = state.admit(&cand(line(46.0, 9.0, 100), 3)).unwrap();
+        assert_ne!(id, first);
+        let out = state.step(&[
+            cand(line(46.0, 7.0, 100), 5),
+            cand(line(46.0, 9.0, 100), 3),
+            cand(line(46.0, 11.0, 100), 2),
+        ]);
+        assert_eq!(out.minted, 1);
+        assert_eq!(state.visible_len(), 3, "a later mint takes neither id");
+    }
+
+    #[test]
+    fn an_admit_refuses_an_id_it_already_holds() {
+        let mut state = HysteresisState::default();
+        state.step(&[cand(line(46.0, 7.0, 100), 5)]);
+        // A state whose ordinal fell behind its ids, as only a damaged blob has.
+        let mut blob = serde_json::to_value(&state).unwrap();
+        blob["ordinal"] = 0.into();
+        let mut state: HysteresisState = serde_json::from_value(blob).unwrap();
+        let before = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(state.admit(&cand(line(46.0, 9.0, 100), 3)), None);
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
     }
 
     #[test]
