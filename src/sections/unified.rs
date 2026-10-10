@@ -88,7 +88,7 @@
 //! The source keeps the older physical order (lift functions first, the
 //! grid after); the table is the map.
 
-use super::grid::{CellGrid, bresenham_cells, runs_in_cells};
+use super::grid::{CellGrid, bresenham_cells, bridges, runs_in_cells};
 use super::identity::{IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground};
 use super::overlap::{FullTrackOverlap, OverlapCluster};
 use super::{FrequentSection, SectionConfig, SectionPortion, process_cluster};
@@ -515,6 +515,17 @@ pub struct Tunables {
     /// cluster re-projects once and the hysteresis layer absorbs the
     /// re-cut like any other evidence shift.
     pub ref_lat_quant_deg: f64,
+    /// Longest gap between consecutive fixes the coverage grid bridges
+    /// with a straight line, in metres. A fix lost underground comes
+    /// back on the far side of a tunnel, and the tunnel is that line;
+    /// past it the gap is a bogus or missing fix (a (0, 0) first sample,
+    /// a jump across the antimeridian), and bridging it fabricates a
+    /// corridor and allocates every cell along it. A longer gap reseeds
+    /// as a skipped lift stretch does. Derivation-anchored: the longest
+    /// road tunnel in service runs 24.5 km, so 25 km keeps every
+    /// tunnel bridged and bounds one bridge at 25 km of cells, 250 at
+    /// the 100 m partition cell.
+    pub bridge_max_m: f64,
 }
 
 impl Tunables {
@@ -539,6 +550,7 @@ impl Tunables {
         occasion_span_h: 168.0,
         minority_run_m: 60.0,
         ref_lat_quant_deg: 0.1,
+        bridge_max_m: 25_000.0,
     };
 }
 
@@ -1301,6 +1313,16 @@ fn fold_track_into_grid(
         visit_fine(prev_fine, prev, seg[0].elevation, fine_seq);
         for w in seg.windows(2) {
             let b = grid.cell_of(w[1].latitude, w[1].longitude);
+            if !bridges(grid, &w[0], &w[1], tun.bridge_max_m) {
+                // A jump no line can stand for reseeds like a lift
+                // stretch: nothing between, and the far side is away.
+                fine_seq += tun.pass_away_cells + 1;
+                prev = b;
+                prev_fine = fine.cell_of(w[1].latitude, w[1].longitude);
+                cell_tracks.entry(prev).or_default().insert(t);
+                visit_fine(prev_fine, prev, w[1].elevation, fine_seq);
+                continue;
+            }
             if b != prev {
                 // Bresenham covers GPS gaps that skip cells.
                 for c in bresenham_cells(prev, b).into_iter().skip(1) {
@@ -2482,7 +2504,11 @@ impl LineMatcher {
         for w in line.windows(2) {
             let a = grid.cell_of(w[0].latitude, w[0].longitude);
             let b = grid.cell_of(w[1].latitude, w[1].longitude);
-            core.extend(bresenham_cells(a, b));
+            if bridges(&grid, &w[0], &w[1], Tunables::DEFAULT.bridge_max_m) {
+                core.extend(bresenham_cells(a, b));
+            } else {
+                core.extend([a, b]);
+            }
         }
         let reach_cells = (lateral_m.max(0.0) / cell_size).ceil() as i32;
         let reach = grow_cells(&core, reach_cells);
@@ -7914,6 +7940,143 @@ mod resolve_track_requirement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Folds one track over its whole length on the default grids at
+    /// `ref_lat`, returning the coarse and pass maps it filled.
+    #[allow(clippy::type_complexity)]
+    fn fold_one(
+        pts: &[GpsPoint],
+        ref_lat: f64,
+    ) -> (HashMap<Cell, HashSet<u32>>, HashMap<Cell, HashMap<u32, u8>>) {
+        let tun = Tunables::DEFAULT;
+        let grid = CellGrid::new(100.0, ref_lat);
+        let fine = CellGrid::new(100.0 / tun.pass_subgrid, ref_lat);
+        let mut cell_tracks = HashMap::new();
+        let mut cell_passes = HashMap::new();
+        fold_track_into_grid(
+            &grid,
+            &fine,
+            &mut cell_tracks,
+            &mut cell_passes,
+            0,
+            pts,
+            &[(0, pts.len() - 1)],
+            &tun,
+        );
+        (cell_tracks, cell_passes)
+    }
+
+    #[test]
+    fn an_antimeridian_crossing_folds_only_the_ground_it_covers() {
+        let pts = [
+            GpsPoint::new(-17.0, 179.999),
+            GpsPoint::new(-17.0, -179.999),
+            GpsPoint::new(-17.0, -179.998),
+        ];
+        let (cell_tracks, cell_passes) = fold_one(&pts, -17.0);
+        assert!(
+            cell_tracks.len() < 10,
+            "a 213 m step across 180 degrees folded {} coarse cells",
+            cell_tracks.len()
+        );
+        assert!(cell_passes.len() < 10);
+    }
+
+    #[test]
+    fn a_null_island_first_fix_draws_no_line_home() {
+        let pts = [
+            GpsPoint::new(0.0, 0.0),
+            GpsPoint::new(46.5, 6.6),
+            GpsPoint::new(46.5001, 6.6),
+        ];
+        let (cell_tracks, cell_passes) = fold_one(&pts, 46.5);
+        assert!(
+            cell_tracks.len() < 10,
+            "a (0, 0) fix folded {} coarse cells",
+            cell_tracks.len()
+        );
+        assert!(cell_passes.len() < 10);
+    }
+
+    #[test]
+    fn a_tunnel_length_gap_still_bridges() {
+        // 2 km due north with no fix in between, as through a tunnel.
+        let pts = [GpsPoint::new(46.5, 6.6), GpsPoint::new(46.518, 6.6)];
+        let (cell_tracks, _) = fold_one(&pts, 46.5);
+        let grid = CellGrid::new(100.0, 46.5);
+        let (a, b) = (grid.cell_of(46.5, 6.6), grid.cell_of(46.518, 6.6));
+        assert_eq!(cell_tracks.len(), (b.0 - a.0 + 1) as usize);
+        assert!(
+            cell_tracks.contains_key(&(a.0 + 10, a.1)),
+            "the middle of the gap is covered"
+        );
+    }
+
+    #[test]
+    fn the_bridge_cap_is_inclusive_and_counted_in_cells() {
+        let grid = CellGrid::new(100.0, 46.5);
+        let fix = |cell: Cell| {
+            let (lat, lng) = grid.centre_of(cell);
+            GpsPoint::new(lat, lng)
+        };
+        let home = (5_000, 6_000);
+        let cap = Tunables::DEFAULT.bridge_max_m;
+        let reach = (cap / 100.0) as i32;
+        assert!(bridges(
+            &grid,
+            &fix(home),
+            &fix((home.0 + reach, home.1)),
+            cap
+        ));
+        assert!(bridges(
+            &grid,
+            &fix(home),
+            &fix((home.0 + reach, home.1 - reach)),
+            cap
+        ));
+        assert!(!bridges(
+            &grid,
+            &fix(home),
+            &fix((home.0 + reach + 1, home.1)),
+            cap
+        ));
+        assert!(!bridges(
+            &grid,
+            &fix(home),
+            &fix((home.0, home.1 + reach + 1)),
+            cap
+        ));
+        assert!(bridges(&grid, &fix(home), &fix(home), cap));
+    }
+
+    #[test]
+    fn an_antimeridian_step_never_bridges_however_few_cells_it_spans() {
+        // Near the pole a degree of longitude is a few metres of grid,
+        // so the whole globe spans fewer cells than the cap.
+        let grid = CellGrid::new(100.0, 89.99);
+        let a = GpsPoint::new(89.99, 179.9);
+        let b = GpsPoint::new(89.99, -179.9);
+        let span = (grid.cell_of(a.latitude, a.longitude).1
+            - grid.cell_of(b.latitude, b.longitude).1)
+            .abs();
+        assert!(f64::from(span) * 100.0 < Tunables::DEFAULT.bridge_max_m);
+        assert!(!bridges(&grid, &a, &b, Tunables::DEFAULT.bridge_max_m));
+        assert!(!bridges(&grid, &b, &a, Tunables::DEFAULT.bridge_max_m));
+    }
+
+    #[test]
+    fn ground_rejoined_after_a_break_is_a_new_pass() {
+        // Out and back over the same fine cells, with the far fix a
+        // whole region away: the return is a second pass, as it is
+        // after a skipped lift stretch.
+        let home = GpsPoint::new(46.5, 6.6);
+        let far = GpsPoint::new(47.5, 6.6);
+        let (_, cell_passes) = fold_one(&[home, far, home], 46.5);
+        let grid = CellGrid::new(100.0, 46.5);
+        let class = cell_passes[&grid.cell_of(46.5, 6.6)][&0];
+        assert_eq!(class, 2);
+        assert_eq!(cell_passes.len(), 2, "only the two fixes are folded");
+    }
 
     fn climb(step_deg: f64, ele_step: f64, zigzag: bool, n: usize) -> Vec<GpsPoint> {
         (0..n)

@@ -126,6 +126,7 @@
         { key: 'reach', label: 'Reach', hint: 'Neighbourhood reach in fine cells for the single-pass cut', min: 1, max: 4, step: 1 },
         { key: 'clusterGapM', label: 'Cluster gap', hint: 'Bounding boxes within this share one cluster and one projection', min: 1000, max: 200000, step: 1000, unit: 'm' },
         { key: 'refLatQuantDeg', label: 'Projection quantisation', hint: 'Latitude rounding for a cluster reference plane', min: 0.01, max: 1, step: 0.01, unit: '°' },
+        { key: 'bridgeMaxM', label: 'Bridge cap', hint: 'Longest gap between fixes drawn as a straight line', min: 1000, max: 100000, step: 1000, unit: 'm' },
         { key: 'eleLevelTolM', label: 'Level tolerance', hint: 'Elevation separation that makes ground a different level', min: 2, max: 60, step: 1, unit: 'm' },
       ],
     },
@@ -176,7 +177,7 @@
     passNeeded: 3, reach: 1, liftSpanM: 300, liftMinGrade: 0.22, liftMinStraight: 0.975,
     jitterHumanMin: 1.05, liftMinSpeedMs: 1.5, liftMinClimbMh: 1500, descentMatchM: 60,
     clusterGapM: 50000, selfPassMax: 0.25, selfPassClean: 0.05, minorityRunM: 60,
-    occasionSpanH: 168, refLatQuantDeg: 0.1,
+    occasionSpanH: 168, refLatQuantDeg: 0.1, bridgeMaxM: 25000,
   };
   let tunables = $state<Required<Tunables>>({ ...TUNABLE_DEFAULTS });
   const tunablesChanged = $derived(

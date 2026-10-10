@@ -41,6 +41,26 @@ impl CellGrid {
     }
 }
 
+/// Whether the straight line between consecutive fixes `a` and `b` may
+/// stand in for the unrecorded ground between them, as it does across a
+/// tunnel. Not across a longitude step over 180 degrees: the track
+/// crossed the antimeridian, a few metres in fact and the whole globe in
+/// cell space. Not across a step longer than `max_m` in cells either,
+/// which is a lost or bogus fix rather than ground covered. The cap is
+/// read in the grid's own cells because that is the length the line
+/// would cost.
+pub(super) fn bridges(grid: &CellGrid, a: &GpsPoint, b: &GpsPoint, max_m: f64) -> bool {
+    if (b.longitude - a.longitude).abs() > 180.0 {
+        return false;
+    }
+    let ca = grid.cell_of(a.latitude, a.longitude);
+    let cb = grid.cell_of(b.latitude, b.longitude);
+    let steps = (i64::from(cb.0) - i64::from(ca.0))
+        .abs()
+        .max((i64::from(cb.1) - i64::from(ca.1)).abs());
+    steps as f64 * grid.cell_size_m <= max_m
+}
+
 /// Standard 2D Bresenham, 8-connected: a step can move x and y together, so
 /// the line takes diagonal steps. Every cell from start to end inclusive.
 pub(super) fn bresenham_cells(start: (i32, i32), end: (i32, i32)) -> Vec<(i32, i32)> {
