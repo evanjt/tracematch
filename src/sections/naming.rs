@@ -16,7 +16,9 @@
 use crate::GpsPoint;
 use crate::geo_utils::haversine_distance;
 
-use super::identity::{CARRY_COVERAGE, COVERAGE_STEP_M, GROUND_TOL_M, resample_by_arc};
+use super::identity::{
+    CARRY_COVERAGE, COVERAGE_STEP_M, GROUND_TOL_M, covered_within, resample_by_arc,
+};
 
 /// Core floor: three ~100 m evidence cells, expressed through the ground
 /// tolerance anchor (`GROUND_TOL_M` is half a cell).
@@ -81,18 +83,7 @@ pub fn coverage_and_offset(core: &[GpsPoint], line: &[GpsPoint]) -> (f64, f64) {
     }
     let core = &resample_by_arc(core, COVERAGE_STEP_M);
     let line = &resample_by_arc(line, COVERAGE_STEP_M);
-    let mut covered = 0usize;
-    let mut offset_sum = 0.0;
-    for s in core {
-        let d = line
-            .iter()
-            .map(|p| haversine_distance(s, p))
-            .fold(f64::INFINITY, f64::min);
-        if d <= GROUND_TOL_M {
-            covered += 1;
-            offset_sum += d;
-        }
-    }
+    let (covered, offset_sum) = covered_within(core, line, GROUND_TOL_M);
     if covered == 0 {
         return (0.0, f64::INFINITY);
     }
@@ -204,6 +195,7 @@ pub fn split_direction(parent: &[GpsPoint], sibling: &[GpsPoint]) -> Option<&'st
 
 #[cfg(test)]
 mod tests {
+    use super::super::identity::coverage_distance_evals;
     use super::*;
 
     fn pt(lat: f64, lng: f64) -> GpsPoint {
@@ -214,16 +206,17 @@ mod tests {
         }
     }
 
+    /// Point `i` of a straight north line spaced ~`step_m`, offset east.
+    fn line_point(i: usize, step_m: f64, east_m: f64) -> GpsPoint {
+        pt(
+            46.0 + (i as f64 * step_m) / 111_320.0,
+            7.0 + east_m / (111_320.0 * 46.0_f64.to_radians().cos()),
+        )
+    }
+
     /// A straight north line of `n` points spaced ~`step_m`, offset east.
     fn line(n: usize, step_m: f64, east_m: f64) -> Vec<GpsPoint> {
-        (0..n)
-            .map(|i| {
-                pt(
-                    46.0 + (i as f64 * step_m) / 111_320.0,
-                    7.0 + east_m / (111_320.0 * 46.0_f64.to_radians().cos()),
-                )
-            })
-            .collect()
+        (0..n).map(|i| line_point(i, step_m, east_m)).collect()
     }
 
     #[test]
@@ -303,6 +296,71 @@ mod tests {
             "the ceiling must separate the named line ({off_self:.1} m) from the twin ({off_twin:.1} m)"
         );
         assert!(score_named_candidate(&named, &named, &twin).is_none());
+    }
+
+    /// The unpruned double scan [`coverage_and_offset`] must equal exactly:
+    /// same predicate, same minimum distance, no grid.
+    fn coverage_and_offset_naive(core: &[GpsPoint], line: &[GpsPoint]) -> (f64, f64) {
+        let core = resample_by_arc(core, COVERAGE_STEP_M);
+        let line = resample_by_arc(line, COVERAGE_STEP_M);
+        let mut covered = 0usize;
+        let mut offset_sum = 0.0;
+        for s in &core {
+            let d = line
+                .iter()
+                .map(|p| haversine_distance(s, p))
+                .fold(f64::INFINITY, f64::min);
+            if d <= GROUND_TOL_M {
+                covered += 1;
+                offset_sum += d;
+            }
+        }
+        if covered == 0 {
+            return (0.0, f64::INFINITY);
+        }
+        (
+            covered as f64 / core.len() as f64,
+            offset_sum / covered as f64,
+        )
+    }
+
+    #[test]
+    fn coverage_and_offset_matches_the_plain_scan_in_linear_work() {
+        // Two 5 km lines, the second ~20 m east with a deterministic lateral
+        // jitter that carries some of it past the ground tolerance.
+        let named = line(500, 10.0, 0.0);
+        let near: Vec<GpsPoint> = (0..500)
+            .map(|i| {
+                let jitter = (i as f64 * 0.37).sin() * 12.0 + (i as f64 * 0.11).cos() * 25.0;
+                line_point(i, 10.0, 20.0 + jitter)
+            })
+            .collect();
+        let far = line(500, 10.0, 400.0);
+        for (a, b) in [
+            (&named, &near),
+            (&near, &named),
+            (&named, &far),
+            (&named, &named),
+        ] {
+            let a_n = resample_by_arc(a, COVERAGE_STEP_M).len() as u64;
+            let b_n = resample_by_arc(b, COVERAGE_STEP_M).len() as u64;
+            let before = coverage_distance_evals();
+            let got = coverage_and_offset(a, b);
+            let evals = coverage_distance_evals() - before;
+            assert_eq!(got, coverage_and_offset_naive(a, b));
+            assert!(
+                evals < 20 * (a_n + b_n),
+                "{evals} distance evaluations for {a_n} x {b_n} samples"
+            );
+        }
+        let (cov, off) = coverage_and_offset(&named, &near);
+        assert!(
+            cov > 0.5 && cov < 1.0,
+            "the jitter must straddle the tolerance, got {cov}"
+        );
+        assert!(off > 5.0 && off < GROUND_TOL_M);
+        assert_eq!(coverage_and_offset(&named, &[]), (0.0, f64::INFINITY));
+        assert_eq!(coverage_and_offset(&[], &named), (0.0, f64::INFINITY));
     }
 
     #[test]
