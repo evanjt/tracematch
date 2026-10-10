@@ -287,6 +287,7 @@ fn tunables_round_trip_partially_and_stay_camel_case() {
     assert_eq!(
         keys(&value),
         vec![
+            "bridgeMaxM",
             "clusterGapM",
             "descentMatchM",
             "dwellEvents",

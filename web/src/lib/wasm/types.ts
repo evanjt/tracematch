@@ -159,6 +159,7 @@ export interface Tunables {
   minorityRunM?: number;
   occasionSpanH?: number;
   refLatQuantDeg?: number;
+  bridgeMaxM?: number;
 }
 
 // What detectSections returns.
