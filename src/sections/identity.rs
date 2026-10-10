@@ -123,12 +123,34 @@ fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
     }
     let samples = &resample_by_arc(samples, COVERAGE_STEP_M);
     let line = &resample_by_arc(line, COVERAGE_STEP_M);
-    // Exact accelerator: bucket the line's points into a degree grid whose
-    // cells span at least `tol_m` in both axes, so any line point within
-    // tolerance of a sample must sit in the sample's 3x3 cell ring. The
-    // haversine predicate is unchanged, the grid only prunes candidates -
-    // so the fraction is identical to the plain double scan (the oracle
-    // test pins it), at O(A + B) instead of O(A x B).
+    let (covered, _) = covered_within(samples, line, tol_m);
+    covered as f64 / samples.len() as f64
+}
+
+thread_local! {
+    static DISTANCE_EVALS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many point-to-point distances [`covered_within`] has evaluated on
+/// this thread. A work counter, so a caller can assert the scan stays
+/// linear in its inputs without reading a clock.
+#[cfg(test)]
+pub(crate) fn coverage_distance_evals() -> u64 {
+    DISTANCE_EVALS.with(Cell::get)
+}
+
+/// How many of `samples` lie within `tol_m` of some point of `line`, and the
+/// sum of those samples' distances to their nearest line point. Both slices
+/// are taken as they are, already resampled by the caller.
+///
+/// Exact accelerator: the line's points are bucketed into a degree grid whose
+/// cells span at least `tol_m` in both axes, so any line point within
+/// tolerance of a sample sits in the sample's 3x3 cell ring, and so does the
+/// nearest one whenever it is within tolerance. The haversine predicate and
+/// the minimum are unchanged, the grid only prunes candidates, so the count
+/// and the sum equal the plain double scan (the oracle tests pin both) at
+/// O(A + B) instead of O(A x B).
+pub(crate) fn covered_within(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> (usize, f64) {
     let cell_lat = tol_m / 110_574.0;
     let max_abs_lat = samples
         .iter()
@@ -149,19 +171,29 @@ fn coverage(samples: &[GpsPoint], line: &[GpsPoint], tol_m: f64) -> f64 {
             .or_default()
             .push(p);
     }
-    let covered = samples
-        .iter()
-        .filter(|s| {
-            let (cy, cx) = key(s.latitude, s.longitude);
-            (-1..=1).any(|dy| {
-                (-1..=1).any(|dx| {
-                    grid.get(&(cy + dy, cx + dx))
-                        .is_some_and(|pts| pts.iter().any(|p| haversine_distance(s, p) <= tol_m))
-                })
-            })
-        })
-        .count();
-    covered as f64 / samples.len() as f64
+    let mut evals = 0u64;
+    let mut covered = 0usize;
+    let mut distance_sum = 0.0;
+    for s in samples {
+        let (cy, cx) = key(s.latitude, s.longitude);
+        let mut nearest = f64::INFINITY;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(pts) = grid.get(&(cy + dy, cx + dx)) {
+                    evals += pts.len() as u64;
+                    for p in pts {
+                        nearest = nearest.min(haversine_distance(s, p));
+                    }
+                }
+            }
+        }
+        if nearest <= tol_m {
+            covered += 1;
+            distance_sum += nearest;
+        }
+    }
+    DISTANCE_EVALS.with(|c| c.set(c.get() + evals));
+    (covered, distance_sum)
 }
 
 /// Whether two grounds describe the same corridor: a majority of either lies
