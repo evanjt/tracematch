@@ -2,6 +2,6 @@
 # lint that a newer stable adds cannot fail CI without failing here first.
 # veloq pins the same version.
 [toolchain]
-channel = "1.95.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

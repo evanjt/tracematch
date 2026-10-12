@@ -73,6 +73,26 @@ pub const DISSOLVE_PRESSURE_HI: f64 = 0.7;
 /// normal backfill drip.
 pub const DEFAULT_K: u8 = 3;
 
+/// Default steps a tombstone is kept after the step that retired it. On the
+/// step after that its ground is dropped, and ground re-forming later mints a
+/// fresh id. A step is one arrival once a detect replays per arrival, so this
+/// counts activities.
+///
+/// Read from veloqrs's `identity_growth_per_year` replay with expiry off: five
+/// simulated years of 365 activities each, synced a week at a time, on stable
+/// ground, on ground that moves every year and on stable ground losing 5 % of
+/// the library a year. The oldest restore was 1,397 arrivals after its
+/// retirement, on stable ground and with deletions in year 5, and 723 with
+/// turnover. Restore ages are read per sync, so each is an upper bound by at
+/// most one sync. 1,500 is the smallest round figure above all of them. The
+/// oldest restore grew with the replay's length, 252 arrivals after one year
+/// and 1,397 after five, because stable ground recurs.
+pub const TOMBSTONE_HORIZON_STEPS: u64 = 1_500;
+
+fn default_tombstone_horizon_steps() -> u64 {
+    TOMBSTONE_HORIZON_STEPS
+}
+
 /// Spacing of the points coverage is counted over. Well below
 /// [`GROUND_TOL_M`], so a covered fraction is a fraction of the line's length
 /// and not of its vertices, whatever the sampling density along it.
@@ -829,6 +849,11 @@ pub struct HysteresisParams {
     /// Passed through to [`plan_identity_tuned`]'s [`IdentityParams`] at the
     /// same 0.3.
     pub merge_size_ratio: f64,
+    /// Steps a tombstone is kept after the step that retired it; see
+    /// [`TOMBSTONE_HORIZON_STEPS`]. Defaulted on decode, so params from an
+    /// older blob take the default rather than failing.
+    #[serde(default = "default_tombstone_horizon_steps")]
+    pub tombstone_horizon_steps: u64,
 }
 
 impl Default for HysteresisParams {
@@ -839,6 +864,7 @@ impl Default for HysteresisParams {
             recut_agreement: RECUT_AGREEMENT,
             merge_mutual_floor: 0.0,
             merge_size_ratio: 0.3,
+            tombstone_horizon_steps: TOMBSTONE_HORIZON_STEPS,
         }
     }
 }
@@ -849,6 +875,11 @@ struct HeldSection {
     polyline: Vec<GpsPoint>,
     visit_count: u32,
     first_seen: u64,
+    /// The step that tombstoned it; `None` while visible. A tombstone decoded
+    /// from a blob older than the stamp also reads `None`, and the next step
+    /// stamps it with its own number, so it is kept a full horizon from there.
+    #[serde(default)]
+    retired_at: Option<u64>,
 }
 
 /// The debounce ledger of one visible id: both directions' streaks held
@@ -898,6 +929,8 @@ pub struct StepOutcome {
     pub restored: usize,
     /// Sustained dissolves that fired this step (moved to a tombstone).
     pub dissolved: usize,
+    /// Tombstones dropped at the start of this step, their horizon passed.
+    pub expired: usize,
     /// Sustained re-cuts that fired this step (geometry snapped to the batch).
     pub recut_applied: usize,
     /// Ids carrying an active debounce after the step.
@@ -963,6 +996,12 @@ pub struct HysteresisState {
     /// pure function of it. Trailing and defaulted, so an older blob decodes.
     #[serde(default)]
     decisive: bool,
+    /// Steps run with an arrival behind them, the clock tombstones age on. It
+    /// counts steps rather than time, so the same batches in the same order
+    /// expire the same tombstones on any device. Trailing and defaulted like
+    /// `decisive`.
+    #[serde(default)]
+    steps: u64,
 }
 
 impl Default for HysteresisState {
@@ -980,6 +1019,7 @@ impl HysteresisState {
             pending: BTreeMap::new(),
             ordinal: 0,
             decisive: false,
+            steps: 0,
         }
     }
 
@@ -998,6 +1038,13 @@ impl HysteresisState {
     /// Whether the next step runs decisively.
     pub fn is_decisive(&self) -> bool {
         self.decisive
+    }
+
+    /// Change how many steps a tombstone is kept, on a state already built,
+    /// for a replay that sweeps the horizon. It takes effect from the next
+    /// step and changes nothing else.
+    pub fn set_tombstone_horizon_steps(&mut self, steps: u64) {
+        self.params.tombstone_horizon_steps = steps;
     }
 
     /// Fold a fresh batch catalogue into the visible view, damping churn.
@@ -1044,6 +1091,35 @@ impl HysteresisState {
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.fold(next, loses, true)
+    }
+
+    /// [`step_assign_guarded`](Self::step_assign_guarded) for a step with no
+    /// arrival behind it, a re-detect of what is already held. It debounces
+    /// like any step, but the tombstones age on arrivals, so it neither
+    /// advances their clock nor drops one, and a re-run of an unchanged batch
+    /// leaves the state as it found it.
+    pub fn rerun_assign_guarded(
+        &mut self,
+        next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.fold(next, loses, false)
+    }
+
+    fn fold(
+        &mut self,
+        next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
+        arrival: bool,
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        // Before the mint pass reads them.
+        let expired = if arrival {
+            self.steps += 1;
+            self.expire_tombstones()
+        } else {
+            0
+        };
         // An armed step runs at k = 1: the first decisive plan applies.
         let k = if std::mem::take(&mut self.decisive) {
             1
@@ -1168,6 +1244,7 @@ impl HysteresisState {
         let mut new_pending: BTreeMap<String, Pending> = BTreeMap::new();
         let mut out = StepOutcome {
             raw_count: next.len(),
+            expired,
             ..StepOutcome::default()
         };
 
@@ -1204,7 +1281,8 @@ impl HysteresisState {
                     new_visible.insert(id.clone(), h);
                     new_pending.insert(id, p);
                 }
-                HeldAction::Tombstone(h) => {
+                HeldAction::Tombstone(mut h) => {
+                    h.retired_at = Some(self.steps);
                     self.tombstones.insert(id, h);
                 }
             }
@@ -1218,6 +1296,7 @@ impl HysteresisState {
             let cand = &next[j];
             if let Some(tomb_id) = self.match_tombstone(&cand.polyline) {
                 let mut held = self.tombstones.remove(&tomb_id).expect("matched tombstone");
+                held.retired_at = None;
                 held.polyline = cand.polyline.clone();
                 held.visit_count = cand.visit_count.max(held.visit_count);
                 candidate_ids[j] = tomb_id.clone();
@@ -1239,6 +1318,7 @@ impl HysteresisState {
                         polyline: cand.polyline.clone(),
                         visit_count: cand.visit_count,
                         first_seen: self.ordinal,
+                        retired_at: None,
                     },
                 );
                 out.minted += 1;
@@ -1300,6 +1380,7 @@ impl HysteresisState {
                 polyline: cand.polyline.clone(),
                 visit_count: cand.visit_count,
                 first_seen: ordinal,
+                retired_at: None,
             },
         );
         Some(id)
@@ -1360,6 +1441,7 @@ impl HysteresisState {
                 polyline: cand.polyline.clone(),
                 visit_count: visits,
                 first_seen: held.first_seen,
+                retired_at: None,
             });
         }
         // Material re-cut: debounce, folding visits but freezing geometry. The
@@ -1377,12 +1459,14 @@ impl HysteresisState {
                 polyline: cand.polyline.clone(),
                 visit_count: cand.visit_count,
                 first_seen: held.first_seen,
+                retired_at: None,
             })
         } else {
             let frozen = HeldSection {
                 polyline: held.polyline.clone(),
                 visit_count: visits,
                 first_seen: held.first_seen,
+                retired_at: None,
             };
             HeldAction::KeepPending(
                 frozen,
@@ -1439,6 +1523,21 @@ impl HysteresisState {
                 },
             )
         }
+    }
+
+    /// Drop every tombstone retired more than the horizon of steps before this
+    /// one, returning how many went. An unstamped tombstone, from a blob older
+    /// than the stamp, is stamped with this step first. Its id stays retired:
+    /// the ordinal only grows, so no later mint re-issues it.
+    fn expire_tombstones(&mut self) -> usize {
+        let now = self.steps;
+        let horizon = self.params.tombstone_horizon_steps;
+        let before = self.tombstones.len();
+        self.tombstones.retain(|_, held| {
+            let retired_at = *held.retired_at.get_or_insert(now);
+            now.saturating_sub(retired_at) <= horizon
+        });
+        before - self.tombstones.len()
     }
 
     /// The tombstoned id whose ground the given candidate re-forms, if any. A
@@ -1505,6 +1604,16 @@ impl HysteresisState {
     /// Tombstoned ids, sorted.
     pub fn tombstone_ids(&self) -> Vec<String> {
         self.tombstones.keys().cloned().collect()
+    }
+
+    /// The step that tombstoned `id`, if it is tombstoned and stamped.
+    pub fn tombstone_retired_at(&self, id: &str) -> Option<u64> {
+        self.tombstones.get(id).and_then(|h| h.retired_at)
+    }
+
+    /// Steps run, the clock a tombstone's horizon is counted on.
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// Ids with an active debounce.
@@ -2445,6 +2554,174 @@ mod tests {
         assert_eq!(out.restored, 1);
         assert_eq!(out.minted, 0);
         assert_eq!(state.visible_ids(), vec![id]);
+    }
+
+    const SHORT_HORIZON: u64 = 6;
+
+    fn short_horizon_state() -> HysteresisState {
+        HysteresisState::new(HysteresisParams {
+            tombstone_horizon_steps: SHORT_HORIZON,
+            ..HysteresisParams::default()
+        })
+    }
+
+    /// A state holding one tombstoned ground, retired on the step just run,
+    /// beside one live ground that keeps the steps coming. Returns the state,
+    /// the tombstoned id, its ground and the live ground.
+    fn one_tombstone(
+        mut state: HysteresisState,
+    ) -> (HysteresisState, String, Vec<GpsPoint>, Vec<GpsPoint>) {
+        let gone = line(46.0, 7.0, 100);
+        let live = line(46.0, 9.0, 100);
+        let (_, r) = state.step_assign(&[cand(gone.clone(), 5), cand(live.clone(), 5)]);
+        let id = r[0].id.clone();
+        state.arm_decisive();
+        let out = state.step(&[cand(live.clone(), 5)]);
+        assert_eq!(
+            out.dissolved, 1,
+            "scenario fault: the ground did not retire"
+        );
+        assert!(state.is_tombstoned(&id));
+        (state, id, gone, live)
+    }
+
+    /// Run `gap` steps without the ground, then one step where it re-forms.
+    fn reform_after(
+        state: &mut HysteresisState,
+        gap: u64,
+        gone: &[GpsPoint],
+        live: &[GpsPoint],
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        for _ in 0..gap {
+            state.step(&[cand(live.to_vec(), 5)]);
+        }
+        state.step_assign(&[cand(gone.to_vec(), 5), cand(live.to_vec(), 5)])
+    }
+
+    #[test]
+    fn a_tombstone_restores_through_its_horizon() {
+        // Re-forming on the horizon-th step after retirement is the last
+        // step that still finds the tombstone.
+        for gap in [0, 1, SHORT_HORIZON - 1] {
+            let (mut state, id, gone, live) = one_tombstone(short_horizon_state());
+            let (out, r) = reform_after(&mut state, gap, &gone, &live);
+            assert_eq!(out.restored, 1, "gap {gap}: the old id comes back");
+            assert_eq!(out.minted, 0, "gap {gap}");
+            assert_eq!(r[0].id, id, "gap {gap}");
+            assert_eq!(r[0].fate, CandidateFate::Restored, "gap {gap}");
+            assert!(state.tombstone_ids().is_empty(), "gap {gap}");
+        }
+    }
+
+    #[test]
+    fn a_tombstone_expires_once_its_horizon_has_passed() {
+        for gap in [SHORT_HORIZON, SHORT_HORIZON + 1, 3 * SHORT_HORIZON] {
+            let (mut state, id, gone, live) = one_tombstone(short_horizon_state());
+            let (out, r) = reform_after(&mut state, gap, &gone, &live);
+            assert_eq!(out.restored, 0, "gap {gap}: the old id is not restored");
+            assert_eq!(out.minted, 1, "gap {gap}: the ground mints afresh");
+            assert_ne!(r[0].id, id, "gap {gap}: an expired id is never re-minted");
+            assert_eq!(r[0].fate, CandidateFate::Minted, "gap {gap}");
+            assert!(
+                state.tombstone_ids().is_empty(),
+                "gap {gap}: nothing is retained"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expiry_drops_the_tombstone_on_its_own_step() {
+        let (mut state, id, _gone, live) = one_tombstone(short_horizon_state());
+        for step in 1..=SHORT_HORIZON {
+            let out = state.step(&[cand(live.clone(), 5)]);
+            assert_eq!(out.expired, 0, "step {step}");
+            assert!(
+                state.is_tombstoned(&id),
+                "step {step}: still in the horizon"
+            );
+        }
+        let out = state.step(&[cand(live.clone(), 5)]);
+        assert_eq!(out.expired, 1);
+        assert!(!state.is_tombstoned(&id));
+        assert_eq!(state.tombstone_ids().len(), 0);
+        let out = state.step(&[cand(live, 5)]);
+        assert_eq!(out.expired, 0, "an expiry is counted once");
+    }
+
+    #[test]
+    fn a_restore_starts_a_fresh_horizon_on_the_next_retirement() {
+        let (mut state, id, gone, live) = one_tombstone(short_horizon_state());
+        let (out, _) = reform_after(&mut state, SHORT_HORIZON - 1, &gone, &live);
+        assert_eq!(out.restored, 1);
+        state.arm_decisive();
+        assert_eq!(state.step(&[cand(live.clone(), 5)]).dissolved, 1);
+        assert!(state.is_tombstoned(&id));
+
+        let (out, r) = reform_after(&mut state, SHORT_HORIZON - 1, &gone, &live);
+        assert_eq!(out.restored, 1, "the second retirement has its own horizon");
+        assert_eq!(r[0].id, id);
+    }
+
+    #[test]
+    fn a_rerun_neither_ages_nor_drops_a_tombstone() {
+        let (mut state, id, gone, live) = one_tombstone(short_horizon_state());
+        let held = serde_json::to_value(&state).unwrap();
+        for _ in 0..3 * SHORT_HORIZON {
+            let (out, _) = state.rerun_assign_guarded(&[cand(live.clone(), 5)], &|_, _| false);
+            assert_eq!(out.expired, 0);
+        }
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            held,
+            "a re-run of an unchanged batch leaves the state as it found it"
+        );
+        let (out, r) = reform_after(&mut state, SHORT_HORIZON - 1, &gone, &live);
+        assert_eq!(out.restored, 1, "re-runs did not count against the horizon");
+        assert_eq!(r[0].id, id);
+    }
+
+    #[test]
+    fn a_tombstone_from_a_blob_without_its_stamp_keeps_a_full_horizon() {
+        let (state, id, gone, live) = one_tombstone(short_horizon_state());
+        // An older blob: no step clock, no retirement stamp on its tombstones.
+        let mut blob = serde_json::to_value(&state).unwrap();
+        blob.as_object_mut().unwrap().remove("steps");
+        for (_, held) in blob["tombstones"].as_object_mut().unwrap() {
+            held.as_object_mut().unwrap().remove("retired_at");
+        }
+        let old: HysteresisState = serde_json::from_value(blob).unwrap();
+        assert!(old.is_tombstoned(&id));
+
+        // The first step after the upgrade stamps it, so it lasts the
+        // horizon from there, and the step after that drops it.
+        let mut kept = old.clone();
+        let (out, r) = reform_after(&mut kept, SHORT_HORIZON, &gone, &live);
+        assert_eq!(
+            out.restored, 1,
+            "an unstamped tombstone keeps a full horizon"
+        );
+        assert_eq!(r[0].id, id);
+
+        let mut expired = old;
+        let (out, _) = reform_after(&mut expired, SHORT_HORIZON + 1, &gone, &live);
+        assert_eq!(out.restored, 0, "and expires once the horizon has passed");
+        assert!(expired.tombstone_ids().is_empty());
+    }
+
+    #[test]
+    fn params_from_a_blob_without_a_horizon_take_the_default() {
+        let state = HysteresisState::default();
+        let mut blob = serde_json::to_value(&state).unwrap();
+        blob["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tombstone_horizon_steps");
+        let old: HysteresisState = serde_json::from_value(blob).unwrap();
+        assert_eq!(
+            old.params.tombstone_horizon_steps,
+            HysteresisParams::default().tombstone_horizon_steps
+        );
+        assert!(old.params.tombstone_horizon_steps > 0);
     }
 
     #[test]
