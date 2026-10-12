@@ -3,7 +3,7 @@
 # ── Dev stage: tools only, no source ──────────────────────────────
 # Used by docker-compose wasm service. Source is bind-mounted at
 # runtime, so this image only rebuilds when tools change.
-FROM rust:1.95-bookworm AS wasm-dev
+FROM rust:1.99-bookworm AS wasm-dev
 
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 WORKDIR /build
 
 # ── Production WASM build ─────────────────────────────────────────
-FROM rust:1.95-bookworm AS wasm-builder
+FROM rust:1.99-bookworm AS wasm-builder
 
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
