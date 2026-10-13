@@ -1,20 +1,23 @@
 #![allow(clippy::type_complexity)]
-//! Consensus polyline computation.
+//! How closely a set of passes agrees with a reference line.
 //!
-//! Computes a refined polyline from multiple overlapping tracks using weighted averaging
-//! where weight = 1 / (distance_to_reference + epsilon).
+//! For each reference point, every trace's nearest point within the
+//! proximity threshold is an observation. The measurements are the mean
+//! distance of those observations from the reference (`average_spread`),
+//! how many traces observed each point (`point_density`), and a confidence
+//! built from both.
 //!
-//! Algorithm:
-//! 1. Normalise each track to distance parameterization
-//! 2. For each position along the reference, find nearby points from all tracks
-//! 3. Compute weighted centroid of nearby points
-//! 4. Track observation density for confidence scoring
+//! The polyline these functions also return is a centroid weighted by
+//! 1 / (distance + 1e-6), so a trace lying on the reference outweighs every
+//! other trace by about a million to one and the centroid is the reference
+//! to within float drift. A section's line is never taken from it: it is
+//! the medoid's own slice, and [`super::process_cluster`] measures the other
+//! passes against that slice, leaving the medoid's own pass out.
 //!
 //! Two paths:
-//! - [`compute_consensus_polyline`], the original full-recompute path,
-//!   used at first detection and as a fallback. Walks every trace's R-tree
-//!   for every reference point; cost is O(T × P log P) where T = traces
-//!   and P = reference points.
+//! - [`compute_consensus_polyline`], the full-recompute path, used by
+//!   `process_cluster`. Walks every trace's R-tree for every reference
+//!   point; cost is O(T × P log P) where T = traces and P = reference points.
 //! - [`merge_traces_into_consensus`], the incremental path. Maintains a
 //!   per-reference-point [`ConsensusPointAccumulator`] of weighted sums
 //!   and adds new traces' contributions in O(K × P log P) where K = new
@@ -78,20 +81,22 @@ impl ConsensusAccumulator {
 
 /// Result of consensus computation including confidence metrics
 pub struct ConsensusResult {
-    /// The refined consensus polyline
+    /// The weighted centroid of the observations, which collapses onto any
+    /// trace that lies on the reference; never a section's line
     pub polyline: Vec<GpsPoint>,
     /// Confidence score (0.0-1.0)
     pub confidence: f64,
     /// Number of tracks that contributed
     pub observation_count: u32,
-    /// Average spread of observations from consensus (meters)
+    /// Mean distance of the observations from the reference (metres)
     pub average_spread: f64,
     /// Per-point observation count (how many tracks contributed to each point)
     pub point_density: Vec<u32>,
 }
 
-/// Compute a consensus polyline from multiple overlapping tracks.
-/// Uses weighted averaging where weight = 1 / (distance_to_reference + epsilon).
+/// Measure how closely `all_traces` agree with `reference`: spread, per-point
+/// density and confidence. The returned polyline is the weighted centroid the
+/// module doc describes, and no section line is taken from it.
 pub fn compute_consensus_polyline(
     reference: &[GpsPoint],
     all_traces: &[Vec<GpsPoint>],
