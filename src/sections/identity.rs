@@ -295,6 +295,13 @@ fn ground_bbox_padded(pts: &[GpsPoint]) -> (f64, f64, f64, f64) {
     )
 }
 
+/// Whether two padded boxes from [`ground_bbox_padded`] intersect. False means
+/// no point of either ground lies within [`GROUND_TOL_M`] of the other, so
+/// their coverage is 0 both ways.
+fn padded_boxes_meet(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    !(a.0 > b.1 || b.0 > a.1 || a.2 > b.3 || b.2 > a.3)
+}
+
 /// How decisively a held ground has left the batch: `1 - max coverage of the
 /// held ground by any batch section`. 1.0 when no batch section covers it at
 /// all, 0.0 when one covers it entirely. The dissolve debounce only counts a
@@ -518,6 +525,18 @@ thread_local! {
     static PLANS_RUN: Cell<u64> = const { Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static TOMBSTONE_OVERLAPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many tombstones a mint on this thread has scored by mutual overlap. A
+/// work counter, so a test can assert distant graves are never scanned.
+#[cfg(test)]
+fn tombstone_overlaps_scored() -> u64 {
+    TOMBSTONE_OVERLAPS.with(Cell::get)
+}
+
 /// How many identity plans this thread has run. A work counter, so a caller
 /// can assert that an edit which should not plan against the catalogue did
 /// not, without reading a clock.
@@ -586,8 +605,7 @@ pub fn plan_identity_memo(
                 }
                 continue;
             }
-            let (a, b) = (p_bb[i], c_bb[j]);
-            if a.0 > b.1 || b.0 > a.1 || a.2 > b.3 || b.2 > a.3 {
+            if !padded_boxes_meet(p_bb[i], c_bb[j]) {
                 continue;
             }
             // The same line covers itself completely; most candidates are
@@ -1545,9 +1563,20 @@ impl HysteresisState {
     /// grants extent growth would also resurrect a dead id onto a spur that is
     /// mostly foreign ground (the capture-rotation pinning's second half). The
     /// best mutual overlap wins; BTreeMap iteration keeps it deterministic.
+    /// A grave whose padded box misses the candidate's scores 0 and is skipped
+    /// unscored; an empty ground has no box and is always scored.
     fn match_tombstone(&self, polyline: &[GpsPoint]) -> Option<String> {
+        let cand_bb = (!polyline.is_empty()).then(|| ground_bbox_padded(polyline));
         let mut best: Option<(String, f64)> = None;
         for (id, h) in &self.tombstones {
+            if let Some(cb) = cand_bb
+                && !h.polyline.is_empty()
+                && !padded_boxes_meet(cb, ground_bbox_padded(&h.polyline))
+            {
+                continue;
+            }
+            #[cfg(test)]
+            TOMBSTONE_OVERLAPS.with(|n| n.set(n.get() + 1));
             let mo = mutual_overlap(polyline, &h.polyline);
             if mo >= CARRY_COVERAGE && best.as_ref().is_none_or(|(_, bmo)| mo > *bmo) {
                 best = Some((id.clone(), mo));
@@ -2722,6 +2751,73 @@ mod tests {
             HysteresisParams::default().tombstone_horizon_steps
         );
         assert!(old.params.tombstone_horizon_steps > 0);
+    }
+
+    /// Dissolve every visible section at once, leaving its ground tombstoned.
+    fn tombstone_all(state: &mut HysteresisState) {
+        state.arm_decisive();
+        state.step(&[]);
+        assert_eq!(state.visible_len(), 0);
+    }
+
+    #[test]
+    fn a_mint_scores_only_the_tombstones_near_its_ground() {
+        let mut state = HysteresisState::default();
+        let near = line(46.0, 6.0, 100);
+        // Fifty graves about 5 km apart in longitude, none within reach.
+        let mut batch: Vec<CandidateSection> = (1..=50)
+            .map(|i| cand(line(46.0, 6.0 + i as f64 * 0.07, 100), 3))
+            .collect();
+        batch.push(cand(near.clone(), 5));
+        state.step(&batch);
+        let near_id = state
+            .visible_grounds()
+            .into_iter()
+            .find(|(_, g)| *g == near)
+            .map(|(id, _)| id)
+            .unwrap();
+        tombstone_all(&mut state);
+        assert_eq!(state.tombstone_ids().len(), 51);
+
+        let before = tombstone_overlaps_scored();
+        let out = state.step(&[cand(near, 5)]);
+        assert_eq!(out.restored, 1);
+        assert_eq!(state.visible_ids(), vec![near_id]);
+        assert_eq!(
+            tombstone_overlaps_scored() - before,
+            1,
+            "only the grave whose padded box meets the candidate is scored"
+        );
+    }
+
+    #[test]
+    fn a_mint_near_two_graves_restores_the_higher_overlap() {
+        let mut state = HysteresisState::default();
+        let ground = line(46.0, 6.0, 100);
+        let weaker = line(46.0, 6.0, 80);
+        let stronger = line(46.0, 6.0, 95);
+        // The weaker grave mints first, so it holds the lower id and wins any
+        // tie; only a strictly higher overlap moves the restore to the other.
+        state.step(&[cand(weaker.clone(), 3), cand(stronger.clone(), 3)]);
+        let id_of = |state: &HysteresisState, g: &Vec<GpsPoint>| {
+            state
+                .visible_grounds()
+                .into_iter()
+                .find(|(_, held)| held == g)
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let weaker_id = id_of(&state, &weaker);
+        let stronger_id = id_of(&state, &stronger);
+        tombstone_all(&mut state);
+        assert!(stronger_id > weaker_id);
+        assert_eq!(state.tombstone_ids(), vec![weaker_id, stronger_id.clone()]);
+
+        let before = tombstone_overlaps_scored();
+        let out = state.step(&[cand(ground, 5)]);
+        assert_eq!(out.restored, 1);
+        assert_eq!(state.visible_ids(), vec![stronger_id]);
+        assert_eq!(tombstone_overlaps_scored() - before, 2);
     }
 
     #[test]

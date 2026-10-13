@@ -30,9 +30,9 @@
 //!    (`required_visits_for_length`), plus min-length.
 //! 5. **Geometry, one real trace.** Each contributing activity's
 //!    portion is reduced to a single pass (see [`simple_pass_range`]);
-//!    `process_cluster` picks the medoid and computes consensus for its
-//!    metadata (confidence, spread, point density), but the polyline
-//!    itself is replaced by the medoid activity's actual points. A
+//!    `process_cluster` picks the medoid, takes its actual points as the
+//!    polyline, and measures the other passes against them for the
+//!    metadata (confidence, spread, point density). A
 //!    section is always ground someone really covered, never an average
 //!    and never stitched from several activities.
 //! 6. **Selection backoff.** Candidates are emitted best-first (most

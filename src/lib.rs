@@ -85,8 +85,8 @@ pub use sections::{
     detect_sections_incremental_cached_with_policy, detect_sections_incremental_dated,
     detect_sections_incremental_observed, detect_sections_tuned, dissolve_pressure, dominant_sport,
     earth_cell, find_all_track_portions, lift_spans, lift_spans_tuned, line_match_cell_m,
-    mutual_overlap, plan_identity, plan_identity_tuned, recalculate_section_polyline,
-    required_visits_for_length, section_heart, self_pass_penalty, shares_ground, track_portions,
+    mutual_overlap, plan_identity, plan_identity_tuned, required_visits_for_length, section_heart,
+    self_pass_penalty, shares_ground, track_portions,
 };
 pub use sections::{
     Enrichment, RankCandidate, RankFeatures, RankMember, RankOuting, RankTraversal, SectionClass,

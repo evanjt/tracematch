@@ -15,7 +15,6 @@ mod identity;
 pub mod interestingness;
 mod medoid;
 mod naming;
-pub mod optimized;
 mod overlap;
 mod portions;
 mod rtree;
@@ -25,7 +24,7 @@ mod unified;
 use crate::GpsPoint;
 use crate::matching::calculate_route_distance;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
@@ -80,8 +79,6 @@ pub use unified::{
     detect_sections_incremental_observed, detect_sections_tuned, lift_spans, lift_spans_tuned,
     pool_for_fold, required_visits_for_length, same_traffic_share, self_pass_penalty,
 };
-
-pub use optimized::recalculate_section_polyline;
 
 /// Scale name for multi-scale section detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -208,8 +205,8 @@ pub struct FrequentSection {
     /// Sport type ("Run", "Ride", etc.)
     #[serde(alias = "sport_type")]
     pub sport_type: String,
-    /// The consensus polyline - refined from all overlapping tracks
-    /// Initially the medoid, evolves via weighted averaging as more tracks are added
+    /// The section's line: the medoid activity's own points, never an
+    /// average of several tracks
     pub polyline: Vec<GpsPoint>,
     /// Which activity provided the initial representative polyline (medoid)
     #[serde(alias = "representative_activity_id")]
@@ -234,17 +231,17 @@ pub struct FrequentSection {
     /// Key is activity ID, value is the GPS points within proximity of section
     #[serde(alias = "activity_traces")]
     pub activity_traces: HashMap<String, Vec<GpsPoint>>,
-    /// Confidence score (0.0-1.0) based on observation density
-    /// Higher confidence = more tracks observed, tighter consensus
+    /// Confidence score (0.0-1.0) from how many other passes observed the
+    /// line and how tightly they lie on it
     pub confidence: f64,
-    /// Number of observations (tracks) used to compute consensus
+    /// Number of passes measured against the line, the medoid's own excluded
     #[serde(alias = "observation_count")]
     pub observation_count: u32,
-    /// Average spread (meters) of track observations from consensus line
+    /// Mean distance (metres) of the other passes from the line
     /// Lower spread = more consistent track alignment
     #[serde(alias = "average_spread")]
     pub average_spread: f64,
-    /// Per-point observation density (how many activities pass through each point)
+    /// Per-point observation density (how many other passes reach each point)
     /// Used for detecting high-traffic portions that should become separate sections
     #[serde(alias = "point_density")]
     pub point_density: Vec<u32>,
@@ -255,9 +252,9 @@ pub struct FrequentSection {
     #[serde(alias = "is_user_defined")]
     pub is_user_defined: bool,
 
-    /// How well the reference trace aligns with the consensus polyline (0.0-1.0).
+    /// How well the reference trace aligns with the section's line (0.0-1.0).
     /// 1.0 = perfect alignment, 0.0 = maximum deviation.
-    /// Computed as 1.0 - (amd_to_consensus / proximity_threshold).clamp(0.0, 1.0)
+    /// Computed as 1.0 - (amd_to_line / proximity_threshold).clamp(0.0, 1.0)
     #[serde(default)]
     pub stability: f64,
 
@@ -305,15 +302,6 @@ pub struct FrequentSection {
 
 fn default_version() -> u32 {
     1
-}
-
-impl FrequentSection {
-    /// Recalculate this section's polyline from stored activity traces.
-    ///
-    /// Convenience wrapper around [`recalculate_section_polyline`].
-    pub fn recalculate_polyline(&self, config: &SectionConfig) -> FrequentSection {
-        optimized::recalculate_section_polyline(self, config)
-    }
 }
 
 /// The label of a section no activity in `sport_types` traverses.
@@ -367,42 +355,46 @@ pub fn process_cluster(
         return None;
     }
 
+    // A valid LineString needs at least 2 points, and a section a minimum length
+    if representative_polyline.len() < 2 || distance_meters < config.min_section_length {
+        return None;
+    }
+
     // Compute activity portions for pace comparison
     let activity_portions = compute_activity_portions(&representative_polyline, track_map, config);
 
-    // Extract traces for consensus computation only (not stored in section).
-    // Sort for stable iteration order, HashSet iteration is randomized
-    // and the consensus computation is order-sensitive.
+    // The line is the medoid's own slice, never an average of the passes.
+    // The other passes only measure how tightly the ground agrees with it:
+    // the medoid's own pass sits at zero distance from every point of its
+    // slice, so it is left out of the measurement rather than counted as a
+    // perfect observation. Sorted, since the measurement reads the passes in
+    // order and `HashSet` iteration is randomised.
     let activity_id_vec: Vec<String> = {
         let mut v: Vec<String> = cluster.activity_ids.iter().cloned().collect();
         v.sort();
         v
     };
-    let all_traces: Vec<Vec<GpsPoint>> =
+    let reference_points: HashSet<(u64, u64)> = representative_polyline
+        .iter()
+        .map(|p| (p.latitude.to_bits(), p.longitude.to_bits()))
+        .collect();
+    let other_passes: Vec<Vec<GpsPoint>> =
         extract_all_activity_traces(&activity_id_vec, &representative_polyline, track_map)
             .into_iter()
-            .map(|(_, trace)| trace)
+            .filter(|((id, _), pass)| {
+                *id != representative_id
+                    || !pass.iter().any(|p| {
+                        reference_points.contains(&(p.latitude.to_bits(), p.longitude.to_bits()))
+                    })
+            })
+            .map(|(_, pass)| pass)
             .collect();
 
-    // Compute consensus polyline from all overlapping tracks
-    let consensus = compute_consensus_polyline(
+    let agreement = compute_consensus_polyline(
         &representative_polyline,
-        &all_traces,
+        &other_passes,
         config.proximity_threshold,
     );
-
-    // Reject sparse sections - a valid LineString requires at least 2 points
-    if consensus.polyline.len() < 2 {
-        return None;
-    }
-
-    // Use consensus polyline and update distance
-    let consensus_distance = calculate_route_distance(&consensus.polyline);
-
-    // Filter by min length - consensus might collapse to fewer points
-    if consensus_distance < config.min_section_length {
-        return None;
-    }
 
     // Count activity_ids before moving
     let activity_count = cluster.activity_ids.len();
@@ -416,7 +408,7 @@ pub fn process_cluster(
         activity_portions.len() as u32
     };
 
-    // Compute initial stability of the selected medoid against the consensus
+    // Stability of the medoid's whole overlap against its own slice
     let medoid_trace = track_map.get(representative_id.as_str()).map(|track| {
         // Find the overlap range from cluster overlaps for this activity
         cluster
@@ -437,14 +429,14 @@ pub fn process_cluster(
 
     let stability = medoid_trace
         .as_ref()
-        .map(|trace| compute_stability(trace, &consensus.polyline, config.proximity_threshold))
+        .map(|trace| compute_stability(trace, &representative_polyline, config.proximity_threshold))
         .unwrap_or(0.0);
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
         name: None,
         sport_type: sport_type.to_string(),
-        polyline: consensus.polyline,
+        polyline: representative_polyline,
         representative_activity_id: representative_id,
         representative_range: None,
         // The section's POPULATION, from discovery. Rule 8 leans on it:
@@ -459,13 +451,13 @@ pub fn process_cluster(
         },
         activity_portions,
         visit_count,
-        distance_meters: consensus_distance,
+        distance_meters,
         // Lazy activity_traces: empty during detection, populated on-demand
         activity_traces: HashMap::new(),
-        confidence: consensus.confidence,
-        observation_count: consensus.observation_count,
-        average_spread: consensus.average_spread,
-        point_density: consensus.point_density,
+        confidence: agreement.confidence,
+        observation_count: agreement.observation_count,
+        average_spread: agreement.average_spread,
+        point_density: agreement.point_density,
         scale: scale_name,
         is_user_defined: false,
         stability,
@@ -595,5 +587,75 @@ mod dominant_sport_tests {
     #[test]
     fn unknown_when_no_sports_are_known() {
         assert_eq!(dominant_sport(&[], &HashMap::new()), "Unknown");
+    }
+}
+
+#[cfg(test)]
+mod process_cluster_tests {
+    use super::*;
+
+    const METRE_DEG: f64 = 1.0 / 111_000.0;
+
+    /// A straight eastward line of 150 points, ~1.1 km, shifted north by
+    /// `north_m` metres.
+    fn line(north_m: f64) -> Vec<GpsPoint> {
+        (0..150)
+            .map(|i| {
+                GpsPoint::with_elevation(46.5 + north_m * METRE_DEG, 6.6 + (i as f64) * 1e-4, 400.0)
+            })
+            .collect()
+    }
+
+    /// The reference pass plus one pass 10 m either side of it.
+    #[test]
+    fn line_is_the_medoid_slice_and_spread_skips_its_own_pass() {
+        let middle = line(0.0);
+        let north = line(10.0);
+        let south = line(-10.0);
+        let track_map: HashMap<&str, &[GpsPoint]> = [
+            ("middle", middle.as_slice()),
+            ("north", north.as_slice()),
+            ("south", south.as_slice()),
+        ]
+        .into_iter()
+        .collect();
+
+        let full = (0, middle.len());
+        let cluster = OverlapCluster {
+            overlaps: ["north", "south"]
+                .iter()
+                .map(|other| FullTrackOverlap {
+                    activity_a: "middle".to_string(),
+                    activity_b: other.to_string(),
+                    range_a: full,
+                    range_b: full,
+                })
+                .collect(),
+            activity_ids: ["middle", "north", "south"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+        };
+
+        let section = process_cluster(
+            0,
+            cluster,
+            "Ride",
+            &track_map,
+            &SectionConfig::default(),
+            None,
+        )
+        .expect("the cluster yields a section");
+
+        assert_eq!(section.representative_activity_id, "middle");
+        assert!(
+            section.polyline == middle,
+            "the line is the medoid's own slice"
+        );
+        assert!(
+            (section.average_spread - 10.0).abs() < 1e-6,
+            "spread is the mean over the other passes, got {}",
+            section.average_spread
+        );
     }
 }
