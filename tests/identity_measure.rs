@@ -227,7 +227,7 @@ fn drip_measure(corpus: &LifecycleCorpus) -> MeasureRun {
 // ============================================================================
 
 #[test]
-fn b2_identity_and_churn_measurement() {
+fn identity_and_churn_measurement() {
     let corpus = reduced_corpus();
     let run = drip_measure(&corpus);
 
@@ -332,7 +332,7 @@ fn b2_identity_and_churn_measurement() {
 }
 
 #[test]
-fn b2_measurement_is_deterministic() {
+fn measurement_is_deterministic() {
     // Two independent runs of the whole drip must produce a byte-identical
     // visible id trajectory: no HashMap-order leak, no float-order ambiguity, no
     // re-mint of a stable id. This is the hard determinism requirement in code.
