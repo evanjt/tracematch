@@ -18,6 +18,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// Distinguishes a cost line from a digest line in the golden.
 pub const PREFIX: &str = "perf_";
@@ -77,17 +78,46 @@ pub fn peak_bytes() -> u64 {
     PEAK.load(Relaxed)
 }
 
+/// The heap is counted for the whole process, so a test that frees memory
+/// while another measures lowers the live count under that one's anchor and
+/// its rise reads short. Every test in a gate binary that loads data takes
+/// this turn, and a measurement holds it from anchor to reading.
+static HEAP: Mutex<()> = Mutex::new(());
+
+/// Wait for the heap to be this test's alone.
+pub fn heap_turn() -> MutexGuard<'static, ()> {
+    HEAP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The heap if no other test holds it now.
+pub fn try_heap_turn() -> Option<MutexGuard<'static, ()>> {
+    match HEAP.try_lock() {
+        Ok(turn) => Some(turn),
+        Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+/// An open peak measurement, holding the heap turn until it is dropped.
+pub struct PeakWindow {
+    _turn: MutexGuard<'static, ()>,
+}
+
+impl PeakWindow {
+    /// How far the peak rose above the anchor, in bytes.
+    pub fn rise_bytes(&self) -> u64 {
+        PEAK.load(Relaxed).saturating_sub(BASE.load(Relaxed))
+    }
+}
+
 /// Anchor the peak at what is live now, so what follows is measured against
 /// the corpus already in memory rather than including it.
-pub fn anchor_peak() {
+pub fn anchor_peak() -> PeakWindow {
+    let turn = heap_turn();
     let live = LIVE.load(Relaxed);
     BASE.store(live, Relaxed);
     PEAK.store(live, Relaxed);
-}
-
-/// How far the peak rose above the last anchor, in bytes.
-pub fn peak_rise_bytes() -> u64 {
-    PEAK.load(Relaxed).saturating_sub(BASE.load(Relaxed))
+    PeakWindow { _turn: turn }
 }
 
 // ---------------------------------------------------------------------------

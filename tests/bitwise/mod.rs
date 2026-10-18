@@ -273,7 +273,7 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
 
     // The corpus is already in memory and stays there, so anchor here and let
     // the peak report what folding it costs on top.
-    baseline::anchor_peak();
+    let peak = baseline::anchor_peak();
 
     // A: full cold fold, twice in-process. Equal digests prove run-to-run
     // determinism (including under rayon) with no baseline needed. The first
@@ -387,7 +387,7 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         ("perf_add_median_ms", add_median_ms),
         ("perf_add_p95_ms", add_p95_ms),
         ("perf_bulk_ms", bulk_ms),
-        ("perf_peak_bytes", baseline::peak_rise_bytes()),
+        ("perf_peak_bytes", peak.rise_bytes()),
     ];
     baseline::check(golden_path, &lines, &measured, &band);
 }

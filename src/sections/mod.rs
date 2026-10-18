@@ -34,7 +34,9 @@ pub use interestingness::{
     RankFeatures, SectionClass, Traversal as RankTraversal, enrich, max_sustained_grade, rank,
     rank_features, score_features,
 };
-pub(crate) use medoid::{compute_stability, select_medoid};
+pub(crate) use medoid::{
+    MedoidCtx, MedoidFresh, MedoidMemo, compute_stability, select_medoid_with,
+};
 pub use overlap::{FullTrackOverlap, OverlapCluster};
 pub(crate) use portions::compute_activity_portions;
 pub use portions::{
@@ -248,9 +250,10 @@ pub struct FrequentSection {
     #[serde(alias = "is_user_defined")]
     pub is_user_defined: bool,
 
-    /// How well the reference trace aligns with the section's line (0.0-1.0).
-    /// 1.0 = perfect alignment, 0.0 = maximum deviation.
-    /// Computed as 1.0 - (amd_to_line / proximity_threshold).clamp(0.0, 1.0)
+    /// How well the representative pass aligns with the weighted centroid of
+    /// the other passes (0.0-1.0). 1.0 = perfect alignment, 0.0 = maximum
+    /// deviation. Computed as
+    /// 1.0 - (amd_to_centroid / proximity_threshold).clamp(0.0, 1.0)
     #[serde(default)]
     pub stability: f64,
 
@@ -329,8 +332,34 @@ pub fn process_cluster(
     config: &SectionConfig,
     scale_name: Option<ScaleName>,
 ) -> Option<FrequentSection> {
+    process_cluster_with(
+        idx,
+        cluster,
+        sport_type,
+        track_map,
+        config,
+        scale_name,
+        None,
+        &mut MedoidFresh::default(),
+    )
+}
+
+/// [`process_cluster`] picking the medoid through a memo (see
+/// [`MedoidMemo`]), the pair scores it computed left in `fresh`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_cluster_with(
+    idx: usize,
+    cluster: OverlapCluster,
+    sport_type: &str,
+    track_map: &HashMap<&str, &[GpsPoint]>,
+    config: &SectionConfig,
+    scale_name: Option<ScaleName>,
+    medoid: Option<MedoidCtx<'_>>,
+    fresh: &mut MedoidFresh,
+) -> Option<FrequentSection> {
     // Select medoid - an ACTUAL GPS trace (resolved from track_map via index ranges)
-    let (representative_id, representative_polyline) = select_medoid(&cluster, track_map);
+    let (representative_id, representative_polyline) =
+        select_medoid_with(&cluster, track_map, medoid, fresh);
 
     if representative_polyline.is_empty() {
         return None;
@@ -396,29 +425,14 @@ pub fn process_cluster(
         activity_portions.len() as u32
     };
 
-    // Stability of the medoid's whole overlap against its own slice
-    let medoid_trace = track_map.get(representative_id.as_str()).map(|track| {
-        // Find the overlap range from cluster overlaps for this activity
-        cluster
-            .overlaps
-            .iter()
-            .find(|o| o.activity_a == representative_id || o.activity_b == representative_id)
-            .map(|o| {
-                let (range, track_ref) = if o.activity_a == representative_id {
-                    (o.range_a, *track)
-                } else {
-                    (o.range_b, *track)
-                };
-                let end = range.1.min(track_ref.len());
-                track_ref[range.0..end].to_vec()
-            })
-            .unwrap_or_else(|| track.to_vec())
-    });
-
-    let stability = medoid_trace
-        .as_ref()
-        .map(|trace| compute_stability(trace, &representative_polyline, config.proximity_threshold))
-        .unwrap_or(0.0);
+    // Stability of the chosen pass against the other passes' weighted
+    // centroid. The line is that pass's own slice, so measuring it against
+    // the line would read 1.0 by construction.
+    let stability = compute_stability(
+        &representative_polyline,
+        &agreement.polyline,
+        config.proximity_threshold,
+    );
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),
@@ -643,6 +657,154 @@ mod process_cluster_tests {
             (section.average_spread - 10.0).abs() < 1e-6,
             "spread is the mean over the other passes, got {}",
             section.average_spread
+        );
+    }
+
+    /// A return leg 1 km north of the laps, westward, so each lap is its
+    /// own pass over the ground.
+    fn return_leg() -> Vec<GpsPoint> {
+        (0..150)
+            .rev()
+            .map(|i| {
+                GpsPoint::with_elevation(46.5 + 1000.0 * METRE_DEG, 6.6 + (i as f64) * 1e-4, 400.0)
+            })
+            .collect()
+    }
+
+    fn run(cluster: OverlapCluster, track_map: &HashMap<&str, &[GpsPoint]>) -> FrequentSection {
+        process_cluster(
+            0,
+            cluster,
+            "Ride",
+            track_map,
+            &SectionConfig::default(),
+            None,
+        )
+        .expect("the cluster yields a section")
+    }
+
+    /// Scenario: one activity laps the same ground three times, 40 m north,
+    /// on the line, and 40 m south. The anchor shape names lap 1 in
+    /// `activity_a` of every overlap and the later laps in `activity_b`, and
+    /// the middle lap is the most typical pass.
+    /// Expected behaviour: stability describes the middle lap, which sits in
+    /// the centre of the other two, and not lap 1, which sits 40 m off it.
+    #[test]
+    fn stability_is_measured_on_the_lap_chosen_as_medoid() {
+        let lap_len = 150;
+        let mut track = line(40.0);
+        track.extend(return_leg());
+        track.extend(line(0.0));
+        track.extend(return_leg());
+        track.extend(line(-40.0));
+        let track_map: HashMap<&str, &[GpsPoint]> =
+            [("laps", track.as_slice())].into_iter().collect();
+
+        let lap = |n: usize| (2 * n * lap_len, 2 * n * lap_len + lap_len);
+        let cluster = OverlapCluster {
+            overlaps: [1, 2]
+                .iter()
+                .map(|&n| FullTrackOverlap {
+                    activity_a: "laps".to_string(),
+                    activity_b: "laps".to_string(),
+                    range_a: lap(0),
+                    range_b: lap(n),
+                })
+                .collect(),
+            activity_ids: ["laps".to_string()].into_iter().collect(),
+        };
+
+        let section = run(cluster, &track_map);
+
+        assert!(
+            section.polyline == line(0.0),
+            "the middle lap is the medoid"
+        );
+        assert!(
+            section.stability > 0.99,
+            "the medoid sits between the other laps, got {}",
+            section.stability
+        );
+    }
+
+    /// Scenario: the medoid is the second pass of an activity that is not the
+    /// anchor. The anchor rides 40 m north; the other activity passes 40 m
+    /// south and then on the line.
+    /// Expected behaviour: stability is the same whichever order the overlaps
+    /// arrive in, since it describes the chosen pass and not the first
+    /// overlap that names its activity.
+    #[test]
+    fn stability_follows_the_medoid_pass_not_overlap_order() {
+        let lap_len = 150;
+        let anchor = line(40.0);
+        let third = line(20.0);
+        let mut two_pass = line(-40.0);
+        two_pass.extend(return_leg());
+        two_pass.extend(line(0.0));
+        let track_map: HashMap<&str, &[GpsPoint]> = [
+            ("anchor", anchor.as_slice()),
+            ("third", third.as_slice()),
+            ("two_pass", two_pass.as_slice()),
+        ]
+        .into_iter()
+        .collect();
+
+        let full = (0, lap_len);
+        let overlaps = vec![
+            FullTrackOverlap {
+                activity_a: "anchor".to_string(),
+                activity_b: "two_pass".to_string(),
+                range_a: full,
+                range_b: (0, lap_len),
+            },
+            FullTrackOverlap {
+                activity_a: "anchor".to_string(),
+                activity_b: "two_pass".to_string(),
+                range_a: full,
+                range_b: (2 * lap_len, 3 * lap_len),
+            },
+            FullTrackOverlap {
+                activity_a: "anchor".to_string(),
+                activity_b: "third".to_string(),
+                range_a: full,
+                range_b: full,
+            },
+        ];
+        let ids: HashSet<String> = ["anchor", "third", "two_pass"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let forward = run(
+            OverlapCluster {
+                overlaps: overlaps.clone(),
+                activity_ids: ids.clone(),
+            },
+            &track_map,
+        );
+        let mut reversed_overlaps = overlaps;
+        reversed_overlaps.reverse();
+        let reversed = run(
+            OverlapCluster {
+                overlaps: reversed_overlaps,
+                activity_ids: ids,
+            },
+            &track_map,
+        );
+
+        assert!(
+            forward.polyline == line(0.0),
+            "the on-line pass is the medoid"
+        );
+        assert!(
+            reversed.polyline == line(0.0),
+            "the on-line pass is the medoid"
+        );
+        assert_eq!(forward.stability.to_bits(), reversed.stability.to_bits());
+        assert!(
+            forward.stability > 0.9,
+            "the medoid sits inside the other passes, got {}",
+            forward.stability
         );
     }
 }

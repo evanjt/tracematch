@@ -64,6 +64,7 @@ fn full_corpus_output_is_bitwise_stable() {
 /// silent about it, the way an empty corpus makes them vacuous.
 #[test]
 fn the_corpus_this_gate_folds_can_exercise_the_lift_veto() {
+    let _turn = bitwise::baseline::heap_turn();
     let c = load_corpus();
 
     let elevated = c

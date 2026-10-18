@@ -50,11 +50,12 @@ fn every_tunable_cites_its_evidence() {
 
 /// Numeric constants that are storage layout or memory bounds, not detection
 /// tunables, so there is no measured plateau to cite.
-const NOT_TUNABLES: [&str; 9] = [
+const NOT_TUNABLES: [&str; 10] = [
     "EVIDENCE_CACHE_VERSION",
     "MEMO_CELL_SETS_CAP",
     "MEMO_TRACK_PORTIONS_CAP",
     "MEMO_CONSENSUS_CAP",
+    "MEMO_MEDOID_PAIRS_CAP",
     "MEMO_RENDER_CAP",
     "MEMO_DRAWN_CAP",
     "MEMO_COVERAGE_CAP",

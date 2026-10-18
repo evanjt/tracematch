@@ -102,7 +102,10 @@ use super::identity::{
     GROUND_TOL_M, IdentityPlan, RECUT_AGREEMENT, RetireReason, mutual_overlap, shares_ground,
 };
 use super::overlap::{FullTrackOverlap, OverlapCluster};
-use super::{FrequentSection, SectionConfig, SectionPortion, process_cluster};
+use super::{
+    FrequentSection, MedoidCtx, MedoidFresh, MedoidMemo, SectionConfig, SectionPortion,
+    process_cluster_with,
+};
 use crate::GpsPoint;
 use crate::union_find::UnionFind;
 use log::info;
@@ -4524,13 +4527,16 @@ fn render_key(portions: &[Portion], track_nums: &[u32], ref_lat: f64, cell_size:
 /// The consensus leaf of one candidate: synthesise the anchor-paired
 /// cluster and run [`process_cluster`], id left blank exactly as the memo
 /// stores it. Pure in the portion set, so many candidates can compute
-/// concurrently.
+/// concurrently. The medoid reads its pair scores from `medoid` and leaves
+/// the ones it computed in `fresh`.
 fn consensus_leaf(
     portions: &[Portion],
     sport: &str,
     sport_tracks: &[(&str, &[GpsPoint])],
     track_map: &HashMap<&str, &[GpsPoint]>,
     config: &SectionConfig,
+    medoid: MedoidCtx<'_>,
+    fresh: &mut MedoidFresh,
 ) -> Option<FrequentSection> {
     let anchor = portions[0];
     let anchor_id = sport_tracks[anchor.0].0.to_string();
@@ -4562,7 +4568,17 @@ fn consensus_leaf(
         overlaps,
         activity_ids,
     };
-    process_cluster(0, cluster, sport, track_map, config, None).map(|mut sec| {
+    process_cluster_with(
+        0,
+        cluster,
+        sport,
+        track_map,
+        config,
+        None,
+        Some(medoid),
+        fresh,
+    )
+    .map(|mut sec| {
         sec.id = String::new();
         sec
     })
@@ -4817,6 +4833,11 @@ fn detect_for_cluster_with_grid(
         .iter()
         .map(|(id, _)| track_num(leaves, id))
         .collect();
+    let num_of: HashMap<&str, u32> = sport_tracks
+        .iter()
+        .zip(&track_nums)
+        .map(|((id, _), &n)| (*id, n))
+        .collect();
     // Which tracks the fold routed this call, by track index: a render miss
     // drops their portions to find the candidate it grew from.
     let routed_t: Vec<bool> = sport_tracks
@@ -4921,8 +4942,22 @@ fn detect_for_cluster_with_grid(
                     coverage.ref_lat,
                     cell_size,
                 );
-                let cons = (!leaves_ro.consensus.contains_key(&ckey))
-                    .then(|| consensus_leaf(portions, sport, sport_tracks, &track_map, config));
+                let mut fresh = MedoidFresh::default();
+                let cons = (!leaves_ro.consensus.contains_key(&ckey)).then(|| {
+                    let medoid = MedoidCtx {
+                        memo: &leaves_ro.medoid,
+                        nums: &num_of,
+                    };
+                    consensus_leaf(
+                        portions,
+                        sport,
+                        sport_tracks,
+                        &track_map,
+                        config,
+                        medoid,
+                        &mut fresh,
+                    )
+                });
                 let rows = (!leaves_ro.render.contains_key(&rkey)).then(|| {
                     render_leaf(
                         portions,
@@ -4942,7 +4977,7 @@ fn detect_for_cluster_with_grid(
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                (ckey, cons, rkey, rows)
+                (ckey, cons, rkey, rows, fresh)
             })
             .collect();
         #[cfg(feature = "profile")]
@@ -4958,7 +4993,8 @@ fn detect_for_cluster_with_grid(
             eprintln!("PROFILE render_miss {render_miss}");
             eprintln!("PROFILE candidates {}", computed.len());
         }
-        for (ckey, cons, rkey, rows) in computed {
+        for (ckey, cons, rkey, rows, fresh) in computed {
+            leaves.medoid.absorb(fresh);
             if let Some(c) = cons {
                 leaves.consensus.entry(ckey).or_insert(c);
             }
@@ -5289,7 +5325,21 @@ fn detect_for_cluster_with_grid(
         let processed = match leaves.consensus.get(&ckey).cloned() {
             Some(hit) => hit,
             None => {
-                let fresh = consensus_leaf(&portions, sport, sport_tracks, &track_map, config);
+                let mut scored = MedoidFresh::default();
+                let medoid = MedoidCtx {
+                    memo: &leaves.medoid,
+                    nums: &num_of,
+                };
+                let fresh = consensus_leaf(
+                    &portions,
+                    sport,
+                    sport_tracks,
+                    &track_map,
+                    config,
+                    medoid,
+                    &mut scored,
+                );
+                leaves.medoid.absorb(scored);
                 leaves.consensus.insert(ckey, fresh.clone());
                 fresh
             }
@@ -7485,6 +7535,11 @@ struct LeafMemos {
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.
     consensus: HashMap<ConsensusKey, Option<FrequentSection>>,
+    /// The consensus medoid's pair scores, keyed by interned pass, so a
+    /// consensus over a grown candidate scores only the pairs its
+    /// comparison rule names for the first time.
+    #[serde(default)]
+    medoid: MedoidMemo,
     /// The render stage's expensive pure leaves, pass penalties and
     /// minority runs, keyed by the candidate's portion set, one
     /// `(activity, start, end, penalty, run)` row per portion.
@@ -7639,6 +7694,9 @@ struct TrackPortionKey {
 const MEMO_CELL_SETS_CAP: usize = 20_000;
 const MEMO_TRACK_PORTIONS_CAP: usize = 200_000;
 const MEMO_CONSENSUS_CAP: usize = 10_000;
+/// Medoid pair scores, 16 bytes a pair before the passes they name, so
+/// about 4 MB at the cap.
+const MEMO_MEDOID_PAIRS_CAP: usize = 200_000;
 const MEMO_RENDER_CAP: usize = 10_000;
 const MEMO_DRAWN_CAP: usize = 10_000;
 const MEMO_COVERAGE_CAP: usize = 200_000;
@@ -8200,6 +8258,7 @@ fn fold_by_sport(
     if leaves.consensus.len() > MEMO_CONSENSUS_CAP {
         leaves.consensus.clear();
     }
+    leaves.medoid.sweep(MEMO_MEDOID_PAIRS_CAP);
     if leaves.render.len() > MEMO_RENDER_CAP {
         leaves.render.clear();
     }

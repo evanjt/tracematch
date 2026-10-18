@@ -100,7 +100,7 @@ fn a_warm_add_stays_inside_the_budget() {
         .collect();
     // The corpus is loaded and stays loaded, so the peak below reports what
     // the fold costs on top of it.
-    baseline::anchor_peak();
+    let peak = baseline::anchor_peak();
     let mut cache = SectionEvidenceCache::new();
     let t = Instant::now();
     let mut catalogue = fold(&mut cache, &[], &c.tracks[..split], &head_ids, &c, &config);
@@ -148,7 +148,7 @@ fn a_warm_add_stays_inside_the_budget() {
         ("perf_cold_ms", cold_ms),
         ("perf_add_median_ms", median),
         ("perf_add_p95_ms", p95),
-        ("perf_peak_bytes", baseline::peak_rise_bytes()),
+        ("perf_peak_bytes", peak.rise_bytes()),
     ];
     if rederive {
         baseline::check_rederiving(&path, &[shape], &measured, &BAND);
