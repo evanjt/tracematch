@@ -906,7 +906,7 @@ pub struct HysteresisParams {
     /// same 0.3.
     pub merge_size_ratio: f64,
     /// Steps a tombstone is kept after the step that retired it; see
-    /// [`TOMBSTONE_HORIZON_STEPS`]. Defaulted on decode, so params from an
+    /// `TOMBSTONE_HORIZON_STEPS`. Defaulted on decode, so params from an
     /// older blob take the default rather than failing.
     #[serde(default = "default_tombstone_horizon_steps")]
     pub tombstone_horizon_steps: u64,

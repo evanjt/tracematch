@@ -96,7 +96,7 @@ pub(crate) fn select_medoid(
     select_medoid_with(cluster, track_map, None, &mut MedoidFresh::default())
 }
 
-/// [`select_medoid`] reading pair scores from `ctx` where it holds them, and writing what it computed into `fresh`. The pick is the
+/// `select_medoid` reading pair scores from `ctx` where it holds them, and writing what it computed into `fresh`. The pick is the
 /// same with or without a memo: every value is pure in its passes' points,
 /// and the comparison set and tie rule read only the canonical order.
 pub(crate) fn select_medoid_with(

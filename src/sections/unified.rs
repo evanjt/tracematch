@@ -1184,7 +1184,7 @@ const COVER_TOLERANCE_CELLS: f64 = 0.5;
 pub const CHANGED_CELLS: f64 = 1.0;
 
 /// The coverage grid's cell, in metres, for a given proximity. The batch
-/// [`detect_for_cluster`] and the cached fold must agree on this exactly, so
+/// `detect_for_cluster` and the cached fold must agree on this exactly, so
 /// it lives in one place.
 ///
 /// Half the proximity, floored at 50 m and capped at 150 m. The floor is what
@@ -4525,7 +4525,7 @@ fn render_key(portions: &[Portion], track_nums: &[u32], ref_lat: f64, cell_size:
 }
 
 /// The consensus leaf of one candidate: synthesise the anchor-paired
-/// cluster and run [`process_cluster`], id left blank exactly as the memo
+/// cluster and run [`process_cluster`](super::process_cluster), id left blank exactly as the memo
 /// stores it. Pure in the portion set, so many candidates can compute
 /// concurrently. The medoid reads its pair scores from `medoid` and leaves
 /// the ones it computed in `fresh`.
@@ -6416,9 +6416,23 @@ fn detect_for_cluster_with_grid(
     let t_enrich = web_time::Instant::now();
 
     // Profile and shape off each section's own emitted slice, after every
-    // reslice has settled; never averaged across tracks.
+    // reslice has settled; never averaged across tracks. The lift flag is
+    // the verdict the grid reached on that slice's own pass, timed and
+    // confirmed across tracks, never a second untimed reading of the line.
+    let track_at: HashMap<&str, usize> = sport_tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (*id, i))
+        .collect();
     for s in sections.iter_mut() {
-        let e = super::interestingness::enrich(&s.polyline, s.distance_meters);
+        let mut e = super::interestingness::enrich(&s.polyline, s.distance_meters);
+        e.is_lift = match (
+            s.representative_range,
+            track_at.get(s.representative_activity_id.as_str()),
+        ) {
+            (Some(range), Some(&t)) => on_lift_ground(range, &coverage.keep[t]),
+            _ => false,
+        };
         s.elevation_gain_m = e.elevation_gain_m;
         s.avg_grade_percent = e.avg_grade_percent;
         s.enrichment = e;
@@ -6426,6 +6440,23 @@ fn detect_for_cluster_with_grid(
     phase!("enrich", t_enrich);
 
     sections
+}
+
+/// Whether the half-open `range` of a track is lift ground: at least
+/// [`LIFT_SHARE`](super::interestingness::LIFT_SHARE) of its points fall
+/// outside `keep`, the track's inclusive ranges left once confirmed lift
+/// spans are removed.
+fn on_lift_ground((start, end): (u32, u32), keep: &[(usize, usize)]) -> bool {
+    let (start, end) = (start as usize, end as usize);
+    if end <= start {
+        return false;
+    }
+    let kept: usize = keep
+        .iter()
+        .map(|&(s, e)| (e + 1).min(end).saturating_sub(s.max(start)))
+        .sum();
+    let lifted = (end - start).saturating_sub(kept);
+    lifted as f64 >= super::interestingness::LIFT_SHARE * (end - start) as f64
 }
 
 /// Name, on each cut [`explain_boundaries`] recorded, the emitted sections
@@ -7531,7 +7562,7 @@ struct LeafMemos {
     /// tenth of a warm add's budget stays in memory for the process only.
     #[serde(skip)]
     track_portions: HashMap<TrackPortionKey, Vec<(usize, usize, f64)>>,
-    /// [`process_cluster`] results keyed by the candidate's portion set,
+    /// [`process_cluster`](super::process_cluster) results keyed by the candidate's portion set,
     /// including refusals. The id is rewritten on every hit exactly as a
     /// miss would mint it, so numbering never depends on the cache.
     consensus: HashMap<ConsensusKey, Option<FrequentSection>>,
@@ -7704,7 +7735,7 @@ const MEMO_UNIFY_CAP: usize = 200_000;
 /// Member ids held across every rescue verdict's `cleared` list, 4 bytes each.
 const MEMO_RESCUE_IDS_CAP: usize = 4_000_000;
 
-/// Complete input fingerprint of one [`process_cluster`] call: the portion
+/// Complete input fingerprint of one [`process_cluster`](super::process_cluster) call: the portion
 /// set (activity id + range), the sport label baked into the id and the
 /// section, and the config fields the consensus path reads.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -9736,6 +9767,20 @@ mod tests {
         let mut pts = climb(9.0e-5, 5.0, false, 80);
         pts.reverse();
         assert!(lift_spans(&pts, None).is_empty());
+    }
+
+    #[test]
+    fn a_slice_mostly_outside_the_kept_ground_is_lift_ground() {
+        // Points 40..=79 of a 120-point track are a confirmed lift span.
+        let keep = [(0, 39), (80, 119)];
+        assert!(on_lift_ground((40, 80), &keep), "wholly on the span");
+        assert!(on_lift_ground((30, 80), &keep), "40 of 50 on the span");
+        assert!(on_lift_ground((20, 60), &keep), "exactly half on the span");
+        assert!(!on_lift_ground((10, 50), &keep), "10 of 40 on the span");
+        assert!(!on_lift_ground((80, 120), &keep), "wholly kept");
+        assert!(!on_lift_ground((0, 120), &[(0, 119)]), "no span at all");
+        assert!(on_lift_ground((0, 10), &[]), "the whole track is a span");
+        assert!(!on_lift_ground((5, 5), &keep), "an empty slice");
     }
 
     #[test]

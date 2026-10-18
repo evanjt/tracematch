@@ -106,7 +106,8 @@ pub struct Enrichment {
     /// Chord over arc, 0..1. A straight line is 1, a closed loop is 0.
     pub straightness: Option<f64>,
     pub klass: Option<SectionClass>,
-    /// The line is carried ground (a lift) by its own geometry.
+    /// The line is carried ground (a lift), by the detector's verdict on
+    /// the pass the line was sliced from.
     pub is_lift: bool,
 }
 
@@ -208,6 +209,10 @@ pub fn classify(
 /// Enrich one line from its own polyline. Elevation fields stay None
 /// without coverage; class stays None when neither terrain nor shape
 /// says anything.
+///
+/// `is_lift` is left false: the line alone carries no time stream and no
+/// other track, so it cannot tell a walked climb from a cable car. The
+/// detector stamps the verdict it reached on the line's own pass.
 pub fn enrich(polyline: &[GpsPoint], distance_meters: f64) -> Enrichment {
     let stats = crate::geo_utils::elevation_stats(polyline);
     let (gain, loss, avg_grade) = match stats {
@@ -217,11 +222,6 @@ pub fn enrich(polyline: &[GpsPoint], distance_meters: f64) -> Enrichment {
     let max_grade = max_sustained_grade(polyline);
     let straight = straightness(polyline, distance_meters);
     let klass = classify(avg_grade, gain, loss, straight, distance_meters);
-    let lifted: usize = super::unified::lift_spans(polyline, None)
-        .iter()
-        .map(|&(s, e)| e.saturating_sub(s) + 1)
-        .sum();
-    let is_lift = !polyline.is_empty() && lifted as f64 >= LIFT_SHARE * polyline.len() as f64;
     Enrichment {
         elevation_gain_m: gain,
         elevation_loss_m: loss,
@@ -229,7 +229,7 @@ pub fn enrich(polyline: &[GpsPoint], distance_meters: f64) -> Enrichment {
         max_grade_percent: max_grade,
         straightness: straight,
         klass,
-        is_lift,
+        is_lift: false,
     }
 }
 
@@ -620,7 +620,6 @@ mod tests {
         assert_eq!(e.elevation_loss_m, Some(0.0));
         assert!(e.max_grade_percent.unwrap() > 5.0);
         assert!(e.straightness.unwrap() > 0.99);
-        assert!(!e.is_lift);
     }
 
     #[test]

@@ -9,9 +9,8 @@ mod bitwise;
 use std::sync::Mutex;
 
 use bitwise::baseline::{
-    Band, REBASE_ENV, anchor_peak, check, civil_date, comment_lines, compose, digest_lines,
-    digests_differ, heap_turn, peak_bytes, rebase_header, rebase_reason, recorded, regressions,
-    try_heap_turn,
+    Band, REBASE_ENV, check, civil_date, comment_lines, compose, digest_lines, digests_differ,
+    rebase_header, rebase_reason, recorded, regressions,
 };
 
 const GOLDEN: &str = "\
@@ -173,57 +172,6 @@ fn only_cost_lines_are_read_back_out_of_a_golden() {
     let pairs = recorded(GOLDEN);
     assert_eq!(pairs.len(), 3);
     assert_eq!(pairs[0], ("perf_cold_ms".to_string(), 1000));
-}
-
-#[test]
-fn the_counting_allocator_sees_the_heap() {
-    let _turn = heap_turn();
-    let big = vec![0u8; 64 * 1024 * 1024];
-    assert!(
-        peak_bytes() >= big.len() as u64,
-        "peak {} did not cover a {} byte allocation",
-        peak_bytes(),
-        big.len()
-    );
-    drop(big);
-}
-
-#[test]
-fn an_anchored_peak_measures_the_rise_not_the_heap_already_held() {
-    let held = vec![0u8; 32 * 1024 * 1024];
-    let window = anchor_peak();
-    assert!(
-        window.rise_bytes() < held.len() as u64,
-        "the anchor carried the {} bytes already held into the rise",
-        held.len()
-    );
-    let added = vec![0u8; 48 * 1024 * 1024];
-    assert!(
-        window.rise_bytes() >= added.len() as u64,
-        "rise {} did not cover the {} bytes added after the anchor",
-        window.rise_bytes(),
-        added.len()
-    );
-    drop(held);
-    drop(added);
-}
-
-/// A neighbour that frees what it held while a peak is open lowers the live
-/// count under the anchor, and the rise reads short by that much: a gate whose
-/// other test dropped its own copy of the corpus mid-fold recorded a third of
-/// the fold's real peak. So an open measurement keeps every neighbour out.
-#[test]
-fn no_neighbour_takes_its_turn_while_a_peak_is_open() {
-    let window = anchor_peak();
-    let neighbour_got_in = std::thread::spawn(|| try_heap_turn().is_some())
-        .join()
-        .unwrap();
-    assert!(
-        !neighbour_got_in,
-        "a neighbour took its turn inside an open measurement, so its frees \
-         would read as the measured code's own savings"
-    );
-    drop(window);
 }
 
 #[test]

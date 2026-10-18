@@ -81,7 +81,9 @@ pub fn peak_bytes() -> u64 {
 /// The heap is counted for the whole process, so a test that frees memory
 /// while another measures lowers the live count under that one's anchor and
 /// its rise reads short. Every test in a gate binary that loads data takes
-/// this turn, and a measurement holds it from anchor to reading.
+/// this turn, and a measurement holds it from anchor to reading. The turn
+/// keeps out only the tests that take it, so a case that asserts a rise to
+/// the byte belongs in `peak_heap`, which runs on one thread.
 static HEAP: Mutex<()> = Mutex::new(());
 
 /// Wait for the heap to be this test's alone.

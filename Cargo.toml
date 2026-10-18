@@ -113,6 +113,12 @@ name = "fold_cost"
 harness = false
 required-features = ["synthetic"]
 
+# Asserts heap rises to the byte, so it runs on one thread with no harness:
+# the harness's own threads free memory inside an open measurement.
+[[test]]
+name = "peak_heap"
+harness = false
+
 [[test]]
 name = "fold_corridor_convergence"
 required-features = ["synthetic"]
