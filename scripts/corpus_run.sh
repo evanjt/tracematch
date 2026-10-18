@@ -4,7 +4,10 @@
 # Runs the validation lab over the private corpus and GeoLife, writes one
 # table per run with a row per section, runs both bitwise gates read-only
 # and prints what diverged, and rebases a golden only when told to, with a
-# dated line in the golden saying which range moved it.
+# dated line in the golden saying which range moved it. Then runs the cost
+# bands, which read a wall clock and so run here and nowhere else: the
+# warm-add budget, and inside the app's workspace the attach and lifecycle
+# bands. A failed band fails the run, and is never rebased from here.
 #
 # Usage:
 #   scripts/corpus_run.sh [RANGE] [OPTIONS]
@@ -23,7 +26,7 @@
 #                         header line naming the range. Without this the
 #                         goldens are never written.
 #   --no-geolife          skip GeoLife, lab and gate.
-#   --no-gates            lab and tables only.
+#   --no-gates            lab and tables only, no gate and no band.
 #   --lab-args "..."      extra flags for every lab invocation, quoted.
 #   -h, --help            this text.
 #
@@ -31,7 +34,7 @@
 # tables all_unified_sections.tsv, all_unified_dropped.tsv and replay.tsv,
 # and summary.tsv with the counts the open questions ask for. Gate output is
 # under gates/: the recorded golden each gate measured and the diff against
-# the one it was compared to.
+# the one it was compared to, and each band's log.
 #
 # GeoLife is looked for at $LAB_GEOLIFE_DIR, then under the crate root, then
 # under ROOT, and fetched into ROOT/geolife if absent.
@@ -64,7 +67,7 @@ while [ $# -gt 0 ]; do
     --no-geolife) GEOLIFE=0; shift ;;
     --no-gates) GATES=0; shift ;;
     --lab-args) LAB_ARGS="$2"; shift 2 ;;
-    -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *)
       if [ -n "$RANGE" ]; then echo "unexpected argument: $1" >&2; exit 2; fi
@@ -345,11 +348,50 @@ run_gate() {
   echo "  gate passed"
 }
 
+# Run one cost band and report its verdict. Each band compares with the
+# baseline beside the corpus and moves it only on a rebase with a reason,
+# which is the owner's to set by hand, so a failure here counts against the
+# run whatever --rebase says. $1 package, $2 cargo features, $3 test target.
+run_band() {
+  local pkg="$1" feature="$2" target="$3"
+  local dir="$OUT/gates"
+  mkdir -p "$dir"
+  echo
+  echo "=== band: $target"
+  local build="${END_DIRS[-1]}"
+  local args=()
+  if [ "$build" = "$RUN_DIR" ]; then args=("${PKG[@]}"); fi
+  if [ "$pkg" != tracematch ]; then
+    # The app's bands live in the workspace around this crate, never in a
+    # range end, which is a bare tracematch checkout.
+    if [ "$build" != "$RUN_DIR" ] || [ "${#PKG[@]}" -eq 0 ]; then
+      echo "  skipped: $pkg is only in the app workspace's working tree"
+      return 0
+    fi
+    args=(-p "$pkg")
+  fi
+  (cd "$build" && env TRACEMATCH_CORPUS="$ROOT" $(target_dir "$build") \
+      cargo test "${args[@]}" --release --features "$feature" --test "$target" -- --nocapture) \
+      > "$dir/$target.log" 2>&1
+  local status=$?
+  grep -E '^(cold |warm adds|recorded warm-add|cost |golden baseline|input changed|corpus changed|\[|  perf_)' \
+    "$dir/$target.log" | sed 's/^/  /'
+  if [ "$status" -ne 0 ]; then
+    echo "  band FAILED (exit $status), see $dir/$target.log"
+    failed=$((failed + 1))
+    return 1
+  fi
+  echo "  band passed"
+}
+
 if [ "$GATES" -eq 1 ]; then
   run_gate private "$PRIVATE_GOLDEN" real-corpus full_corpus_bitwise TRACEMATCH_CORPUS="$ROOT"
   if [ "$GEOLIFE" -eq 1 ]; then
     run_gate geolife "$GEOLIFE_GOLDEN" public-corpus geolife_bitwise LAB_GEOLIFE_DIR="$GEOLIFE_DATA"
   fi
+  run_band tracematch real-corpus drip_budget
+  run_band veloqrs real-corpus attach_cost_band
+  run_band veloqrs synthetic,real-corpus lifecycle_cost_band
 fi
 
 echo
