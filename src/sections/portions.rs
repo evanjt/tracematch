@@ -1,6 +1,6 @@
 //! Activity portion computation for pace comparison.
 
-use super::rtree::{IndexedPoint, build_rtree};
+use super::rtree::{PointIndex, build_rtree};
 use super::unified::LineMatcher;
 use super::{SectionConfig, SectionPortion};
 use crate::geo_utils::haversine_distance;
@@ -8,7 +8,6 @@ use crate::matching::calculate_route_distance;
 use crate::{Direction, GpsPoint};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rstar::{PointDistance, RTree};
 
 /// Every traversal of a section, by every activity that runs its line.
 ///
@@ -149,7 +148,7 @@ pub struct PreparedLine<'a> {
     line: &'a [GpsPoint],
     bounds: (f64, f64, f64, f64),
     matcher: LineMatcher,
-    ref_tree: RTree<IndexedPoint>,
+    ref_tree: PointIndex,
 }
 
 impl<'a> PreparedLine<'a> {
@@ -194,7 +193,7 @@ pub fn line_match_cell_m(config: &SectionConfig) -> f64 {
 
 fn passes_of(
     matcher: &LineMatcher,
-    ref_tree: &RTree<IndexedPoint>,
+    ref_tree: &PointIndex,
     line: &[GpsPoint],
     activity_id: &str,
     track: &[GpsPoint],
@@ -308,8 +307,6 @@ pub fn find_all_track_portions_with_gap(
     }
 
     let ref_tree = build_rtree(reference);
-    let threshold_deg = threshold / 111_000.0;
-    let threshold_deg_sq = threshold_deg * threshold_deg;
     let ref_length = calculate_route_distance(reference);
 
     // Find all contiguous overlapping runs
@@ -321,8 +318,8 @@ pub fn find_all_track_portions_with_gap(
         let query = [point.latitude, point.longitude];
 
         let is_near = ref_tree
-            .nearest_neighbor(&query)
-            .map(|nearest| nearest.distance_2(&query) <= threshold_deg_sq)
+            .nearest(&query)
+            .map(|(_, distance)| distance <= threshold)
             .unwrap_or(false);
 
         if is_near {
@@ -394,7 +391,7 @@ pub fn find_all_track_portions_with_gap(
 pub(crate) fn detect_direction_robust(
     track_portion: &[GpsPoint],
     reference: &[GpsPoint],
-    ref_tree: &RTree<IndexedPoint>,
+    ref_tree: &PointIndex,
 ) -> Direction {
     if track_portion.len() < 3 || reference.len() < 3 {
         return Direction::Same;
@@ -411,8 +408,8 @@ pub(crate) fn detect_direction_robust(
         let point = &track_portion[track_idx];
         let query = [point.latitude, point.longitude];
 
-        if let Some(nearest) = ref_tree.nearest_neighbor(&query) {
-            ref_indices.push(nearest.idx);
+        if let Some((nearest, _)) = ref_tree.nearest(&query) {
+            ref_indices.push(nearest);
         }
     }
 
@@ -470,7 +467,7 @@ fn split_run_into_laps(
     track: &[GpsPoint],
     run: &OverlapRun,
     reference: &[GpsPoint],
-    ref_tree: &RTree<IndexedPoint>,
+    ref_tree: &PointIndex,
     ref_length: f64,
 ) -> Vec<(usize, usize, Direction)> {
     let run_len = run.end_idx - run.start_idx;
@@ -484,8 +481,8 @@ fn split_run_into_laps(
             let point = &track[i];
             let query = [point.latitude, point.longitude];
             ref_tree
-                .nearest_neighbor(&query)
-                .map(|n| n.idx)
+                .nearest(&query)
+                .map(|(index, _)| index)
                 .unwrap_or(0)
         })
         .collect();

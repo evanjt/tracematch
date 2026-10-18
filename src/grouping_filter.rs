@@ -20,12 +20,22 @@
 //! and the reverse case (start_a ≈ end_b, end_a ≈ start_b), because
 //! all four endpoints register in the same grid.
 //!
-//! The filter is conservative by construction: any pair the existing
-//! `should_group_routes` gate would accept must have its endpoints
-//! within `endpoint_threshold`, which guarantees the filter emits it
-//! (cell size is sized at 4× threshold with 9-cell neighbour lookup).
+//! A loop is paired differently, because it may be ridden from any point on
+//! it and `should_group_routes` only asks that each loop's start lies near
+//! the other's path. Two loops whose starts are far apart are therefore
+//! still candidates. Each loop carries its footprint, widened by the
+//! endpoint threshold, and every pair of loops whose footprints overlap is
+//! emitted.
+//!
+//! The filter is conservative by construction: a pair of non-loop routes
+//! the existing `should_group_routes` gate would accept has its endpoints
+//! within `endpoint_threshold`, which guarantees the filter emits it (cell
+//! size is sized at 4× threshold with 9-cell neighbour lookup). A pair of
+//! loops the gate would accept has each start within `endpoint_threshold` of
+//! the other's path, so the widened footprints overlap and it is emitted.
 
-use crate::GpsPoint;
+use crate::geo_utils::haversine_distance;
+use crate::{Bounds, GpsPoint, RouteSignature};
 use std::collections::{HashMap, HashSet};
 
 /// A geographic grid cell at endpoint-tolerance scale.
@@ -76,6 +86,9 @@ impl EndpointCell {
 pub struct RouteEndpointCells {
     pub start: EndpointCell,
     pub end: EndpointCell,
+    /// The route's footprint widened by the endpoint threshold, set only
+    /// for a loop.
+    pub loop_footprint: Option<Bounds>,
 }
 
 impl RouteEndpointCells {
@@ -84,8 +97,46 @@ impl RouteEndpointCells {
         Self {
             start: EndpointCell::from_point(start.latitude, start.longitude, cell_size_deg),
             end: EndpointCell::from_point(end.latitude, end.longitude, cell_size_deg),
+            loop_footprint: None,
         }
     }
+
+    /// Compute the cells for a signature, with a footprint when its start
+    /// and end are within `endpoint_threshold` of each other.
+    pub fn for_signature(
+        sig: &RouteSignature,
+        endpoint_threshold: f64,
+        cell_size_deg: f64,
+    ) -> Self {
+        let mut cells = Self::new(&sig.start_point, &sig.end_point, cell_size_deg);
+        if haversine_distance(&sig.start_point, &sig.end_point) < endpoint_threshold {
+            cells.loop_footprint =
+                Bounds::from_points(&sig.points).map(|b| widen_bounds(&b, endpoint_threshold));
+        }
+        cells
+    }
+}
+
+/// `bounds` grown by `margin_meters` on every side. Longitude degrees shrink
+/// towards the poles, so the longitude margin uses the latitude nearest one.
+fn widen_bounds(bounds: &Bounds, margin_meters: f64) -> Bounds {
+    const METERS_PER_DEGREE: f64 = 111_000.0;
+    let lat_margin = margin_meters / METERS_PER_DEGREE;
+    let widest_lat = bounds.min_lat.abs().max(bounds.max_lat.abs()).min(89.0);
+    let lng_margin = lat_margin / widest_lat.to_radians().cos();
+    Bounds {
+        min_lat: bounds.min_lat - lat_margin,
+        max_lat: bounds.max_lat + lat_margin,
+        min_lng: bounds.min_lng - lng_margin,
+        max_lng: bounds.max_lng + lng_margin,
+    }
+}
+
+fn footprints_overlap(a: &Bounds, b: &Bounds) -> bool {
+    a.min_lat <= b.max_lat
+        && b.min_lat <= a.max_lat
+        && a.min_lng <= b.max_lng
+        && b.min_lng <= a.max_lng
 }
 
 /// Derive a sensible cell size from the endpoint threshold.
@@ -104,7 +155,8 @@ pub fn cell_size_for_endpoint_threshold(endpoint_threshold_meters: f64) -> f64 {
 /// Returns pairs as `(i, j)` with `i < j`. Pairs are unique. The set
 /// is a strict subset of all N(N-1)/2 pairs, specifically, the subset
 /// where at least one endpoint (start or end) of route `i` shares a
-/// cell-or-neighbour with at least one endpoint of route `j`.
+/// cell-or-neighbour with at least one endpoint of route `j`, plus every
+/// pair of loops whose footprints overlap.
 ///
 /// Downstream code (`compare_routes`, `should_group_routes`) still
 /// applies its own AMD + endpoint + middle-point checks on the result,
@@ -145,6 +197,21 @@ pub fn endpoint_grid_filtered_pairs(endpoints: &[RouteEndpointCells]) -> Vec<(us
         }
         // For loops (start == end), the second iteration of the
         // for-loop is a no-op duplicate. The HashSet handles it.
+    }
+
+    // Loops pair by footprint, not by endpoint cell: a loop can be ridden
+    // from any point on it.
+    let loops: Vec<(usize, &Bounds)> = endpoints
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, ep)| ep.loop_footprint.as_ref().map(|b| (idx, b)))
+        .collect();
+    for (n, (i, a)) in loops.iter().enumerate() {
+        for (j, b) in &loops[n + 1..] {
+            if footprints_overlap(a, b) {
+                candidate_pairs.insert((*i, *j));
+            }
+        }
     }
 
     // Sort for deterministic output: the HashSet iteration order is
@@ -224,6 +291,25 @@ mod tests {
         let r1 = RouteEndpointCells::new(&pt(46.0001, 7.0001), &pt(46.0001, 7.0001), cell_size);
         assert_eq!(r0.start, r0.end);
         let pairs = endpoint_grid_filtered_pairs(&[r0, r1]);
+        assert_eq!(pairs, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn loops_with_distant_starts_pair_when_their_footprints_overlap() {
+        let cell_size = cell_size_for_endpoint_threshold(250.0);
+        let footprint = |lat: f64| Bounds {
+            min_lat: lat,
+            max_lat: lat + 0.03,
+            min_lng: 7.0,
+            max_lng: 7.04,
+        };
+        let mut r0 = RouteEndpointCells::new(&pt(46.0, 7.0), &pt(46.0, 7.0), cell_size);
+        let mut r1 = RouteEndpointCells::new(&pt(46.02, 7.04), &pt(46.02, 7.04), cell_size);
+        let mut r2 = RouteEndpointCells::new(&pt(46.5, 7.0), &pt(46.5, 7.0), cell_size);
+        r0.loop_footprint = Some(footprint(46.0));
+        r1.loop_footprint = Some(footprint(46.0));
+        r2.loop_footprint = Some(footprint(46.5));
+        let pairs = endpoint_grid_filtered_pairs(&[r0, r1, r2]);
         assert_eq!(pairs, vec![(0, 1)]);
     }
 

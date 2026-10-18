@@ -78,7 +78,6 @@ fn frequent_section_serialises_the_keys_the_site_reads() {
         version: 1,
         updated_at: None,
         created_at: None,
-        consensus_state: None,
     };
 
     let value = serde_json::to_value(&section).expect("FrequentSection serialises");
@@ -193,6 +192,14 @@ fn boundary_reason_payloads_stay_snake_case() {
         vec!["kind", "thick", "thin"]
     );
     assert_eq!(
+        reason_keys(BoundaryReason::Terminus {
+            through: 1,
+            needed: 1.0,
+            ending: 1,
+        }),
+        vec!["ending", "kind", "needed", "through"]
+    );
+    assert_eq!(
         reason_keys(BoundaryReason::PassEnd { requeued_cells: 1 }),
         vec!["kind", "requeued_cells"]
     );
@@ -242,6 +249,14 @@ fn boundary_reason_tags_match_the_sites_switch() {
     assert_eq!(
         tag(BoundaryReason::TrafficCliff { thin: 0, thick: 0 }),
         "traffic_cliff"
+    );
+    assert_eq!(
+        tag(BoundaryReason::Terminus {
+            through: 0,
+            needed: 0.0,
+            ending: 0
+        }),
+        "terminus"
     );
     assert_eq!(
         tag(BoundaryReason::NoSinglePass {

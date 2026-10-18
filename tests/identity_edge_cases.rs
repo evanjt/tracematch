@@ -1016,3 +1016,32 @@ fn a_tail_carved_off_a_re_cutting_trunk_still_names_its_parent() {
         "a piece carved off the trunk records the trunk as its parent"
     );
 }
+
+/// Scenario: a trunk splits late, and the head it re-cuts to still overlaps
+/// the sibling carved off beside it above the carry coverage. Across many
+/// shapes of two priors competing for one sibling, the second plan pass never
+/// nominated a parent the first did not, so a case where the two passes
+/// disagree could not be built; only the lineage the first pass holds is
+/// pinned here.
+/// Expected behaviour: the sibling's mint records the trunk as its parent,
+/// the same lineage as when only the first pass names it.
+#[test]
+fn a_sibling_the_re_cut_trunk_still_covers_names_its_parent() {
+    let corridor = sparse(46.0, 7.0, 100);
+    let head = corridor[..=70].to_vec();
+    let sibling = corridor[40..].to_vec();
+
+    let mut state = HysteresisState::default();
+    let (_, r) = state.step_assign(&[cand(corridor, 5)]);
+    let trunk_id = r[0].id.clone();
+
+    let (out, r) = state.step_assign(&[cand(head, 5), cand(sibling, 5)]);
+    assert_eq!(r[0].id, trunk_id, "the head carries the trunk's id");
+    assert_eq!(out.minted, 1, "the sibling is the only mint");
+    assert_eq!(r[1].fate, CandidateFate::Minted, "the sibling mints");
+    assert_eq!(
+        r[1].split_from.as_deref(),
+        Some(trunk_id.as_str()),
+        "a sibling the re-cut trunk still covers records the trunk as its parent"
+    );
+}

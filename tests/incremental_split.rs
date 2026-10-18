@@ -2,10 +2,14 @@
 //! but runs different ground in the middle.
 //!
 //! Expected behaviour: the incremental add path splits it out, the same way
-//! a full regroup would, instead of leaving it in the group unchecked.
+//! a full regroup would, instead of leaving it in the group unchecked. Both
+//! batch grouping paths split it out as well.
 
 use tracematch::grouping::group_incremental_with_matches;
-use tracematch::{GpsPoint, MatchConfig, RouteGroup, RouteSignature, group_signatures_parallel};
+use tracematch::{
+    GpsPoint, GroupingResult, MatchConfig, RouteGroup, RouteSignature, group_signatures_parallel,
+    group_signatures_parallel_with_matches, group_signatures_with_matches,
+};
 
 /// A 3 km run east along latitude 45, bulged north by `peak_deg` across the
 /// middle 40% of the route. `jitter` separates otherwise identical rides.
@@ -120,4 +124,74 @@ fn a_settled_group_keeps_its_members_when_nothing_new_touches_it() {
         .find(|g| g.activity_ids.iter().any(|id| id.starts_with("direct_")))
         .expect("the direct group survives");
     assert_eq!(settled.activity_ids.len(), 3);
+}
+
+#[test]
+fn a_chosen_representative_survives_an_incremental_join_under_a_minted_group_id() {
+    let config = MatchConfig::default();
+    let mut sigs: Vec<RouteSignature> = (0..3)
+        .map(|i| signature(&format!("direct_{i}"), &route(0.0, i as f64 * 0.000_01)))
+        .collect();
+    sigs.push(signature("chosen", &route(0.0003, 0.0)));
+    let mut group = group_signatures_parallel(&sigs, &config).remove(0);
+    assert_eq!(
+        group.activity_ids.len(),
+        4,
+        "the chosen ride joins the route"
+    );
+    group.group_id = "r_9".to_string();
+    group.representative_id = "chosen".to_string();
+
+    let new_sigs = vec![signature("direct_9", &route(0.0, 0.000_05))];
+    let result = group_incremental_with_matches(&new_sigs, &[group], &sigs, &config);
+
+    let joined = result
+        .groups
+        .iter()
+        .find(|g| g.activity_ids.iter().any(|id| id == "direct_9"))
+        .expect("the new ride is grouped");
+    assert!(joined.activity_ids.iter().any(|id| id == "chosen"));
+    assert_eq!(joined.representative_id, "chosen");
+}
+
+fn mixed_batch() -> Vec<RouteSignature> {
+    let (mut signatures, _) = direct_group();
+    signatures.extend((0..2).map(|i| {
+        signature(
+            &format!("detour_{i}"),
+            &route(DETOUR_PEAK_DEG, i as f64 * 0.000_01),
+        )
+    }));
+    signatures
+}
+
+fn assert_detours_split_from_direct_rides(result: &GroupingResult) {
+    let detours: Vec<&RouteGroup> = result
+        .groups
+        .iter()
+        .filter(|g| g.activity_ids.iter().any(|id| id.starts_with("detour_")))
+        .collect();
+    assert_eq!(detours.len(), 1, "both detour rides land in one group");
+    assert_eq!(detours[0].activity_ids.len(), 2);
+    assert!(
+        detours[0]
+            .activity_ids
+            .iter()
+            .all(|id| id.starts_with("detour_")),
+        "the detour group holds no direct ride: {:?}",
+        detours[0].activity_ids
+    );
+    assert_eq!(result.groups.len(), 2);
+}
+
+#[test]
+fn the_parallel_batch_path_splits_a_ride_that_diverges_in_the_middle() {
+    let result = group_signatures_parallel_with_matches(&mixed_batch(), &MatchConfig::default());
+    assert_detours_split_from_direct_rides(&result);
+}
+
+#[test]
+fn the_sequential_batch_path_splits_a_ride_that_diverges_in_the_middle() {
+    let result = group_signatures_with_matches(&mixed_batch(), &MatchConfig::default());
+    assert_detours_split_from_direct_rides(&result);
 }

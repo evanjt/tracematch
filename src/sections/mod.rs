@@ -28,11 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 // Re-export internal utilities for use across submodules
 pub(crate) use consensus::compute_consensus_polyline;
-pub use consensus::{
-    ConsensusAccumulator, ConsensusPointAccumulator, ConsensusResult, TraceKey, TraceRTreeCache,
-    build_accumulator_from_traces, build_trace_rtree_cache, merge_traces_into_consensus,
-    merge_traces_into_consensus_with_cache,
-};
+pub use consensus::{ConsensusResult, TraceKey};
 pub use interestingness::{
     Candidate as RankCandidate, Enrichment, Member as RankMember, Outing as RankOuting,
     RankFeatures, SectionClass, Traversal as RankTraversal, enrich, max_sustained_grade, rank,
@@ -290,14 +286,6 @@ pub struct FrequentSection {
     /// ISO timestamp when section was created
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
-
-    /// Incremental-consensus running sums. Every constructor sets it to None
-    /// and nothing populates it, so it is always None today:
-    /// `merge_traces_into_consensus` folds into a caller-held
-    /// `ConsensusAccumulator`, not this field. Skipped during JSON
-    /// serialisation when None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consensus_state: Option<ConsensusAccumulator>,
 }
 
 fn default_version() -> u32 {
@@ -468,7 +456,6 @@ pub fn process_cluster(
         created_at: None,
         enrichment: Default::default(),
         rank: None,
-        consensus_state: None,
     })
 }
 

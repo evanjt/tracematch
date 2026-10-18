@@ -343,7 +343,8 @@ pub fn plain_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
 /// Every cell carries at least two riders and no third is minority
 /// ground, so the render is a through pass over the whole corridor, and
 /// no local covers half of it. The candidate qualifies on four
-/// contributors and the drawn line admits only the `through` riders.
+/// contributors, and with one `through` rider the longest stretch two
+/// riders run end to end is a single third.
 pub fn split_population_corridor(through: usize) -> Vec<(String, Vec<GpsPoint>)> {
     const LEGS: [(f64, f64); 3] = [(0.0, 900.0), (800.0, 1700.0), (1600.0, 2400.0)];
     let mut out: Vec<(String, Vec<GpsPoint>)> = (0..through)
@@ -379,6 +380,68 @@ pub fn sliding_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
             let path = densify(&[(x0, 0.0), (x0 + 1500.0, 0.0)]);
             (
                 format!("slide_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// A corridor of 1000 m windows, each starting 450 m after the last:
+/// neighbouring outings share 550 m and no three share more than 100 m,
+/// so the corridor is one stretch of steady traffic, and no stretch of
+/// it is run end to end by as many outings as its length needs.
+pub fn short_hop_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    (0..outings)
+        .map(|i| {
+            let x0 = 450.0 * i as f64;
+            let path = densify(&[(x0, 0.0), (x0 + 1000.0, 0.0)]);
+            (
+                format!("hop_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect()
+}
+
+/// Outings that ride a 1000 m corridor out and back, each return a few
+/// metres beside its outward leg, and one more that crosses the
+/// corridor and runs 100 m of it on the way, a pass no one else runs
+/// beyond the corridor.
+pub fn doubled_back_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out: Vec<(String, Vec<GpsPoint>)> = (0..outings)
+        .map(|i| {
+            let lane = 6.0 + i as f64;
+            let path = densify(&[
+                (-20.0 * i as f64, 0.0),
+                (1000.0 + 10.0 * i as f64, 0.0),
+                (1000.0 + 10.0 * i as f64, lane),
+                (-20.0 * i as f64, lane),
+            ]);
+            (
+                format!("back_{}", i),
+                track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+            )
+        })
+        .collect();
+    let cross = densify(&[(400.0, -600.0), (450.0, 0.0), (550.0, 0.0), (600.0, 600.0)]);
+    out.push((
+        "cross".to_string(),
+        track(&wobble(&cross, HUMAN_WOBBLE_M, phase(outings))),
+    ));
+    out
+}
+
+/// Two outings that arrive from opposite sides, share 300 m of ground
+/// and leave on diverging lines: the shared stretch is real, but two
+/// traversals of 300 m sit under the floor a stretch that short needs.
+pub fn brief_share() -> Vec<(String, Vec<GpsPoint>)> {
+    [400.0, -400.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &side)| {
+            let path = densify(&[(-800.0, side), (0.0, 0.0), (300.0, 0.0), (1100.0, side)]);
+            (
+                format!("brief_{}", i),
                 track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
             )
         })
@@ -1001,4 +1064,30 @@ pub fn coarse_sampled_corridor(outings: usize) -> Vec<(String, Vec<GpsPoint>)> {
             (format!("coarse_{i}"), track(&pts))
         })
         .collect()
+}
+
+/// A straight 3 km corridor (x 0..3000 along y=0) that `through` outings
+/// run whole and `late` outings join midway: they start at the 1500 m
+/// mark, staggered by a few metres, and run on to the far end. Nothing
+/// turns off anywhere, so the only visible reason for the first half to
+/// end at 1500 is that a share of the traffic starts there.
+pub fn late_starters(through: usize, late: usize) -> Vec<(String, Vec<GpsPoint>)> {
+    let whole = (0..through).map(|i| {
+        let path = densify(&[(-8.0 * i as f64, 0.0), (3000.0 + 8.0 * i as f64, 0.0)]);
+        (
+            format!("whole_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+        )
+    });
+    let joined = (0..late).map(|i| {
+        let path = densify(&[
+            (1500.0 + 3.0 * i as f64, 0.0),
+            (3000.0 + 8.0 * i as f64, 0.0),
+        ]);
+        (
+            format!("late_{}", i),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(through + i))),
+        )
+    });
+    whole.chain(joined).collect()
 }

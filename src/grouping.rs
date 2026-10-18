@@ -4,14 +4,16 @@
 //! using spatial indexing and Union-Find for efficient grouping.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "parallel")]
+use std::sync::OnceLock;
 
 use crate::geo_utils::haversine_distance;
 use crate::grouping_filter::{
     RouteEndpointCells, cell_size_for_endpoint_threshold, endpoint_grid_filtered_pairs,
 };
 use crate::matching::{
-    PreparedRoute, calculate_checkpoint_match, compare_prepared_routes, compare_routes,
-    cumulative_distances, point_at_distance, prepare_route,
+    PreparedRoute, calculate_checkpoint_match, compare_prepared_routes, cumulative_distances,
+    point_at_distance, prepare_route,
 };
 use crate::union_find::UnionFind;
 use crate::{
@@ -189,7 +191,7 @@ pub fn group_signatures_with_progress(
     let cell_size = cell_size_for_endpoint_threshold(config.endpoint_threshold);
     let endpoints: Vec<RouteEndpointCells> = signatures
         .iter()
-        .map(|s| RouteEndpointCells::new(&s.start_point, &s.end_point, cell_size))
+        .map(|s| RouteEndpointCells::for_signature(s, config.endpoint_threshold, cell_size))
         .collect();
     let candidate_pairs = endpoint_grid_filtered_pairs(&endpoints);
 
@@ -283,13 +285,13 @@ pub fn group_signatures_with_matches(
 ///
 /// Uses [`crate::grouping_filter`]'s endpoint grid to prune the
 /// candidate pair set down to those whose start/end points could fall
-/// within `config.endpoint_threshold` of each other. Pairs that survive
-/// the filter still go through the full
+/// within `config.endpoint_threshold` of each other, plus every pair of
+/// loops whose footprints overlap, since a loop may be ridden from any
+/// point on it. Pairs that survive the filter still go through the full
 /// `distance_ratio_ok` → `compare_routes` → `should_group_routes`
-/// pipeline, so the grouping output is provably identical to the
-/// (legacy) all-pairs-after-R-tree implementation. The A/B test in
+/// pipeline, and the A/B test in
 /// `crate::grouping_filter::tests::filter_produces_identical_groups_as_naive`
-/// makes this guarantee explicit.
+/// compares the grouped pairs with those of the all-pairs list.
 #[cfg(feature = "parallel")]
 pub fn group_signatures_parallel(
     signatures: &[RouteSignature],
@@ -305,7 +307,7 @@ pub fn group_signatures_parallel(
     let cell_size = cell_size_for_endpoint_threshold(config.endpoint_threshold);
     let endpoints: Vec<RouteEndpointCells> = signatures
         .iter()
-        .map(|s| RouteEndpointCells::new(&s.start_point, &s.end_point, cell_size))
+        .map(|s| RouteEndpointCells::for_signature(s, config.endpoint_threshold, cell_size))
         .collect();
     let candidate_pairs = endpoint_grid_filtered_pairs(&endpoints);
 
@@ -448,7 +450,7 @@ pub fn group_incremental_with_matches(
     let cell_size = cell_size_for_endpoint_threshold(config.endpoint_threshold);
     let endpoints: Vec<RouteEndpointCells> = all_signatures
         .iter()
-        .map(|s| RouteEndpointCells::new(&s.start_point, &s.end_point, cell_size))
+        .map(|s| RouteEndpointCells::for_signature(s, config.endpoint_threshold, cell_size))
         .collect();
     let candidate_pairs = endpoint_grid_filtered_pairs(&endpoints);
 
@@ -487,6 +489,10 @@ pub fn group_incremental_with_matches(
         .filter(|&(i, j)| i >= existing_n || j >= existing_n)
         .collect();
 
+    // Each signature is resampled and indexed once, on first use by any pair.
+    let prepared: Vec<OnceLock<PreparedRoute>> =
+        all_signatures.iter().map(|_| OnceLock::new()).collect();
+
     let matches: Vec<(String, String)> = new_or_mixed_pairs
         .par_iter()
         .filter_map(|&(i, j)| {
@@ -508,7 +514,9 @@ pub fn group_incremental_with_matches(
                 return None;
             }
 
-            let match_result = compare_routes(sig1, sig2, config)?;
+            let prep1 = prepared[i].get_or_init(|| prepare_route(sig1, config));
+            let prep2 = prepared[j].get_or_init(|| prepare_route(sig2, config));
+            let match_result = compare_prepared_routes(sig1, prep1, sig2, prep2, config)?;
             if !should_group_routes(sig1, sig2, &match_result, config) {
                 return None;
             }
@@ -521,10 +529,7 @@ pub fn group_incremental_with_matches(
         uf.union(&id1, &id2);
     }
 
-    let existing_reps: HashMap<String, String> = existing_groups
-        .iter()
-        .map(|g| (g.group_id.clone(), g.representative_id.clone()))
-        .collect();
+    let existing_reps = existing_representatives(existing_groups);
 
     let groups_map = uf.groups();
     let groups =
@@ -539,7 +544,9 @@ pub fn group_incremental_with_matches(
 
     let kept_reps: HashSet<&str> = touched
         .iter()
-        .filter(|g| existing_reps.get(&g.group_id) == Some(&g.representative_id))
+        .filter(|g| {
+            preserved_representative(&g.activity_ids, &existing_reps) == Some(&g.representative_id)
+        })
         .map(|g| g.group_id.as_str())
         .collect();
     let mut result = compute_matches_and_split(&touched, &sig_map, config, &kept_reps);
@@ -560,6 +567,7 @@ fn compute_matches_and_split(
 ) -> GroupingResult {
     let mut final_groups: Vec<RouteGroup> = Vec::new();
     let mut activity_matches: HashMap<String, Vec<ActivityMatchInfo>> = HashMap::new();
+    let mut prepared: HashMap<String, PreparedRoute> = HashMap::new();
 
     for group in initial_groups {
         let representative_sig = match sig_map.get(group.representative_id.as_str()) {
@@ -572,7 +580,13 @@ fn compute_matches_and_split(
 
         // Calculate match info for each activity using AMD-based matching
         let mut group = group.clone();
-        let mut matches = measure_matches(&group.activity_ids, sig_map, representative_sig, config);
+        let mut matches = measure_matches(
+            &group.activity_ids,
+            sig_map,
+            representative_sig,
+            &mut prepared,
+            config,
+        );
 
         // A representative that fewer than MIN_SPLIT_GROUP_SIZE members reach would switch
         // the split off, so a group built round it is never checked. Choose again, unless
@@ -589,7 +603,13 @@ fn compute_matches_and_split(
             if better != group.representative_id
                 && let Some(better_sig) = sig_map.get(better.as_str())
             {
-                matches = measure_matches(&group.activity_ids, sig_map, better_sig, config);
+                matches = measure_matches(
+                    &group.activity_ids,
+                    sig_map,
+                    better_sig,
+                    &mut prepared,
+                    config,
+                );
                 group.representative_id = better;
             }
         }
@@ -613,20 +633,13 @@ fn compute_matches_and_split(
                     }
                 };
 
-                let split_matches: Vec<ActivityMatchInfo> = split_group
-                    .activity_ids
-                    .iter()
-                    .filter_map(|activity_id| {
-                        let activity_sig = sig_map.get(activity_id.as_str())?;
-                        let result = compare_routes(activity_sig, split_rep_sig, config)?;
-
-                        Some(ActivityMatchInfo {
-                            activity_id: activity_id.clone(),
-                            match_percentage: result.match_percentage,
-                            direction: result.direction,
-                        })
-                    })
-                    .collect();
+                let split_matches = measure_matches(
+                    &split_group.activity_ids,
+                    sig_map,
+                    split_rep_sig,
+                    &mut prepared,
+                    config,
+                );
 
                 activity_matches.insert(split_group.group_id.clone(), split_matches);
                 final_groups.push(split_group);
@@ -641,17 +654,39 @@ fn compute_matches_and_split(
 }
 
 /// Match each member against a representative signature.
+///
+/// `prepared` holds each signature's resample and R-tree, built the first time
+/// the signature is compared and reused by every later call.
 fn measure_matches(
     activity_ids: &[String],
     sig_map: &HashMap<&str, &RouteSignature>,
     representative_sig: &RouteSignature,
+    prepared: &mut HashMap<String, PreparedRoute>,
     config: &MatchConfig,
 ) -> Vec<ActivityMatchInfo> {
+    prepared
+        .entry(representative_sig.activity_id.clone())
+        .or_insert_with(|| prepare_route(representative_sig, config));
+    for activity_id in activity_ids {
+        if let Some(sig) = sig_map.get(activity_id.as_str()) {
+            prepared
+                .entry(activity_id.clone())
+                .or_insert_with(|| prepare_route(sig, config));
+        }
+    }
+    let representative_prep = &prepared[&representative_sig.activity_id];
+
     activity_ids
         .iter()
         .filter_map(|activity_id| {
             let activity_sig = sig_map.get(activity_id.as_str())?;
-            let result = compare_routes(activity_sig, representative_sig, config)?;
+            let result = compare_prepared_routes(
+                activity_sig,
+                &prepared[activity_id],
+                representative_sig,
+                representative_prep,
+                config,
+            )?;
 
             log::debug!(
                 "tracematch: amd_match for {}: {:.1}% ({})",
@@ -675,7 +710,42 @@ fn build_route_groups(
     sig_map: &HashMap<&str, &RouteSignature>,
     config: &MatchConfig,
 ) -> Vec<RouteGroup> {
-    build_route_groups_with_existing_reps(groups_map, sig_map, &HashMap::new(), config)
+    build_route_groups_with_existing_reps(groups_map, sig_map, &ExistingReps::new(), config)
+}
+
+/// Each existing member mapped to its group's size and representative. Output
+/// groups are keyed by a union-find root, never by the stored group id, so the
+/// representative is found through the members.
+type ExistingReps = HashMap<String, (usize, String)>;
+
+fn existing_representatives(existing_groups: &[RouteGroup]) -> ExistingReps {
+    existing_groups
+        .iter()
+        .flat_map(|g| {
+            g.activity_ids.iter().map(|id| {
+                (
+                    id.clone(),
+                    (g.activity_ids.len(), g.representative_id.clone()),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The representative of the largest existing group the members came from, while
+/// it is still a member. Ties go to the smaller id so the choice is stable.
+fn preserved_representative<'a>(
+    activity_ids: &[String],
+    existing_reps: &'a ExistingReps,
+) -> Option<&'a String> {
+    activity_ids
+        .iter()
+        .filter_map(|id| existing_reps.get(id))
+        .filter(|(_, rep)| activity_ids.contains(rep))
+        .min_by(|(size_a, rep_a), (size_b, rep_b)| {
+            size_b.cmp(size_a).then_with(|| rep_a.cmp(rep_b))
+        })
+        .map(|(_, rep)| rep)
 }
 
 /// Build RouteGroup instances, preserving existing representatives when available.
@@ -683,7 +753,7 @@ fn build_route_groups(
 fn build_route_groups_with_existing_reps(
     groups_map: BTreeMap<String, Vec<String>>,
     sig_map: &HashMap<&str, &RouteSignature>,
-    existing_reps: &HashMap<String, String>,
+    existing_reps: &ExistingReps,
     config: &MatchConfig,
 ) -> Vec<RouteGroup> {
     groups_map
@@ -692,9 +762,7 @@ fn build_route_groups_with_existing_reps(
             // Preserve the existing representative while it is still a member.
             // Otherwise the member that matches the others best represents the
             // group: the sorted-first id says nothing about the track.
-            let representative_id = existing_reps
-                .get(&group_id)
-                .filter(|rep| activity_ids.contains(rep))
+            let representative_id = preserved_representative(&activity_ids, existing_reps)
                 .cloned()
                 .unwrap_or_else(|| {
                     let members: Vec<&str> = activity_ids.iter().map(String::as_str).collect();
@@ -768,7 +836,7 @@ pub fn distance_ratio_ok(d1: f64, d2: f64) -> bool {
         return false;
     }
     let ratio = if d1 > d2 { d2 / d1 } else { d1 / d2 };
-    ratio >= 0.5
+    ratio >= crate::matching::MIN_LENGTH_RATIO
 }
 
 /// Cheap O(1) endpoint pre-check used by the grouping path before the
@@ -813,12 +881,44 @@ pub fn endpoints_could_group(
     same_direction_ok || reverse_direction_ok
 }
 
-/// Check if a point is near any point on a route.
+/// Check if a point lies within `threshold` metres of a route's path.
 /// Used for loop matching - checks if a point lies on/near another loop.
+///
+/// Distance is measured to the segments between consecutive points, not to
+/// the points alone, because a simplified signature can leave a long straight
+/// with no vertex near a start that lies on it.
 fn is_point_near_route(point: &GpsPoint, route: &[GpsPoint], threshold: f64) -> bool {
-    route
-        .iter()
-        .any(|route_point| haversine_distance(point, route_point) < threshold)
+    match route {
+        [] => false,
+        [only] => haversine_distance(point, only) < threshold,
+        _ => route
+            .windows(2)
+            .any(|w| distance_to_segment(point, &w[0], &w[1]) < threshold),
+    }
+}
+
+/// Metres from `point` to the segment `a`-`b`, on a local flat projection
+/// centred on `point`.
+fn distance_to_segment(point: &GpsPoint, a: &GpsPoint, b: &GpsPoint) -> f64 {
+    const METRES_PER_DEGREE: f64 = 111_000.0;
+    let lng_scale = point.latitude.to_radians().cos() * METRES_PER_DEGREE;
+    let to_xy = |p: &GpsPoint| {
+        (
+            (p.longitude - point.longitude) * lng_scale,
+            (p.latitude - point.latitude) * METRES_PER_DEGREE,
+        )
+    };
+    let (ax, ay) = to_xy(a);
+    let (bx, by) = to_xy(b);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    let t = if len_sq > 0.0 {
+        (-(ax * dx + ay * dy) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    (cx * cx + cy * cy).sqrt()
 }
 
 /// Split threshold for divergent route detection.
@@ -1120,5 +1220,151 @@ mod split_membership_tests {
             .collect();
         ids.sort();
         assert_eq!(ids, ["a", "b", "c", "d", "e", "f"]);
+    }
+}
+
+#[cfg(test)]
+mod loop_pairing_tests {
+    use super::*;
+    use crate::matching::compare_routes;
+
+    /// A rectangular circuit of about 10 km, sampled every ~10 m, ridden
+    /// from the point `offset_m` along it and back to that point.
+    fn circuit_from(offset_m: f64) -> Vec<GpsPoint> {
+        let (lat0, lng0) = (46.0, 7.0);
+        let (dlat, dlng) = (0.0315, 0.0430);
+        let corners = [
+            (lat0, lng0),
+            (lat0 + dlat, lng0),
+            (lat0 + dlat, lng0 + dlng),
+            (lat0, lng0 + dlng),
+            (lat0, lng0),
+        ];
+        let mut ring = Vec::new();
+        for w in corners.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = haversine_distance(&GpsPoint::new(a.0, a.1), &GpsPoint::new(b.0, b.1));
+            let steps = (len / 10.0).ceil() as usize;
+            for s in 0..steps {
+                let t = s as f64 / steps as f64;
+                ring.push(GpsPoint::new(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+        }
+        let start = ((offset_m / 10.0) as usize) % ring.len();
+        let mut out: Vec<GpsPoint> = ring[start..]
+            .iter()
+            .chain(&ring[..start])
+            .cloned()
+            .collect();
+        out.push(out[0]);
+        out
+    }
+
+    fn signature(id: &str, points: &[GpsPoint]) -> RouteSignature {
+        RouteSignature::from_points(id, points, &MatchConfig::default())
+            .expect("circuit should produce a signature")
+    }
+
+    #[test]
+    fn a_loop_ridden_from_a_start_3_km_along_it_groups_with_the_original() {
+        let config = MatchConfig::default();
+        let a = signature("from_car_park", &circuit_from(0.0));
+        let b = signature("from_home", &circuit_from(3000.0));
+        assert!(haversine_distance(&a.start_point, &b.start_point) > 2000.0);
+
+        let mr = compare_routes(&a, &b, &config).expect("the circuits overlap");
+        assert!(
+            should_group_routes(&a, &b, &mr, &config),
+            "the gate accepts the pair"
+        );
+
+        let groups = group_signatures(&[a, b], &config);
+        assert_eq!(groups.len(), 1, "one route, ridden from two starts");
+        assert_eq!(groups[0].activity_ids.len(), 2);
+    }
+
+    #[test]
+    fn the_filter_loses_no_grouped_pair_among_loops_ridden_from_different_starts() {
+        let config = MatchConfig::default();
+        let sigs: Vec<RouteSignature> = [0.0, 1500.0, 3000.0, 6500.0]
+            .iter()
+            .enumerate()
+            .map(|(n, off)| signature(&format!("ride{n}"), &circuit_from(*off)))
+            .collect();
+        let cell_size = cell_size_for_endpoint_threshold(config.endpoint_threshold);
+        let endpoints: Vec<RouteEndpointCells> = sigs
+            .iter()
+            .map(|s| RouteEndpointCells::for_signature(s, config.endpoint_threshold, cell_size))
+            .collect();
+        let filtered: HashSet<_> = endpoint_grid_filtered_pairs(&endpoints)
+            .into_iter()
+            .collect();
+        for i in 0..sigs.len() {
+            for j in (i + 1)..sigs.len() {
+                let accepted = compare_routes(&sigs[i], &sigs[j], &config)
+                    .is_some_and(|mr| should_group_routes(&sigs[i], &sigs[j], &mr, &config));
+                assert!(
+                    !accepted || filtered.contains(&(i, j)),
+                    "the gate accepts ({i}, {j}) but the filter dropped it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_start_midway_along_a_long_straight_is_near_that_route() {
+        let straight = [GpsPoint::new(46.0, 7.0), GpsPoint::new(46.0, 7.03)];
+        let midway = GpsPoint::new(46.0, 7.015);
+        assert!(is_point_near_route(&midway, &straight, 250.0));
+        let off_by_a_kilometre = GpsPoint::new(46.01, 7.015);
+        assert!(!is_point_near_route(&off_by_a_kilometre, &straight, 250.0));
+    }
+}
+
+#[cfg(test)]
+mod prepared_verification_tests {
+    use super::*;
+    use crate::matching::RESAMPLE_CALLS;
+
+    fn run(n: usize, lat: f64) -> Vec<GpsPoint> {
+        (0..n)
+            .map(|i| GpsPoint::new(lat, i as f64 / (n - 1) as f64 * 0.02))
+            .collect()
+    }
+
+    #[test]
+    fn verifying_a_group_resamples_each_member_once() {
+        let config = MatchConfig::default();
+        let sigs: Vec<RouteSignature> = (0..12)
+            .map(|i| {
+                RouteSignature::from_points(
+                    &format!("a{i}"),
+                    &run(100, 45.0 + i as f64 * 1e-6),
+                    &config,
+                )
+                .unwrap()
+            })
+            .collect();
+        let sig_map: HashMap<&str, &RouteSignature> =
+            sigs.iter().map(|s| (s.activity_id.as_str(), s)).collect();
+        let group = RouteGroup {
+            group_id: "g".to_string(),
+            representative_id: "a0".to_string(),
+            activity_ids: sigs.iter().map(|s| s.activity_id.clone()).collect(),
+            sport_type: "Run".to_string(),
+            bounds: None,
+            custom_name: None,
+            best_time: None,
+            avg_time: None,
+            best_pace: None,
+            best_activity_id: None,
+        };
+        let kept: HashSet<&str> = HashSet::from(["g"]);
+
+        RESAMPLE_CALLS.with(|c| c.set(0));
+        let result = compute_matches_and_split(&[group], &sig_map, &config, &kept);
+
+        assert_eq!(result.activity_matches["g"].len(), 12);
+        assert_eq!(RESAMPLE_CALLS.with(|c| c.get()), 12);
     }
 }

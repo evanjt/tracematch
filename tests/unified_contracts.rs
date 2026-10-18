@@ -11,9 +11,9 @@ mod shapes;
 use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
 use tracematch::{
-    Direction, FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache, SectionUpdatePolicy,
-    Tunables, detect_sections, detect_sections_dated, detect_sections_incremental_dated,
-    shares_ground,
+    BoundaryReason, Direction, FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache,
+    SectionUpdatePolicy, Tunables, detect_sections, detect_sections_dated,
+    detect_sections_explained, detect_sections_incremental_dated, shares_ground,
 };
 
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
@@ -436,6 +436,160 @@ fn corridor_no_one_runs_end_to_end_is_still_covered() {
         "busy interior must stay covered by the section chain (coverage {:.0}%)",
         cov * 100.0
     );
+}
+
+/// Activities whose own track runs `line` end to end: every point of the
+/// line lies within the ground tolerance of the track.
+fn runs_whole<'a>(line: &[GpsPoint], tracks: &'a [(String, Vec<GpsPoint>)]) -> Vec<&'a str> {
+    tracks
+        .iter()
+        .filter(|(_, pts)| {
+            line.iter()
+                .all(|p| min_dist(p, pts) <= tracematch::sections::GROUND_TOL_M)
+        })
+        .map(|(id, _)| id.as_str())
+        .collect()
+}
+
+#[test]
+fn every_drawn_line_is_run_whole_by_the_support_floor() {
+    // Scenario: the sliding corridor again, where each outing covers its
+    // own 1.5 km window, so a line drawn from one outing's whole window
+    // is run end to end by that outing alone.
+    // Expected behaviour: a section draws only the stretch of its pass
+    // that the support floor of outings runs end to end, and the ground
+    // beyond re-enters the queue, so the chain still covers the
+    // interior.
+    let tracks = shapes::sliding_corridor(24);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert!(!sections.is_empty(), "the corridor surfaced nothing");
+    for s in &sections {
+        let whole = runs_whole(&s.polyline, &tracks);
+        assert!(
+            whole.len() >= config().min_activities as usize,
+            "{}: its {:.0} m line is run end to end only by {:?}",
+            s.id,
+            s.distance_meters,
+            whole
+        );
+    }
+    let interior = metre_samples(&[(800.0, 0.0), (3200.0, 0.0)], 40.0);
+    let cov = coverage(&interior, &sections, 90.0);
+    assert!(
+        cov >= 0.9,
+        "the trimmed chain must still cover the interior (coverage {:.0}%)",
+        cov * 100.0
+    );
+}
+
+#[test]
+fn a_corridor_every_outing_runs_whole_draws_its_full_length() {
+    // Scenario: every outing rides the whole corridor.
+    // Expected behaviour: no stretch is short of riders, so nothing is
+    // trimmed and one section spans the corridor.
+    let tracks = shapes::plain_corridor(6);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 1, "the corridor must stay one section");
+    let spine = metre_samples(&[(-80.0, 0.0), (880.0, 0.0)], 10.0);
+    assert!(
+        coverage(&spine, &sections, 30.0) >= 0.98,
+        "the drawn line was trimmed short of the ground everyone runs"
+    );
+    assert_eq!(runs_whole(&sections[0].polyline, &tracks).len(), 6);
+}
+
+#[test]
+fn a_crossing_pass_hands_the_line_to_one_the_riders_run_whole() {
+    // Scenario: four outings ride one corridor out and back, and a fifth
+    // crosses it and runs 100 m of it on the way.
+    // Expected behaviour: the crossing pass is run whole by nobody over a
+    // section's length, so the line is drawn from a pass the four run end
+    // to end, and the corridor is one section rather than pieces.
+    let tracks = shapes::doubled_back_corridor(4);
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert_catalogue_invariants(&tracks, &sections);
+    assert_eq!(sections.len(), 1, "the corridor must surface one section");
+    let s = &sections[0];
+    let whole = runs_whole(&s.polyline, &tracks);
+    assert!(
+        whole.len() >= 4 && !whole.contains(&"cross"),
+        "the line must be run end to end by the four, got {whole:?}"
+    );
+    assert!(
+        s.distance_meters >= 800.0,
+        "the line must span the shared corridor, got {:.0} m",
+        s.distance_meters
+    );
+}
+
+#[cfg(feature = "synthetic")]
+#[test]
+fn riders_whose_every_pass_folds_draw_a_stretch_they_share() {
+    // Scenario: a generated library where the four riders of one corridor
+    // each lap it in a single folded pass, and the only pass that is one
+    // traversal is a 312 m strand of a fifth activity that no one else
+    // runs.
+    // Expected behaviour: the strand is no section's line. The line is
+    // the longest fold-free stretch of a folded pass that the floor of
+    // riders runs end to end, so the corridor still has its section.
+    use tracematch::scenarios::{LifecycleConfig, LifecycleCorpus};
+    let corpus = LifecycleCorpus::generate(&LifecycleConfig {
+        origin: GpsPoint::with_elevation(47.37, 8.55, 410.0),
+        seed: 0xC0FFEE,
+        bucket_a_count: 14,
+        bucket_b_delta_count: 0,
+        bucket_d_delta_count: 3,
+        bucket_e_delta_count: 0,
+        ..LifecycleConfig::default()
+    });
+    let tracks: Tracks = corpus
+        .bucket_a
+        .iter()
+        .map(|a| (a.id.clone(), a.gps_points.clone()))
+        .collect();
+    let epochs: HashMap<String, i64> = corpus
+        .bucket_a
+        .iter()
+        .map(|a| (a.id.clone(), a.start_date_unix))
+        .collect();
+    let sections = detect_sections_dated(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &epochs,
+        &config(),
+        &Tunables::DEFAULT,
+    )
+    .sections;
+    dump(&sections);
+    assert!(!sections.is_empty(), "the lapped corridor surfaced nothing");
+    for s in &sections {
+        let whole = runs_whole(&s.polyline, &tracks);
+        assert!(
+            whole.len() >= config().min_activities as usize,
+            "{}: its {:.0} m line is run end to end only by {:?}",
+            s.id,
+            s.distance_meters,
+            whole
+        );
+    }
+}
+
+#[test]
+fn a_stretch_two_outings_share_briefly_draws_nothing() {
+    // Scenario: two outings share 300 m of ground and part on either
+    // side.
+    // Expected behaviour: two traversals sit under the floor a 300 m
+    // stretch needs, so no section is drawn.
+    let tracks = shapes::brief_share();
+    let sections = detect(&tracks);
+    dump(&sections);
+    assert!(sections.is_empty(), "a brief share minted a section");
 }
 
 #[test]
@@ -2090,5 +2244,113 @@ fn an_existing_member_gains_newly_found_laps() {
         corridor.visit_count, 11,
         "eight crossings plus three laps is eleven visits, not {}",
         corridor.visit_count
+    );
+}
+
+// ----------------------------- rule 3: a terminus keeps its boundary
+
+/// Scenario: nine outings run a 3 km corridor whole and three join it at
+/// the 1500 m mark. No third corridor, no pass-class change, and the
+/// traffic does not halve.
+/// Expected behaviour: the join is a boundary because a share of the
+/// traffic starts there, so the second half counts all twelve.
+#[test]
+fn a_start_shared_by_a_significant_share_keeps_the_boundary() {
+    let tracks = shapes::late_starters(9, 3);
+    let out = detect_sections_explained(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+
+    let second_half = metre_samples(&[(1700.0, 0.0), (2800.0, 0.0)], 10.0);
+    let first_half = metre_samples(&[(200.0, 0.0), (1300.0, 0.0)], 10.0);
+    let on = |samples: &[GpsPoint]| -> Vec<&FrequentSection> {
+        out.sections
+            .iter()
+            .filter(|s| samples.iter().any(|p| min_dist(p, &s.polyline) < 50.0))
+            .collect()
+    };
+    let late = on(&second_half);
+    let early = on(&first_half);
+    assert!(
+        late.iter().any(|s| s.visit_count >= 12),
+        "the shared half must count all twelve: {:?}",
+        late.iter().map(|s| s.visit_count).collect::<Vec<_>>()
+    );
+    assert!(
+        early.iter().any(|s| s.visit_count == 9),
+        "the first half counts its nine"
+    );
+    for s in &out.sections {
+        let in_first = first_half.iter().any(|p| min_dist(p, &s.polyline) < 50.0);
+        let in_second = second_half.iter().any(|p| min_dist(p, &s.polyline) < 50.0);
+        assert!(!(in_first && in_second), "{}: spans the join", s.id);
+    }
+
+    let join = metre_samples(&[(1500.0, 0.0)], 10.0);
+    let record = out
+        .boundaries
+        .iter()
+        .find(|r| matches!(r.reason, BoundaryReason::Terminus { .. }))
+        .expect("a terminus boundary record");
+    let at = GpsPoint::new(record.latitude, record.longitude);
+    assert!(
+        haversine_distance(&at, &join[0]) < 150.0,
+        "record sits at the 1500 m mark"
+    );
+    if let BoundaryReason::Terminus {
+        through, ending, ..
+    } = record.reason
+    {
+        assert_eq!(through, 9);
+        assert_eq!(ending, 3);
+    }
+}
+
+/// One late starter is below the support floor, so it is attrition and
+/// the corridor stays whole.
+#[test]
+fn a_lone_start_is_attrition_and_the_corridor_stays_whole() {
+    let tracks = shapes::late_starters(9, 1);
+    let out = detect_sections_explained(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    assert!(
+        !out.boundaries
+            .iter()
+            .any(|r| matches!(r.reason, BoundaryReason::Terminus { .. })),
+        "{:?}",
+        out.boundaries
+    );
+}
+
+/// A majority ending at the join is a traffic cliff, recorded as one and
+/// not as a terminus.
+#[test]
+fn a_cliff_is_recorded_as_a_cliff_not_a_terminus() {
+    let tracks = shapes::cliff_tail(10, 4);
+    let out = detect_sections_explained(
+        &tracks,
+        &[],
+        &shapes::pooled(&tracks),
+        &config(),
+        &Tunables::DEFAULT,
+    );
+    assert!(
+        out.boundaries
+            .iter()
+            .any(|r| matches!(r.reason, BoundaryReason::TrafficCliff { .. }))
+    );
+    assert!(
+        !out.boundaries
+            .iter()
+            .any(|r| matches!(r.reason, BoundaryReason::Terminus { .. }))
     );
 }

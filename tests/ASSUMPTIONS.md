@@ -135,8 +135,8 @@ registry defects before any fix was designed.
 
 1. The section identity blob is written byte-correctly inside the save
    transaction but fails its own postcard decode: `skip_serializing_if`
-   fields inside the serialised graph (`GpsPoint.elevation`,
-   `FrequentSection.consensus_state`) desync postcard's positional
+   fields inside the serialised graph (`GpsPoint.elevation`)
+   desync postcard's positional
    stream, which `codec.rs`'s own doc forbids. `load()` falls back to
    reseed, so every app restart silently drops graves, tombstones, and
    debounce streaks. The pre-existing restart gate

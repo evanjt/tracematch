@@ -60,6 +60,25 @@ fn test_resample_route() {
 }
 
 #[test]
+fn test_resample_route_spaces_evenly_when_count_already_matches_target() {
+    // Vertices cluster at one end, as Douglas-Peucker output does at a bend.
+    let mut points: Vec<GpsPoint> = (0..10)
+        .map(|i| GpsPoint::new(51.0 + i as f64 * 0.00001, -0.1))
+        .collect();
+    points.extend((1..=10).map(|i| GpsPoint::new(51.0 + 0.0001 + i as f64 * 0.0009, -0.1)));
+    let resampled = resample_route(&points, points.len());
+    assert_eq!(resampled.len(), points.len());
+    let gaps: Vec<f64> = resampled
+        .windows(2)
+        .map(|w| tracematch::geo_utils::haversine_distance(&w[0], &w[1]))
+        .collect();
+    let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+    for g in gaps {
+        assert!((g - mean).abs() < mean * 0.01, "gap {g} vs mean {mean}");
+    }
+}
+
+#[test]
 fn test_calculate_route_distance() {
     let points = sample_route();
     let distance = calculate_route_distance(&points);
@@ -278,5 +297,45 @@ fn test_identical_route_near_100_percent() {
     assert!(
         match_pct >= 99.0,
         "Identical routes should be ≥99%, got {match_pct}"
+    );
+}
+
+fn zigzag_route(count: usize) -> Vec<GpsPoint> {
+    (0..count)
+        .map(|i| {
+            let sway = if i % 2 == 0 { 0.0 } else { 0.0005 };
+            GpsPoint::new(51.5 + i as f64 * 0.0003, -0.1278 + sway)
+        })
+        .collect()
+}
+
+#[test]
+fn downsampled_signature_keeps_first_and_last_vertex() {
+    let config = MatchConfig {
+        simplification_tolerance: 0.0,
+        ..MatchConfig::default()
+    };
+    for count in [101usize, 250, 500, 1003] {
+        let route = zigzag_route(count);
+        let sig = RouteSignature::from_points("a", &route, &config).unwrap();
+        assert_eq!(sig.points.len(), config.max_simplified_points as usize);
+        assert_eq!(sig.start_point, route[0], "count {count}");
+        assert_eq!(sig.end_point, route[count - 1], "count {count}");
+    }
+}
+
+#[test]
+fn downsampled_signature_distance_reaches_the_finish() {
+    let config = MatchConfig {
+        simplification_tolerance: 0.0,
+        ..MatchConfig::default()
+    };
+    let route = zigzag_route(500);
+    let sig = RouteSignature::from_points("a", &route, &config).unwrap();
+    let full = calculate_route_distance(&route);
+    assert!(sig.total_distance > full * 0.5);
+    assert!(
+        (sig.end_point.latitude - route[499].latitude).abs() < 1e-12,
+        "end stops short of the finish"
     );
 }

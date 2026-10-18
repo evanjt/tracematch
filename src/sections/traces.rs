@@ -4,9 +4,8 @@
 use rayon::prelude::*;
 
 use super::consensus::TraceKey;
-use super::rtree::{IndexedPoint, build_rtree};
+use super::rtree::{PointIndex, build_rtree};
 use crate::GpsPoint;
-use rstar::{PointDistance, RTree};
 
 /// Distance threshold for considering a point "on" the section (meters)
 const TRACE_PROXIMITY_THRESHOLD: f64 = 50.0;
@@ -21,16 +20,16 @@ const MIN_TRACE_POINTS: usize = 3;
 pub fn extract_activity_passes(
     track: &[GpsPoint],
     section_polyline: &[GpsPoint],
-    polyline_tree: &RTree<IndexedPoint>,
+    polyline_tree: &PointIndex,
 ) -> Vec<Vec<GpsPoint>> {
     if track.len() < MIN_TRACE_POINTS || section_polyline.len() < 2 {
         return Vec::new();
     }
 
-    // Convert threshold from meters to approximate degrees for R-tree comparison
-    // Use a slightly larger threshold to catch GPS variations
-    let threshold_deg = (TRACE_PROXIMITY_THRESHOLD * 1.2) / 111_000.0;
-    let threshold_deg_sq = threshold_deg * threshold_deg;
+    let threshold_m = TRACE_PROXIMITY_THRESHOLD * 1.2;
+    let latitude_pad = threshold_m / 111_000.0;
+    let longitude_pad =
+        threshold_m / (111_000.0 * section_polyline[0].latitude.to_radians().cos().abs()).max(1.0);
 
     // Degree-space bounding box of the polyline, padded by the threshold. The
     // near-predicate below is squared-degree distance, so a track point
@@ -44,10 +43,10 @@ pub fn extract_activity_passes(
         bb.3 = bb.3.max(p.longitude);
     }
     let (lat0, lat1, lng0, lng1) = (
-        bb.0 - threshold_deg,
-        bb.1 + threshold_deg,
-        bb.2 - threshold_deg,
-        bb.3 + threshold_deg,
+        bb.0 - latitude_pad,
+        bb.1 + latitude_pad,
+        bb.2 - longitude_pad,
+        bb.3 + longitude_pad,
     );
 
     // Find ALL contiguous sequences of points near the section
@@ -67,8 +66,8 @@ pub fn extract_activity_passes(
             && point.longitude >= lng0
             && point.longitude <= lng1
             && polyline_tree
-                .nearest_neighbor(&query)
-                .is_some_and(|nearest| nearest.distance_2(&query) <= threshold_deg_sq);
+                .nearest(&query)
+                .is_some_and(|(_, distance)| distance <= threshold_m);
 
         if is_near {
             // Point is near section - reset gap counter
@@ -110,7 +109,7 @@ pub fn extract_activity_passes(
 pub fn extract_activity_trace(
     track: &[GpsPoint],
     section_polyline: &[GpsPoint],
-    polyline_tree: &RTree<IndexedPoint>,
+    polyline_tree: &PointIndex,
 ) -> Vec<GpsPoint> {
     extract_activity_passes(track, section_polyline, polyline_tree)
         .into_iter()
@@ -157,7 +156,7 @@ pub fn extract_all_activity_traces(
 fn passes_for(
     activity_id: &str,
     section_polyline: &[GpsPoint],
-    polyline_tree: &RTree<IndexedPoint>,
+    polyline_tree: &PointIndex,
     track_map: &std::collections::HashMap<&str, &[GpsPoint]>,
 ) -> Vec<(TraceKey, Vec<GpsPoint>)> {
     let Some(track) = track_map.get(activity_id) else {

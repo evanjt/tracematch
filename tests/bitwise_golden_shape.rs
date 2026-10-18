@@ -99,14 +99,20 @@ fn labels_that_line_up_with_a_different_digest_is_still_a_divergence() {
 
 /// A comment line carries the record of who moved the golden and why, and a
 /// cost line is compared against a band rather than for equality. Neither is a
-/// scenario, so neither may enter the label comparison.
+/// scenario, so neither may enter the label comparison. The cost is measured
+/// at its recorded value, so a release build's band comparison passes too.
 #[test]
 fn comments_and_cost_lines_are_not_scenarios() {
     let path = golden(
         "comments",
         "# moved 2026-01-01: a reason\nA 0000000000000001\nperf_cold_ms 100\n",
     );
-    baseline::check(&path, &digests(&["A 0000000000000001"]), &[], &BAND);
+    baseline::check(
+        &path,
+        &digests(&["A 0000000000000001"]),
+        &[("perf_cold_ms", 100)],
+        &BAND,
+    );
 }
 
 /// Scenario: a golden carrying a signed-off rebase is re-derived because the

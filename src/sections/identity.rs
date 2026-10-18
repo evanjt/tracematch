@@ -575,20 +575,16 @@ pub fn plan_identity_memo(
         .collect();
     let p_digest: Vec<u64> = prior.iter().map(|p| line_digest(&p.polyline)).collect();
     let c_digest: Vec<u64> = next.iter().map(|c| line_digest(&c.polyline)).collect();
-    // Only paid for when the size guard is on. It is on by default
-    // (`merge_size_ratio` 0.3) and in the engine, so both vectors are built on
-    // every plan. At 0.0 the tier test below short-circuits before either is read.
+    // Read by the size guard and by the agreement tier's tie-break.
     let guarded = params.merge_size_ratio > 0.0;
-    let p_metres: Vec<f64> = if guarded {
-        prior.iter().map(|p| polyline_metres(&p.polyline)).collect()
-    } else {
-        Vec::new()
-    };
-    let c_metres: Vec<f64> = if guarded {
-        next.iter().map(|c| polyline_metres(&c.polyline)).collect()
-    } else {
-        Vec::new()
-    };
+    let p_metres: Vec<f64> = prior.iter().map(|p| polyline_metres(&p.polyline)).collect();
+    let c_metres: Vec<f64> = next.iter().map(|c| polyline_metres(&c.polyline)).collect();
+    // How far a pair's lengths sit apart. Two lines can cover each other
+    // whole at the ground tolerance and still be different sections (a
+    // short line and a longer one that runs it out and back beside it), so
+    // an agreement tie on overlap goes to the pair whose lengths agree, and
+    // a line paired with itself always wins its own tie.
+    let gap = |i: usize, j: usize| (p_metres[i] - c_metres[j]).abs();
     let mut edge = vec![vec![false; nc]; np];
     let mut mo = vec![vec![0.0_f64; nc]; np];
     let mut contained = vec![vec![false; nc]; np];
@@ -644,11 +640,12 @@ pub fn plan_identity_memo(
 
     // Each candidate nominates a prior in three tiers. First a prior whose
     // extent AGREES with the candidate (mutual overlap at or above
-    // RECUT_AGREEMENT): a 1:1 match, ranked by overlap then seniority. This
-    // tier makes the pairing idempotent, a catalogue paired against itself
-    // is all carries, where containment-plus-seniority let a short senior
-    // prior inside a long candidate's corridor out-nominate the candidate's
-    // own exact match, minting a duplicate on every converged detect. Then
+    // RECUT_AGREEMENT): a 1:1 match, ranked by overlap, then by how closely
+    // the two lengths agree, then seniority. This tier makes the pairing
+    // idempotent, a catalogue paired against itself is all carries, where
+    // containment-plus-seniority let a short senior prior inside a long
+    // candidate's corridor out-nominate the candidate's own exact match,
+    // minting a duplicate on every converged detect. Then
     // the senior among priors CONTAINED in the candidate's corridor (the
     // genuine merge shape, a retiring prior lies inside its successor).
     // Then the senior among all same-corridor priors (the split shape, a
@@ -680,6 +677,8 @@ pub fn plan_identity_memo(
                         std::cmp::Ordering::Equal => {
                             if tier_of(i) == 2 && mo[i][j] != mo[b][j] {
                                 mo[i][j] > mo[b][j]
+                            } else if tier_of(i) == 2 && gap(i, j) != gap(b, j) {
+                                gap(i, j) < gap(b, j)
                             } else if demoted(i, j) && demoted(b, j) && p_metres[i] != p_metres[b] {
                                 p_metres[i] > p_metres[b]
                             } else {
@@ -697,23 +696,28 @@ pub fn plan_identity_memo(
         .collect();
 
     // Each prior nominates the candidate it overlaps most. The winner takes more
-    // mutual overlap, then more metres, then more visits, then a smaller SW
-    // corner, then a smaller index.
+    // mutual overlap, then, among agreeing candidates, the length closer to the
+    // prior's, then more metres, then more visits, then a smaller SW corner,
+    // then a smaller index.
     let prior_pick: Vec<Option<usize>> = (0..np)
         .map(|i| {
             let mut best: Option<usize> = None;
             for j in 0..nc {
-                if edge[i][j]
-                    && (best.is_none()
-                        || better_candidate(
-                            mo[i][j],
-                            &next[j],
-                            mo[i][best.unwrap()],
-                            &next[best.unwrap()],
-                            j,
-                            best.unwrap(),
-                        ))
-                {
+                if !edge[i][j] {
+                    continue;
+                }
+                let wins = match best {
+                    None => true,
+                    Some(b)
+                        if mo[i][j] == mo[i][b]
+                            && mo[i][j] >= RECUT_AGREEMENT
+                            && gap(i, j) != gap(i, b) =>
+                    {
+                        gap(i, j) < gap(i, b)
+                    }
+                    Some(b) => better_candidate(mo[i][j], &next[j], mo[i][b], &next[b], j, b),
+                };
+                if wins {
                     best = Some(j);
                 }
             }
@@ -728,6 +732,40 @@ pub fn plan_identity_memo(
         if let Some(j) = pick
             && cand_pick[j] == Some(i)
         {
+            carrier_of[j] = Some(i);
+        }
+    }
+
+    // Second chance. A prior that lost its nominated candidate to a senior and
+    // a candidate left without a carrier can still agree with each other, one
+    // ground held twice over. Minting that candidate would put a second id on
+    // ground and members the prior already holds, so the pair is confirmed
+    // here. Priors go in seniority order and each takes its best free
+    // candidate, so the pairing does not depend on input order.
+    let mut by_seniority: Vec<usize> = (0..np).collect();
+    by_seniority.sort_by(|&a, &b| {
+        if more_senior(&prior[a], &prior[b]) {
+            std::cmp::Ordering::Less
+        } else if more_senior(&prior[b], &prior[a]) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    for i in by_seniority {
+        if carrier_of.contains(&Some(i)) {
+            continue;
+        }
+        let mut best: Option<usize> = None;
+        for j in 0..nc {
+            if carrier_of[j].is_some() || !edge[i][j] || mo[i][j] < RECUT_AGREEMENT {
+                continue;
+            }
+            if best.is_none_or(|b| better_candidate(mo[i][j], &next[j], mo[i][b], &next[b], j, b)) {
+                best = Some(j);
+            }
+        }
+        if let Some(j) = best {
             carrier_of[j] = Some(i);
         }
     }
@@ -1748,6 +1786,32 @@ mod tests {
     // -- plan_identity ------------------------------------------------------
 
     #[test]
+    fn a_prior_that_lost_its_candidate_takes_the_agreeing_one_left_over() {
+        let ground = line(46.0, 7.0, 100);
+        let priors = vec![
+            prior("s_1", ground.clone(), 1, 9),
+            prior("s_2", ground.clone(), 2, 9),
+        ];
+        let next = vec![cand(ground.clone(), 24), cand(ground, 18)];
+        let plan = plan_identity(&priors, &next);
+        assert!(
+            plan.decisions
+                .iter()
+                .all(|d| !matches!(d, Decision::Mint { .. })),
+            "a candidate over ground a prior still holds minted a twin: {:?}",
+            plan.decisions
+        );
+        let mut carried: Vec<&str> = plan
+            .decisions
+            .iter()
+            .filter_map(|d| d.carried_id())
+            .collect();
+        carried.sort();
+        assert_eq!(carried, vec!["s_1", "s_2"]);
+        assert!(plan.retired.is_empty());
+    }
+
+    #[test]
     fn carry_on_a_stable_catalogue() {
         let p = line(46.0, 7.0, 100);
         let prior = vec![prior("s_1", p.clone(), 1, 5)];
@@ -1964,6 +2028,60 @@ mod tests {
             );
         }
         assert!(plan.retired.is_empty(), "a fixed point retires nothing");
+    }
+
+    #[test]
+    fn self_pairing_holds_when_two_lines_cover_each_other() {
+        // A short senior line and a longer junior one that runs the short
+        // ground out and comes back 23 m beside it: at the ground tolerance
+        // each covers the other whole, so both pairs tie on mutual overlap.
+        // Seniority alone handed both candidates to the short prior, the
+        // long candidate carried its id and the short one minted, on every
+        // detect over an unchanged catalogue.
+        let short = line(46.0, 7.0, 20);
+        let mut long = short.clone();
+        long.extend(
+            short
+                .iter()
+                .rev()
+                .map(|p| GpsPoint::new(p.latitude, p.longitude + 3.0e-4)),
+        );
+        assert_eq!(mutual_overlap(&short, &long), 1.0, "the two lines must tie");
+        let priors = vec![
+            prior("s_short", short.clone(), 1, 9),
+            prior("s_long", long.clone(), 2, 5),
+        ];
+        for next in [
+            vec![cand(short.clone(), 9), cand(long.clone(), 5)],
+            vec![cand(long.clone(), 5), cand(short.clone(), 9)],
+        ] {
+            let plan = plan_identity(&priors, &next);
+            for (j, c) in next.iter().enumerate() {
+                let own = if c.polyline == short {
+                    "s_short"
+                } else {
+                    "s_long"
+                };
+                assert_eq!(
+                    plan.decisions[j].carried_id(),
+                    Some(own),
+                    "candidate {j} must carry its own id"
+                );
+            }
+            assert!(plan.retired.is_empty(), "a fixed point retires nothing");
+        }
+
+        let mut state = HysteresisState::new(HysteresisParams::default());
+        let batch = vec![cand(short, 9), cand(long, 5)];
+        state.step(&batch);
+        for k in 1..4 {
+            let out = state.step(&batch);
+            assert_eq!(
+                (out.visible_count, out.minted),
+                (2, 0),
+                "step {k} over the unchanged catalogue"
+            );
+        }
     }
 
     #[test]

@@ -1,9 +1,13 @@
 //! Bitwise regression harness for the unified fold, shared by the corpus gates.
 //!
-//! Hashes every field of the catalogue after a full cold fold, a progressive
-//! cold-to-warm run, and a bulk backfill, and compares the digests against a
-//! golden file. A code change that alters one bit of any output, or the emitted
-//! order, fails. Run-to-run determinism is asserted in-process, so a
+//! Hashes the catalogue after a full cold fold, a progressive cold-to-warm
+//! run, and a bulk backfill, and compares the digests against a golden file.
+//! Each scenario writes two lines. The bare label (`A`, `B_cold`, `B_add_NN`,
+//! `C`) hashes identity, geometry, portions, traces and scores. The `E_` line
+//! beside it hashes what that one skips: `representative_range`, the section's
+//! elevation gain and net grade, and every enrichment field. `rank` is hashed by
+//! neither, because the fold leaves it `None`. A code change that alters one
+//! bit of either, or the emitted order, fails. Run-to-run determinism is asserted in-process, so a
 //! parallelism regression surfaces without a baseline.
 //!
 //! What each scenario cost is recorded in the same golden and bounded by a
@@ -150,6 +154,48 @@ pub fn catalogue_digest(sections: &[FrequentSection]) -> u64 {
     h.0
 }
 
+/// The fields `catalogue_digest` skips, per section in catalogue order, floats
+/// by bit pattern. `rank` is not fold output, so it stays out.
+pub fn enrichment_digest(sections: &[FrequentSection]) -> u64 {
+    let mut h = Fnv::new();
+    h.u64(sections.len() as u64);
+    let opt = |h: &mut Fnv, v: Option<f64>| match v {
+        Some(x) => {
+            h.u64(1);
+            h.f64(x);
+        }
+        None => h.u64(0),
+    };
+    for s in sections {
+        h.str(&s.id);
+        match s.representative_range {
+            Some((a, b)) => {
+                h.u64(1);
+                h.u64(a as u64);
+                h.u64(b as u64);
+            }
+            None => h.u64(0),
+        }
+        opt(&mut h, s.elevation_gain_m);
+        opt(&mut h, s.avg_grade_percent);
+        let e = &s.enrichment;
+        opt(&mut h, e.elevation_gain_m);
+        opt(&mut h, e.elevation_loss_m);
+        opt(&mut h, e.avg_grade_percent);
+        opt(&mut h, e.max_grade_percent);
+        opt(&mut h, e.straightness);
+        match e.klass {
+            Some(k) => {
+                h.u64(1);
+                h.str(k.as_str());
+            }
+            None => h.u64(0),
+        }
+        h.u64(e.is_lift as u64);
+    }
+    h.0
+}
+
 /// The corpus seconds as the detector takes them: one slice per pool entry, in
 /// pool order, empty where a track has no stream. Built by id rather than by
 /// index because the scenarios fold prefixes of the corpus, not all of it.
@@ -245,6 +291,7 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
     );
     let cold_ms = t.elapsed().as_millis() as u64;
     let cold_digest = catalogue_digest(&cold);
+    let cold_enrich = enrichment_digest(&cold);
     let cold_len = cold.len();
     drop(cold);
     let again = fold(
@@ -261,9 +308,15 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         "two identical cold folds diverged within one process: \
          nondeterminism, look at parallel or iteration order first"
     );
+    assert_eq!(
+        cold_enrich,
+        enrichment_digest(&again),
+        "two identical cold folds diverged in enrichment within one process"
+    );
     drop(again);
     println!("A cold {n} activities: {cold_len} sections, {cold_ms} ms");
     lines.push(format!("A {cold_digest:016x}"));
+    lines.push(format!("E_A {cold_enrich:016x}"));
 
     // B: progressive cold-to-warm. Cold over the head, then the tail one at
     // a time, digest after every add.
@@ -275,6 +328,7 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         .collect();
     let mut catalogue = fold(&mut cache, &[], &c.tracks[..split], &head_ids, c, &config);
     lines.push(format!("B_cold {:016x}", catalogue_digest(&catalogue)));
+    lines.push(format!("E_B_cold {:016x}", enrichment_digest(&catalogue)));
     let mut add_ms: Vec<u64> = Vec::new();
     for i in 0..shape.warm_adds {
         let pool = &c.tracks[..split + i + 1];
@@ -287,6 +341,11 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
             "B_add_{:02} {:016x}",
             i + 1,
             catalogue_digest(&catalogue)
+        ));
+        lines.push(format!(
+            "E_B_add_{:02} {:016x}",
+            i + 1,
+            enrichment_digest(&catalogue)
         ));
     }
     let (add_median_ms, add_p95_ms) = median_and_p95(&add_ms);
@@ -321,6 +380,7 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         bulk.len()
     );
     lines.push(format!("C {:016x}", catalogue_digest(&bulk)));
+    lines.push(format!("E_C {:016x}", enrichment_digest(&bulk)));
 
     let measured = [
         ("perf_cold_ms", cold_ms),

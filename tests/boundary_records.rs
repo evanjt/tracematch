@@ -413,15 +413,15 @@ fn a_distinct_populations_parallel_path_stands() {
 
 #[test]
 fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
-    // One rider covers the whole 2400 m corridor, three locals cover a
-    // third each. The candidate qualifies on four contributors and the
-    // render is the through pass, but no local covers half of it, so
-    // the drawn population is that rider alone.
-    let tracks = shapes::split_population_corridor(1);
+    // Eight outings ride 1000 m windows 450 m apart along one corridor.
+    // Two of them share 550 m, under the 800 m two riders need, and no
+    // three share more than 100 m, so no stretch of any pass is run end
+    // to end by the floor its length needs.
+    let tracks = shapes::short_hop_corridor(8);
     let out = detect(&tracks);
     assert!(
         out.sections.is_empty(),
-        "a one-rider line must not stand: {:?}",
+        "a line under its floor must not stand: {:?}",
         out.sections
             .iter()
             .map(|s| (&s.id, s.activity_ids.len()))
@@ -436,30 +436,26 @@ fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
     let BoundaryReason::DrawnPopulation { kept, floor } = rec.reason else {
         unreachable!()
     };
-    assert_eq!(kept, 1, "the through rider is the whole drawn population");
     assert_eq!(
-        floor,
-        SectionConfig::default().min_activities,
-        "the record must name the floor it was measured against"
+        kept, 2,
+        "two neighbours are the most that run any stretch whole"
     );
-    let mid = shapes::to_gps(1200.0, 0.0);
+    assert_eq!(
+        floor, 3,
+        "the record must name the floor the stretch two riders share was measured against"
+    );
     let at = GpsPoint::new(rec.latitude, rec.longitude);
+    let axis = shapes::track(&shapes::densify(&[(0.0, 0.0), (4150.0, 0.0)]));
     assert!(
-        haversine_distance(&at, &mid) < 200.0,
+        min_dist(&at, &axis) < 50.0,
         "the record must sit on the dropped corridor"
     );
 }
 
-/// Scenario: the candidate qualifies on four contributors across four
-/// days, and the drawn line admits the two through riders, who rode on
-/// the same day. Two activities meet the activity count but they are one
-/// visit to the ground.
-///
-/// Expected behaviour: the drawn population is held to the day floor the
-/// section had to clear to exist, so the section is dropped and the
-/// record counts days.
+/// A corridor's same-day through riders can stand only on a trimmed stretch
+/// that another day's local rider also covers.
 #[test]
-fn a_drawn_population_on_one_day_is_recorded_and_dropped() {
+fn test_drawn_population_single_day_pair_uses_supported_stretch() {
     let tracks = shapes::split_population_corridor(2);
     let out = detect_dated(
         &tracks,
@@ -471,24 +467,32 @@ fn a_drawn_population_on_one_day_is_recorded_and_dropped() {
             ("local_2", 130),
         ],
     );
+    assert_eq!(out.sections.len(), 1);
+    let section = &out.sections[0];
     assert!(
-        out.sections.is_empty(),
-        "two rides on one day must not stand: {:?}",
-        out.sections
-            .iter()
-            .map(|s| (&s.id, s.activity_ids.len()))
-            .collect::<Vec<_>>()
+        section.distance_meters < 1_200.0,
+        "the unsupported ends must be trimmed"
     );
-    let rec = out
-        .boundaries
+    let days: std::collections::HashSet<i64> = section
+        .activity_ids
         .iter()
-        .find(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. }))
-        .unwrap_or_else(|| panic!("no drawn-population record: {:?}", out.boundaries));
-    let BoundaryReason::DrawnPopulation { kept, floor } = rec.reason else {
-        unreachable!()
-    };
-    assert_eq!(kept, 1, "the through riders are one day");
-    assert_eq!(floor, 2, "the record names the floor in days");
+        .map(|id| match id.as_str() {
+            "through_0" | "through_1" => 100,
+            "local_0" => 110,
+            "local_1" => 120,
+            "local_2" => 130,
+            _ => panic!("unexpected activity {id}"),
+        })
+        .collect();
+    assert!(
+        days.len() >= 2,
+        "same-day riders alone cannot support the line"
+    );
+    assert!(
+        out.boundaries
+            .iter()
+            .any(|record| matches!(record.reason, BoundaryReason::Trim { .. }))
+    );
 }
 
 /// The same corridor with the two through riders a fortnight apart

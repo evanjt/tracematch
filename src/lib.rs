@@ -47,7 +47,7 @@ pub use union_find::UnionFind;
 
 // Route matching algorithms (AMD-based comparison)
 pub mod matching;
-pub use matching::compare_routes;
+pub use matching::{PARTIAL_MATCH_PERCENTAGE, compare_routes};
 
 // Route grouping algorithms
 pub mod grouping;
@@ -322,9 +322,12 @@ impl RouteSignature {
         // Limit to max points if needed (uniform sampling)
         let final_coords: Vec<Coord> = if simplified.0.len() > config.max_simplified_points as usize
         {
-            let step = simplified.0.len() as f64 / config.max_simplified_points as f64;
-            (0..config.max_simplified_points)
-                .map(|i| simplified.0[(i as f64 * step) as usize])
+            // Spread over the closed range so the first and last vertices are kept.
+            let last = simplified.0.len() - 1;
+            let slots = config.max_simplified_points as usize;
+            let step = last as f64 / (slots - 1).max(1) as f64;
+            (0..slots)
+                .map(|i| simplified.0[((i as f64 * step).round() as usize).min(last)])
                 .collect()
         } else {
             simplified.0.clone()
