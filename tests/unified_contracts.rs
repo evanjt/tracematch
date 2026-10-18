@@ -1322,6 +1322,142 @@ fn a_fork_names_the_activities_its_branch_collected() {
     );
 }
 
+/// The cuts at `at`, each with the catalogue sections it names. Panics on a
+/// record naming an id the catalogue does not hold, and on a record for a
+/// candidate that was never emitted naming any id at all.
+fn cuts_at<'a>(
+    sections: &'a [FrequentSection],
+    records: &'a [tracematch::BoundaryRecord],
+    at: &GpsPoint,
+) -> Vec<Vec<&'a FrequentSection>> {
+    for r in records {
+        for id in &r.section_ids {
+            assert!(
+                sections.iter().any(|s| &s.id == id),
+                "{:?} names {id}, which the catalogue does not hold",
+                r.reason
+            );
+        }
+        let dropped = matches!(
+            r.reason,
+            BoundaryReason::Backoff { .. }
+                | BoundaryReason::NoSinglePass { .. }
+                | BoundaryReason::DrawnPopulation { .. }
+                | BoundaryReason::DrawnEmpty { .. }
+        );
+        assert!(
+            !dropped || r.section_ids.is_empty(),
+            "a candidate that was not emitted has no section to name: {r:?}"
+        );
+    }
+    records
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.reason,
+                BoundaryReason::Fork { .. }
+                    | BoundaryReason::UsageChange { .. }
+                    | BoundaryReason::TrafficCliff { .. }
+                    | BoundaryReason::Terminus { .. }
+            ) && haversine_distance(&GpsPoint::new(r.latitude, r.longitude), at) < 250.0
+        })
+        .map(|r| {
+            r.section_ids
+                .iter()
+                .map(|id| {
+                    sections
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .expect("checked above")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Scenario: a Y junction cuts a trunk and two branches. In the fold a
+/// corridor south-west of it was cut first, so the Y's sections are
+/// numbered after the corridor's while the Y's cluster is the one cut.
+/// Expected behaviour: every cut at the junction names, by id, the
+/// sections on its two sides, each of which ends at the junction, and
+/// between them the cuts name all three; the fold's records name the
+/// same ground the batch's do.
+#[test]
+fn a_cut_names_the_sections_on_its_two_sides() {
+    use tracematch::detect_sections_incremental_cached_with_policy;
+    let fork = shapes::fork_y(8);
+    let junction = shapes::to_gps(0.0, 1000.0);
+    let ends_at_junction = |s: &FrequentSection| {
+        let first = s.polyline.first().expect("a line");
+        let last = s.polyline.last().expect("a line");
+        haversine_distance(first, &junction).min(haversine_distance(last, &junction)) < 250.0
+    };
+    let check =
+        |sections: &[FrequentSection], records: &[tracematch::BoundaryRecord], label: &str| {
+            let cuts = cuts_at(sections, records, &junction);
+            assert!(!cuts.is_empty(), "{label}: no cut at the junction");
+            let mut named = std::collections::BTreeSet::new();
+            for sides in &cuts {
+                assert_eq!(
+                    sides.len(),
+                    2,
+                    "{label}: a cut between two surviving sections names both, got {:?}",
+                    sides.iter().map(|s| &s.id).collect::<Vec<_>>()
+                );
+                for s in sides {
+                    assert!(
+                        ends_at_junction(s),
+                        "{label}: {} is named by a junction cut but does not end there",
+                        s.id
+                    );
+                    named.insert(s.id.clone());
+                }
+            }
+            let at_junction: std::collections::BTreeSet<String> = sections
+                .iter()
+                .filter(|s| ends_at_junction(s))
+                .map(|s| s.id.clone())
+                .collect();
+            assert_eq!(at_junction.len(), 3, "{label}: trunk and two branches");
+            assert_eq!(named, at_junction, "{label}: the cuts name all three");
+        };
+
+    let pooled = shapes::pooled(&fork);
+    let batch = detect_sections_explained(&fork, &[], &pooled, &config(), &Tunables::DEFAULT);
+    check(&batch.sections, &batch.boundaries, "batch");
+
+    let corridor = shapes::translate_deg(shapes::plain_corridor(6), -0.5, -0.5);
+    let mut pool = corridor.clone();
+    pool.extend(fork.iter().cloned());
+    let pooled = shapes::pooled(&pool);
+    let policy = SectionUpdatePolicy::default();
+    let mut cache = SectionEvidenceCache::default();
+    let corridor_ids: Vec<&str> = corridor.iter().map(|(id, _)| id.as_str()).collect();
+    let first = detect_sections_incremental_cached_with_policy(
+        &mut cache,
+        &[],
+        &pool[..corridor.len()],
+        &corridor_ids,
+        &[],
+        &pooled,
+        &config(),
+        &policy,
+    );
+    assert!(!first.catalogue.is_empty(), "the corridor is a section");
+    let fork_ids: Vec<&str> = fork.iter().map(|(id, _)| id.as_str()).collect();
+    let fold = detect_sections_incremental_cached_with_policy(
+        &mut cache,
+        &first.catalogue,
+        &pool,
+        &fork_ids,
+        &[],
+        &pooled,
+        &config(),
+        &policy,
+    );
+    check(&fold.catalogue, &fold.boundaries, "fold");
+}
+
 /// Catalogue rows with the positional section ids stripped: cluster
 /// ordering renumbers ids when far ground joins the corpus, and ids
 /// were never content-stable; everything else must hold exactly.

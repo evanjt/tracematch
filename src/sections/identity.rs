@@ -1034,6 +1034,27 @@ pub struct CandidateResolution {
     pub split_from: Option<String>,
 }
 
+/// A change one step proposes for a held id, which the debounce counts before
+/// it applies. The caller credits each with how many confirmations its step
+/// stands for, see [`HysteresisState::step_assign_credited`].
+#[derive(Clone, Copy, Debug)]
+pub enum PendingChange<'a> {
+    /// A material re-cut onto the candidate at this index of the step's batch.
+    Recut(usize),
+    /// A retirement for this reason. `survivor` is the index of the candidate
+    /// carrying the senior id of a merge, `None` for a dissolve.
+    Retire {
+        reason: &'a RetireReason,
+        survivor: Option<usize>,
+    },
+}
+
+/// The streak a step adds for a credit: at least the step itself, and no more
+/// than a streak can hold.
+fn confirmations(credit: u32) -> u8 {
+    u8::try_from(credit.max(1)).unwrap_or(u8::MAX)
+}
+
 /// The assign-once identity registry plus its hysteresis debounce. Holds the
 /// visible catalogue (stable id -> held ground), the tombstones a dissolved
 /// ground can re-emerge under, and the per-id debounce counters. In-memory for
@@ -1147,7 +1168,23 @@ impl HysteresisState {
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
-        self.fold(next, loses, true)
+        self.fold(next, loses, &|_, _| 1, true)
+    }
+
+    /// [`step_assign_guarded`](Self::step_assign_guarded) for a step that
+    /// stands for several arrivals folded at once. `credit(id, change)` is how
+    /// many confirmations the step gives the change it proposes for held id
+    /// `id`: the arrivals one at a time would each have been a step, and the
+    /// caller knows which of them the change was there for. A credit of one is
+    /// a plain step, and a credit of zero counts as one, since the step itself
+    /// proposed the change.
+    pub fn step_assign_credited(
+        &mut self,
+        next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
+        credit: &dyn Fn(&str, PendingChange<'_>) -> u32,
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.fold(next, loses, credit, true)
     }
 
     /// [`step_assign_guarded`](Self::step_assign_guarded) for a step with no
@@ -1160,13 +1197,14 @@ impl HysteresisState {
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
-        self.fold(next, loses, false)
+        self.fold(next, loses, &|_, _| 1, false)
     }
 
     fn fold(
         &mut self,
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
+        credit: &dyn Fn(&str, PendingChange<'_>) -> u32,
         arrival: bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
         // Before the mint pass reads them.
@@ -1312,9 +1350,22 @@ impl HysteresisState {
         for (id, held) in old_visible {
             let carried_j = carried.get(id.as_str()).copied();
             let action = if let Some(j) = carried_j {
-                self.apply_carry(&id, &held, &next[j], k, &mut out, || loses_once(&id, j))
+                self.apply_carry(
+                    &id,
+                    &held,
+                    &next[j],
+                    k,
+                    &mut out,
+                    || loses_once(&id, j),
+                    || credit(&id, PendingChange::Recut(j)),
+                )
             } else if let Some(reason) = retired.get(id.as_str()) {
-                self.apply_retire(&id, &held, reason, k, &mut out)
+                let survivor = match reason {
+                    RetireReason::MergedInto { id } => carried.get(id.as_str()).copied(),
+                    RetireReason::Dissolved => None,
+                };
+                let credit = credit(&id, PendingChange::Retire { reason, survivor });
+                self.apply_retire(&id, &held, reason, k, credit, &mut out)
             } else {
                 // Unreachable in a correct plan; hold defensively rather than
                 // silently drop a section.
@@ -1480,6 +1531,7 @@ impl HysteresisState {
     /// "agreeing" adopt can shed a sixth of a section's history on one add.
     /// A pass count is evidence attributed to the drawn line; a line that
     /// loses evidence is a different cut, whatever the overlap says.
+    #[allow(clippy::too_many_arguments)]
     fn apply_carry(
         &self,
         id: &str,
@@ -1488,6 +1540,7 @@ impl HysteresisState {
         k: u8,
         out: &mut StepOutcome,
         loses: impl FnOnce() -> bool,
+        credit: impl FnOnce() -> u32,
     ) -> HeldAction {
         let visits = cand.visit_count.max(held.visit_count);
         if self.adopts_outright(held, cand, loses) {
@@ -1504,7 +1557,9 @@ impl HysteresisState {
         // dissolve streak rides along untouched, so a marginal capture cannot
         // erase the absence evidence a rotation accumulated.
         let ledger = self.pending.get(id);
-        let streak = ledger.map_or(0, |p| p.recut_streak).saturating_add(1);
+        let streak = ledger
+            .map_or(0, |p| p.recut_streak)
+            .saturating_add(confirmations(credit()));
         if streak >= k {
             out.recut_applied += 1;
             out.recut_ids.push(id.to_string());
@@ -1558,10 +1613,13 @@ impl HysteresisState {
         held: &HeldSection,
         reason: &RetireReason,
         k: u8,
+        credit: u32,
         out: &mut StepOutcome,
     ) -> HeldAction {
         let ledger = self.pending.get(id);
-        let streak = ledger.map_or(0, |p| p.dissolve_streak).saturating_add(1);
+        let streak = ledger
+            .map_or(0, |p| p.dissolve_streak)
+            .saturating_add(confirmations(credit));
         if streak >= k {
             out.dissolved += 1;
             out.retired.push(Retirement {
@@ -2996,6 +3054,60 @@ mod tests {
         assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
         assert_eq!(out.recut_applied, 0);
         assert!(state.pending_ids().is_empty());
+    }
+
+    /// A step credited with several confirmations counts them all toward the
+    /// change it proposes, so a re-cut credited `k` fires on that step and one
+    /// credited `k - 1` fires on the next plain step. A dissolve counts the
+    /// same way, and a credit of zero still counts the step itself.
+    #[test]
+    fn a_credited_step_counts_its_confirmations() {
+        let none = |_: &str, _: usize| false;
+        let p = line(46.0, 7.0, 100);
+        let half: Vec<GpsPoint> = p[..50].to_vec();
+        let elsewhere = line(46.1, 7.0, 100);
+
+        let mut at_once = HysteresisState::default();
+        let (_, r) = at_once.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let full = |_: &str, change: PendingChange<'_>| {
+            assert!(matches!(change, PendingChange::Recut(0)));
+            u32::from(DEFAULT_K)
+        };
+        let (out, _) = at_once.step_assign_credited(&[cand(half.clone(), 20)], &none, &full);
+        assert_eq!(out.recut_ids, vec![id.clone()]);
+        assert_eq!(at_once.ground_of(&id), Some(half.as_slice()));
+
+        let mut short = HysteresisState::default();
+        short.step_assign(&[cand(p.clone(), 20)]);
+        let (out, _) = short.step_assign_credited(&[cand(half.clone(), 20)], &none, &|_, _| {
+            u32::from(DEFAULT_K - 1)
+        });
+        assert_eq!(out.recut_applied, 0);
+        assert_eq!(short.pending_ids(), vec![id.clone()]);
+        let (out, _) = short.step_assign(&[cand(half.clone(), 20)]);
+        assert_eq!(out.recut_ids, vec![id.clone()]);
+
+        let mut gone = HysteresisState::default();
+        gone.step_assign(&[cand(p.clone(), 20)]);
+        let dissolve = |_: &str, change: PendingChange<'_>| {
+            assert!(matches!(
+                change,
+                PendingChange::Retire {
+                    reason: RetireReason::Dissolved,
+                    survivor: None
+                }
+            ));
+            0
+        };
+        for step in 1..DEFAULT_K {
+            let (out, _) =
+                gone.step_assign_credited(&[cand(elsewhere.clone(), 20)], &none, &dissolve);
+            assert_eq!(out.dissolved, 0, "step {step} counts once");
+        }
+        let (out, _) = gone.step_assign_credited(&[cand(elsewhere.clone(), 20)], &none, &dissolve);
+        assert_eq!(out.dissolved, 1);
+        assert!(gone.is_tombstoned(&id));
     }
 
     /// The pure layer counts passes, the caller holds members. A caller that

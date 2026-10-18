@@ -624,9 +624,9 @@
       case 'drawn_population':
         return `${reason.kept} on the drawn line, below a floor of ${reason.floor}`;
       case 'seam_clip':
-        return `${reason.section_id} clipped ${Math.round(reason.clipped_metres)} m, kept ${Math.round(reason.kept_metres)} m`;
+        return `clipped ${Math.round(reason.clipped_metres)} m, kept ${Math.round(reason.kept_metres)} m`;
       case 'drawn_empty':
-        return `${reason.section_id}: none of ${reason.contributors} contributors traverse the drawn line`;
+        return `none of ${reason.contributors} contributors traverse the drawn line`;
     }
   }
 
@@ -647,7 +647,9 @@
         fillOpacity: 0.95,
       })
         .bindPopup(
-          `<b>${style.label}</b><br><span style="font-size:11px">${boundaryDetail(b.reason)}</span>`
+          `<b>${style.label}</b><br><span style="font-size:11px">${boundaryDetail(b.reason)}` +
+            (b.section_ids.length ? `<br>${b.section_ids.join(', ')}` : '') +
+            `</span>`
         )
         .addTo(boundaryLayerGroup!);
     }

@@ -536,11 +536,7 @@ fn a_drawn_line_no_one_passes_is_recorded_and_dropped() {
         .iter()
         .find(|r| matches!(r.reason, BoundaryReason::DrawnEmpty { .. }))
         .unwrap_or_else(|| panic!("no drawn-empty record: {:?}", out.boundaries));
-    let BoundaryReason::DrawnEmpty {
-        section_id,
-        contributors,
-    } = &rec.reason
-    else {
+    let BoundaryReason::DrawnEmpty { contributors } = &rec.reason else {
         unreachable!()
     };
     assert!(
@@ -548,8 +544,9 @@ fn a_drawn_line_no_one_passes_is_recorded_and_dropped() {
         "the record must name the cluster the redraw emptied, not an already-thin one"
     );
     assert!(
-        !out.sections.iter().any(|s| &s.id == section_id),
-        "the emptied candidate must not reach the catalogue"
+        rec.section_ids.is_empty(),
+        "the emptied candidate never reaches the catalogue, so the record names no section: {:?}",
+        rec.section_ids
     );
     assert!(
         out.sections.iter().all(|s| !s.activity_portions.is_empty()),

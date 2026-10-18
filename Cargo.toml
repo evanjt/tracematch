@@ -75,6 +75,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 iai-callgrind = "0.14"
 rand = "0.8"
 proptest = "1"
+# The engine persists the evidence cache in named msgpack; the test that pins
+# what a persist carries encodes it the same way.
+rmp-serde = "1.1"
 
 [[bench]]
 name = "route_matching"
@@ -120,6 +123,10 @@ required-features = ["synthetic"]
 
 [[test]]
 name = "identity_measure"
+required-features = ["synthetic"]
+
+[[test]]
+name = "evidence_cache_memos"
 required-features = ["synthetic"]
 
 [[example]]

@@ -220,6 +220,12 @@ macro_rules! phase {
 /// (track index, start point, end point, metres).
 type Portion = (usize, usize, usize, f64);
 
+/// A candidate waiting for selection: its supernode index (`usize::MAX`
+/// for salvaged ground), the supernode, its portions, its score, and the
+/// indices of the boundary records that shaped it, which name the section
+/// it becomes if it is emitted.
+type Queued = (usize, Supernode, Vec<Portion>, f64, Vec<usize>);
+
 /// Pass class: how many times one track passes through one cell.
 /// Saturates at 3, an oval lapped 4 or 12 times reads the same.
 /// Derived: three passes already separate a repeated loop from a single
@@ -234,6 +240,14 @@ const PASS_CLASS_MAX: u8 = 3;
 pub struct BoundaryRecord {
     pub latitude: f64,
     pub longitude: f64,
+    /// The catalogue ids of the sections this record is about, sorted.
+    /// A cut names the sections on its two sides that survived; a record
+    /// that shaped one section (a trim, a support cut it stands beside, a
+    /// pass end, a seam clip) names that section; a candidate that was
+    /// not emitted names none, since it has no section. The coordinate
+    /// says where the decision was taken, and is no key: it is measured
+    /// on the evidence grid before the drawn line's ends move.
+    pub section_ids: Vec<String>,
     pub reason: BoundaryReason,
 }
 
@@ -321,19 +335,14 @@ pub enum BoundaryReason {
     /// the record of how far the line the user sees differs from the
     /// line the population was measured on.
     SeamClip {
-        section_id: String,
         clipped_metres: f64,
         kept_metres: f64,
     },
     /// The redraw onto one real pass found no contributor whose pass
-    /// covers the drawn line, so the section was emitted on the
-    /// population the cluster gave it rather than the line's own. The
-    /// contributors are real; what is missing is a traversal of the
-    /// line the section shows.
-    DrawnEmpty {
-        section_id: String,
-        contributors: u32,
-    },
+    /// covers the drawn line, so the candidate was dropped and its cells
+    /// went back to the orphan pool. The contributors are real; what is
+    /// missing is a traversal of the line the section would have shown.
+    DrawnEmpty { contributors: u32 },
 }
 
 /// A detection outcome that carries its explanations.
@@ -1008,7 +1017,7 @@ pub fn confirmed_lift_spans_tuned(
         .enumerate()
         .map(|(i, (_, pts))| lift_spans_tuned(pts, seconds.get(i).copied(), tun))
         .collect();
-    rescue_confirmed(candidates, tracks, tun, None)
+    rescue_confirmed(candidates, tracks, tun, &mut LeafMemos::default())
 }
 
 /// The cross-track half of [`confirmed_lift_spans_tuned`]: drop any candidate
@@ -1019,7 +1028,7 @@ fn rescue_confirmed(
     candidates: Vec<Vec<(usize, usize)>>,
     tracks: &[(&str, &[GpsPoint])],
     tun: &Tunables,
-    bounds: Option<&mut BoundsMemo>,
+    leaves: &mut LeafMemos,
 ) -> Vec<Vec<(usize, usize)>> {
     // Before the boxes, not after: on a library with no elevation anywhere no
     // track carries a candidate, and the pass owes nothing at all.
@@ -1032,22 +1041,22 @@ fn rescue_confirmed(
     // when a track's GPS changes. Without the memo a warm add that touches one
     // cluster re-walks every point of every track in it, which is the half of
     // the veto that stayed invisible while the corpus was flat.
-    let bboxes: Vec<(f64, f64, f64, f64)> = match bounds {
-        Some(memo) => tracks
-            .iter()
-            .map(|(id, pts)| {
-                *memo
-                    .entry((*id).to_string())
-                    .or_insert_with(|| super::portions::track_bounds(pts))
-            })
-            .collect(),
-        None => tracks
-            .iter()
-            .map(|(_, pts)| super::portions::track_bounds(pts))
-            .collect(),
-    };
-    let pad_lat = tun.descent_match_m / 111_000.0 * 2.0;
+    let bboxes: Vec<Bbox> = tracks
+        .iter()
+        .map(|(id, pts)| {
+            *leaves
+                .track_bounds
+                .entry((*id).to_string())
+                .or_insert_with(|| super::portions::track_bounds(pts))
+        })
+        .collect();
+    let nums: Vec<u32> = tracks.iter().map(|(id, _)| track_num(leaves, id)).collect();
+    let present: HashSet<u32> = nums.iter().copied().collect();
 
+    // A span's verdict is `any` over a pure pairwise test, so a rebuild owes
+    // the matcher only the members the span has not met: a rescuer still in
+    // the membership settles it, and a member already tested and found not
+    // to descend it stays that way.
     candidates
         .iter()
         .enumerate()
@@ -1057,63 +1066,106 @@ fn rescue_confirmed(
                 .iter()
                 .copied()
                 .filter(|&(s, e)| {
-                    let line = &pts[s..=e];
-                    let rise = match (
-                        line.last().and_then(|p| p.elevation),
-                        line.first().and_then(|p| p.elevation),
-                    ) {
-                        (Some(top), Some(bot)) => top - bot,
-                        _ => return true,
+                    let Some(line) = LiftLine::new(&pts[s..=e], tun) else {
+                        return true;
                     };
-                    let (mut lat0, mut lat1, mut lng0, mut lng1) =
-                        (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-                    for p in line {
-                        lat0 = lat0.min(p.latitude);
-                        lat1 = lat1.max(p.latitude);
-                        lng0 = lng0.min(p.longitude);
-                        lng1 = lng1.max(p.longitude);
+                    let verdict = leaves.rescues.entry((nums[ti], s, e)).or_default();
+                    if verdict.rescuer.is_some_and(|r| present.contains(&r)) {
+                        return false;
                     }
-                    let pad_lng = pad_lat / line[0].latitude.to_radians().cos().abs().max(0.01);
-                    let descended_straight = tracks.iter().enumerate().any(|(oi, (_, op))| {
-                        let bb = &bboxes[oi];
-                        if bb.0 > lat1 + pad_lat
-                            || bb.1 < lat0 - pad_lat
-                            || bb.2 > lng1 + pad_lng
-                            || bb.3 < lng0 - pad_lng
+                    verdict.rescuer = None;
+                    for (oi, (_, op)) in tracks.iter().enumerate() {
+                        let other = nums[oi];
+                        if !line.reaches(&bboxes[oi])
+                            || verdict.cleared.binary_search(&other).is_ok()
                         {
+                            continue;
+                        }
+                        #[cfg(feature = "synthetic")]
+                        {
+                            leaves.rescue_matches += 1;
+                        }
+                        if line.descended_by(op, tun) {
+                            verdict.rescuer = Some(other);
                             return false;
                         }
-                        super::find_all_track_portions(op, line, tun.descent_match_m)
-                            .into_iter()
-                            .any(|(ps, pe, _)| {
-                                let pe = pe.min(op.len() - 1);
-                                if pe <= ps + 2 {
-                                    return false;
-                                }
-                                let (Some(a), Some(b)) = (op[ps].elevation, op[pe].elevation)
-                                else {
-                                    return false;
-                                };
-                                if b - a > -rise * 0.5 {
-                                    return false;
-                                }
-                                let seg = &op[ps..=pe];
-                                let arc: f64 = seg
-                                    .windows(2)
-                                    .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
-                                    .sum();
-                                let chord = crate::geo_utils::haversine_distance(
-                                    &seg[0],
-                                    &seg[seg.len() - 1],
-                                );
-                                arc > 1.0 && chord / arc >= tun.lift_min_straight
-                            })
-                    });
-                    !descended_straight
+                        let at = verdict.cleared.binary_search(&other).unwrap_err();
+                        verdict.cleared.insert(at, other);
+                    }
+                    true
                 })
                 .collect()
         })
         .collect()
+}
+
+/// One lift candidate span, as the rescue reads it: its points, its rise, and
+/// the box a descender has to come within.
+struct LiftLine<'a> {
+    line: &'a [GpsPoint],
+    rise: f64,
+    lat: (f64, f64),
+    lng: (f64, f64),
+    pad_lat: f64,
+    pad_lng: f64,
+}
+
+impl<'a> LiftLine<'a> {
+    /// `None` where either end has no elevation, which leaves the span carried.
+    fn new(line: &'a [GpsPoint], tun: &Tunables) -> Option<Self> {
+        let top = line.last()?.elevation?;
+        let bot = line.first()?.elevation?;
+        let (mut lat0, mut lat1, mut lng0, mut lng1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for p in line {
+            lat0 = lat0.min(p.latitude);
+            lat1 = lat1.max(p.latitude);
+            lng0 = lng0.min(p.longitude);
+            lng1 = lng1.max(p.longitude);
+        }
+        let pad_lat = tun.descent_match_m / 111_000.0 * 2.0;
+        let pad_lng = pad_lat / line[0].latitude.to_radians().cos().abs().max(0.01);
+        Some(Self {
+            line,
+            rise: top - bot,
+            lat: (lat0, lat1),
+            lng: (lng0, lng1),
+            pad_lat,
+            pad_lng,
+        })
+    }
+
+    /// Whether a track with this box comes within the pad of the line.
+    fn reaches(&self, bb: &Bbox) -> bool {
+        !(bb.0 > self.lat.1 + self.pad_lat
+            || bb.1 < self.lat.0 - self.pad_lat
+            || bb.2 > self.lng.1 + self.pad_lng
+            || bb.3 < self.lng.0 - self.pad_lng)
+    }
+
+    /// Whether `op` comes down most of the line's rise along it, near-straight.
+    fn descended_by(&self, op: &[GpsPoint], tun: &Tunables) -> bool {
+        super::find_all_track_portions(op, self.line, tun.descent_match_m)
+            .into_iter()
+            .any(|(ps, pe, _)| {
+                let pe = pe.min(op.len() - 1);
+                if pe <= ps + 2 {
+                    return false;
+                }
+                let (Some(a), Some(b)) = (op[ps].elevation, op[pe].elevation) else {
+                    return false;
+                };
+                if b - a > -self.rise * 0.5 {
+                    return false;
+                }
+                let seg = &op[ps..=pe];
+                let arc: f64 = seg
+                    .windows(2)
+                    .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
+                    .sum();
+                let chord = crate::geo_utils::haversine_distance(&seg[0], &seg[seg.len() - 1]);
+                arc > 1.0 && chord / arc >= tun.lift_min_straight
+            })
+    }
 }
 
 /// How far, in cells, a covering trace may sit from the cut it replaces.
@@ -1230,7 +1282,7 @@ fn build_coverage_grid_from(
             }
         })
         .collect();
-    let lift = rescue_confirmed(candidates, tracks, tun, Some(&mut leaves.track_bounds));
+    let lift = rescue_confirmed(candidates, tracks, tun, leaves);
     let keep: Vec<Vec<(usize, usize)>> = tracks
         .iter()
         .enumerate()
@@ -1903,6 +1955,10 @@ fn terminus_at_join(
 /// the keep tests read-only on the final components and record the
 /// mechanism and the numbers for each. Decisions are made in
 /// [`merge_non_fork_boundaries`]; this pass only reports them.
+///
+/// Returns each record's index in `records` with the cells on both sides
+/// of its join, so the caller can name the sections those cells end up in
+/// once selection has emitted them.
 fn explain_boundaries(
     supernodes: &[Supernode],
     tracks: &[(&str, &[GpsPoint])],
@@ -1911,88 +1967,109 @@ fn explain_boundaries(
     min_activities: u32,
     section_worthy: &[bool],
     records: &mut Vec<BoundaryRecord>,
-) {
+) -> Vec<(usize, Vec<Cell>)> {
     let owner = cell_owners(supernodes);
     let boundary = pair_boundaries(supernodes, &owner);
     let mut joins: Vec<(usize, usize)> = boundary.keys().copied().collect();
     joins.sort_unstable();
+    let mut sides = Vec::new();
     for (a, b) in joins {
         let pairs = &boundary[&(a, b)];
-        let (lat, lng) = coverage.grid.centre_of(pairs[0].0);
-        let (shared, mismatch) = join_usage_mismatch(pairs, coverage);
-        if is_usage_boundary(shared, mismatch) {
-            records.push(BoundaryRecord {
-                latitude: lat,
-                longitude: lng,
-                reason: BoundaryReason::UsageChange {
-                    shared: shared as u32,
-                    mismatched: mismatch as u32,
-                },
-            });
-            continue;
-        }
-        if let Some((thin, thick)) = traffic_cliff(pairs, coverage) {
-            records.push(BoundaryRecord {
-                latitude: lat,
-                longitude: lng,
-                reason: BoundaryReason::TrafficCliff { thin, thick },
-            });
-            continue;
-        }
-        if !section_worthy[a] || !section_worthy[b] {
-            continue;
-        }
-        let through: HashSet<u32> = supernodes[a]
-            .tracks
-            .intersection(&supernodes[b].tracks)
-            .copied()
-            .collect();
-        if through.is_empty() {
-            continue;
-        }
-        let leavers: HashSet<u32> = supernodes[a]
-            .tracks
-            .symmetric_difference(&supernodes[b].tracks)
-            .copied()
-            .collect();
-        let needed = (divergence * through.len() as f64).max(min_activities as f64);
-        if let Some(collected) = branch_collecting_leavers(
+        let Some(reason) = explain_join(
             a,
             b,
+            pairs,
             supernodes,
             &owner,
-            pairs,
+            tracks,
+            coverage,
+            divergence,
+            min_activities,
             section_worthy,
-            &leavers,
-            needed,
-        ) {
-            records.push(BoundaryRecord {
-                latitude: lat,
-                longitude: lng,
-                reason: BoundaryReason::Fork {
-                    through: through.len() as u32,
-                    needed,
-                    branch_leavers: collected.len() as u32,
-                    branch_activity_ids: collected
-                        .iter()
-                        .map(|&t| tracks[t as usize].0.to_string())
-                        .collect(),
-                },
-            });
+        ) else {
             continue;
-        }
-        if let Some(ending) = terminus_at_join(pairs, coverage, &leavers, needed) {
-            records.push(BoundaryRecord {
-                latitude: lat,
-                longitude: lng,
-                reason: BoundaryReason::Terminus {
-                    through: through.len() as u32,
-                    needed,
-                    ending,
-                },
-            });
-        }
+        };
+        let (latitude, longitude) = coverage.grid.centre_of(pairs[0].0);
+        sides.push((
+            records.len(),
+            pairs.iter().flat_map(|&(ca, cb)| [ca, cb]).collect(),
+        ));
+        records.push(BoundaryRecord {
+            latitude,
+            longitude,
+            section_ids: Vec::new(),
+            reason,
+        });
     }
+    sides
+}
+
+/// The reason one join was kept, when one of the keep tests holds there.
+#[allow(clippy::too_many_arguments)]
+fn explain_join(
+    a: usize,
+    b: usize,
+    pairs: &[(Cell, Cell)],
+    supernodes: &[Supernode],
+    owner: &HashMap<Cell, usize>,
+    tracks: &[(&str, &[GpsPoint])],
+    coverage: &CoverageGrid,
+    divergence: f64,
+    min_activities: u32,
+    section_worthy: &[bool],
+) -> Option<BoundaryReason> {
+    let (shared, mismatch) = join_usage_mismatch(pairs, coverage);
+    if is_usage_boundary(shared, mismatch) {
+        return Some(BoundaryReason::UsageChange {
+            shared: shared as u32,
+            mismatched: mismatch as u32,
+        });
+    }
+    if let Some((thin, thick)) = traffic_cliff(pairs, coverage) {
+        return Some(BoundaryReason::TrafficCliff { thin, thick });
+    }
+    if !section_worthy[a] || !section_worthy[b] {
+        return None;
+    }
+    let through: HashSet<u32> = supernodes[a]
+        .tracks
+        .intersection(&supernodes[b].tracks)
+        .copied()
+        .collect();
+    if through.is_empty() {
+        return None;
+    }
+    let leavers: HashSet<u32> = supernodes[a]
+        .tracks
+        .symmetric_difference(&supernodes[b].tracks)
+        .copied()
+        .collect();
+    let needed = (divergence * through.len() as f64).max(min_activities as f64);
+    if let Some(collected) = branch_collecting_leavers(
+        a,
+        b,
+        supernodes,
+        owner,
+        pairs,
+        section_worthy,
+        &leavers,
+        needed,
+    ) {
+        return Some(BoundaryReason::Fork {
+            through: through.len() as u32,
+            needed,
+            branch_leavers: collected.len() as u32,
+            branch_activity_ids: collected
+                .iter()
+                .map(|&t| tracks[t as usize].0.to_string())
+                .collect(),
+        });
+    }
+    terminus_at_join(pairs, coverage, &leavers, needed).map(|ending| BoundaryReason::Terminus {
+        through: through.len() as u32,
+        needed,
+        ending,
+    })
 }
 
 /// Merge component pairs whose boundary is not a genuine fork.
@@ -3225,27 +3302,45 @@ fn portion_point_index(
 /// without a sustained minority run, the drawn line is the section's
 /// public face and must be where the majority went (rule 9's majority
 /// principle applied to the DISPLAY).
+///
+/// `samples` are [`run_samples`] of the line and `support` each sample's
+/// distinct-track count ([`support_at`]), so a caller that already holds
+/// the counts reads the run without scanning the index again.
 fn minority_run_m(
     line: &[GpsPoint],
-    index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
-    ref_lat: f64,
-    near_m: f64,
-    cell_m: f64,
+    samples: &[(f64, usize)],
+    support: &[u32],
     contributors: usize,
 ) -> f64 {
-    // Derived: well under the smallest cell (50 m), so a run is never
-    // stepped over between two samples.
-    const STEP_M: f64 = 20.0;
     if line.len() < 2 || contributors < 3 {
         return 0.0;
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
-    let reach = (near_m / cell_m).ceil() as i32;
     let mut longest = 0.0f64;
     let mut run_start: Option<f64> = None;
+    for (&(acc, _), &sup) in samples.iter().zip(support) {
+        if 2 * (sup as usize) < contributors {
+            let start = *run_start.get_or_insert(acc);
+            longest = longest.max(acc - start + RUN_STEP_M);
+        } else {
+            run_start = None;
+        }
+    }
+    longest
+}
+
+/// Spacing of the samples [`minority_run_m`] reads. Derived: well under
+/// the smallest cell (50 m), so a run is never stepped over between two
+/// samples.
+const RUN_STEP_M: f64 = 20.0;
+
+/// The ~20 m samples of a line [`minority_run_m`] reads: the distance
+/// along the line and the point index of each.
+fn run_samples(line: &[GpsPoint], ref_lat: f64) -> Vec<(f64, usize)> {
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let mut out = Vec::new();
     let mut acc = 0.0;
-    let mut last = -STEP_M;
+    let mut last = -RUN_STEP_M;
     for (i, p) in line.iter().enumerate() {
         if i > 0 {
             let (dx, dy) = (
@@ -3254,36 +3349,47 @@ fn minority_run_m(
             );
             acc += (dx * dx + dy * dy).sqrt();
         }
-        if acc - last < STEP_M {
+        if acc - last < RUN_STEP_M {
             continue;
         }
         last = acc;
-        let (px, py) = (p.latitude * m_lat, p.longitude * m_lng);
-        let c = (
-            (p.latitude * m_lat / cell_m).floor() as i32,
-            (p.longitude * m_lng / cell_m).floor() as i32,
-        );
-        let mut sup: HashSet<u32> = HashSet::new();
-        for dy in -reach..=reach {
-            for dx in -reach..=reach {
-                if let Some(v) = index.get(&(c.0 + dy, c.1 + dx)) {
-                    for &(t, lat, lng) in v {
-                        if ((lat * m_lat - px).powi(2) + (lng * m_lng - py).powi(2)).sqrt() < near_m
-                        {
-                            sup.insert(t);
-                        }
+        out.push((acc, i));
+    }
+    out
+}
+
+/// Distinct tracks of `index` with a point within `near_m` of `p`, adding
+/// the point-distance tests made to `tests`.
+fn support_at(
+    p: &GpsPoint,
+    index: &HashMap<Cell, Vec<(u32, f64, f64)>>,
+    ref_lat: f64,
+    near_m: f64,
+    cell_m: f64,
+    tests: &mut usize,
+) -> u32 {
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let reach = (near_m / cell_m).ceil() as i32;
+    let (px, py) = (p.latitude * m_lat, p.longitude * m_lng);
+    let c = (
+        (p.latitude * m_lat / cell_m).floor() as i32,
+        (p.longitude * m_lng / cell_m).floor() as i32,
+    );
+    let mut sup: HashSet<u32> = HashSet::new();
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            if let Some(v) = index.get(&(c.0 + dy, c.1 + dx)) {
+                *tests += v.len();
+                for &(t, lat, lng) in v {
+                    if ((lat * m_lat - px).powi(2) + (lng * m_lng - py).powi(2)).sqrt() < near_m {
+                        sup.insert(t);
                     }
                 }
             }
         }
-        if 2 * sup.len() < contributors {
-            let start = *run_start.get_or_insert(acc);
-            longest = longest.max(acc - start + STEP_M);
-        } else {
-            run_start = None;
-        }
     }
-    longest
+    sup.len() as u32
 }
 
 /// The point-index range of a rendered line that keeps only its
@@ -3847,6 +3953,7 @@ fn qualify_candidate(
         records.push(BoundaryRecord {
             latitude: lat / dropped.len() as f64,
             longitude: lng / dropped.len() as f64,
+            section_ids: Vec::new(),
             reason: BoundaryReason::LowSupport {
                 floor,
                 dropped_cells: dropped.len() as u32,
@@ -4365,6 +4472,7 @@ fn detect_for_cluster(
         records,
         &mut leaves,
         starts,
+        &HashSet::new(),
     )
 }
 
@@ -4386,25 +4494,31 @@ fn candidate_keys(
     ref_lat: f64,
     cell_size: f64,
 ) -> (ConsensusKey, RenderKey) {
-    let mut sp: Vec<(u32, usize, usize)> = portions
-        .iter()
-        .map(|&(t, ps, pe, _)| (track_nums[t], ps, pe))
-        .collect();
-    sp.sort_unstable();
+    let rkey = render_key(portions, track_nums, ref_lat, cell_size);
     (
         ConsensusKey {
-            portions: sp.clone(),
+            portions: rkey.portions.clone(),
             sport: sport.to_string(),
             proximity_bits: config.proximity_threshold.to_bits(),
             min_activities: config.min_activities,
             max_len_bits: config.max_section_length.to_bits(),
         },
-        RenderKey {
-            portions: sp,
-            ref_lat_bits: ref_lat.to_bits(),
-            cell_size_bits: cell_size.to_bits(),
-        },
+        rkey,
     )
+}
+
+/// The render memo key of a portion set, as [`candidate_keys`] forms it.
+fn render_key(portions: &[Portion], track_nums: &[u32], ref_lat: f64, cell_size: f64) -> RenderKey {
+    let mut sp: Vec<(u32, usize, usize)> = portions
+        .iter()
+        .map(|&(t, ps, pe, _)| (track_nums[t], ps, pe))
+        .collect();
+    sp.sort_unstable();
+    RenderKey {
+        portions: sp,
+        ref_lat_bits: ref_lat.to_bits(),
+        cell_size_bits: cell_size.to_bits(),
+    }
 }
 
 /// The consensus leaf of one candidate: synthesise the anchor-paired
@@ -4470,20 +4584,58 @@ fn keep_pens(leaves: &mut LeafMemos, rows: &[(String, usize, usize, f64, f64)], 
     }
 }
 
+/// One render leaf's output: the memo rows, the per-sample support of
+/// every pass it read, and the point-distance tests it made.
+struct RenderLeaf {
+    rows: Vec<(String, usize, usize, f64, f64)>,
+    support: PassSupport,
+    /// Read only by the synthetic lane's work counter.
+    #[cfg_attr(not(feature = "synthetic"), allow(dead_code))]
+    tests: usize,
+}
+
 /// The render leaf of one candidate: pass penalties and minority runs as
 /// memo rows, in portion order. Pure in the portion set; the per-portion
 /// map fans out so even a single heavy candidate uses the machine.
+///
+/// A sample's support is the size of a set of tracks, so when `supports`
+/// holds the counts of the parent, this candidate less the portions of the
+/// tracks `routed` names, an old pass's count only rises by the routed
+/// tracks within reach of it, found through an index over their portions
+/// alone. Only the routed passes scan the whole index. Without the parent
+/// every pass scans it, with the same result.
+#[allow(clippy::too_many_arguments)]
 fn render_leaf(
     portions: &[Portion],
     sport_tracks: &[(&str, &[GpsPoint])],
     track_nums: &[u32],
     pens: &HashMap<PenKey, f64>,
+    supports: &SupportMemo,
+    routed: &[bool],
     ref_lat: f64,
     cell_size: f64,
-) -> Vec<(String, usize, usize, f64, f64)> {
+) -> RenderLeaf {
     let near = cell_size * 0.2;
     let gap = cell_size;
-    let fine = portion_point_index(portions, sport_tracks, ref_lat, 25.0);
+    let (old, new): (Vec<Portion>, Vec<Portion>) = portions
+        .iter()
+        .partition(|p| !routed.get(p.0).copied().unwrap_or(false));
+    let parent = (!old.is_empty())
+        .then(|| supports.get(&render_key(&old, track_nums, ref_lat, cell_size)))
+        .flatten();
+    let fine = portion_point_index(
+        if parent.is_some() { &new } else { portions },
+        sport_tracks,
+        ref_lat,
+        25.0,
+    );
+    // With a parent, `fine` holds the routed portions only, and the index
+    // over every portion is built for the first pass that needs it.
+    let whole: std::sync::OnceLock<PointIndex> = std::sync::OnceLock::new();
+    let all = || match parent {
+        None => &fine,
+        Some(_) => whole.get_or_init(|| portion_point_index(portions, sport_tracks, ref_lat, 25.0)),
+    };
     // Distinct tracks, matching the index. Route choice is per outing: an
     // athlete lapping ground ten times is still one contributor to where
     // the line goes.
@@ -4501,18 +4653,60 @@ fn render_leaf(
             Some(&p) => p,
             None => self_pass_penalty(seg, near, gap).max(out_and_back_penalty(seg, near, gap)),
         };
-        let run = minority_run_m(seg, &fine, ref_lat, 25.0, 25.0, distinct);
-        (sport_tracks[t].0.to_string(), s, e, pen, run)
+        let samples = run_samples(seg, ref_lat);
+        let mut tests = 0usize;
+        let known = parent
+            .and_then(|par| par.get(&(track_nums[t], s, e)))
+            .filter(|c| c.len() == samples.len());
+        let support: Vec<u32> = match known {
+            Some(base) => samples
+                .iter()
+                .zip(base)
+                .map(|(&(_, i), &b)| {
+                    b + support_at(&seg[i], &fine, ref_lat, 25.0, 25.0, &mut tests)
+                })
+                .collect(),
+            None => {
+                let all = all();
+                samples
+                    .iter()
+                    .map(|&(_, i)| support_at(&seg[i], all, ref_lat, 25.0, 25.0, &mut tests))
+                    .collect()
+            }
+        };
+        let run = minority_run_m(seg, &samples, &support, distinct);
+        (
+            (sport_tracks[t].0.to_string(), s, e, pen, run),
+            ((track_nums[t], s, e), support),
+            tests,
+        )
     };
     #[cfg(feature = "parallel")]
-    {
+    let out: Vec<_> = {
         use rayon::prelude::*;
         portions.par_iter().map(leaf).collect()
-    }
+    };
     #[cfg(not(feature = "parallel"))]
-    {
-        portions.iter().map(leaf).collect()
+    let out: Vec<_> = portions.iter().map(leaf).collect();
+    let tests = out.iter().map(|o| o.2).sum();
+    let (rows, support) = out.into_iter().map(|(r, s, _)| (r, s)).unzip();
+    RenderLeaf {
+        rows,
+        support,
+        tests,
     }
+}
+
+/// Keep what a render miss computed: its penalties, its rows and its
+/// per-sample support, and count its point-distance tests.
+fn keep_render(leaves: &mut LeafMemos, rkey: RenderKey, leaf: RenderLeaf, cell_size: f64) {
+    keep_pens(leaves, &leaf.rows, cell_size);
+    #[cfg(feature = "synthetic")]
+    {
+        leaves.render_tests += leaf.tests;
+    }
+    leaves.supports.keep(rkey.clone(), leaf.support);
+    leaves.render.entry(rkey).or_insert(leaf.rows);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4527,7 +4721,9 @@ fn detect_for_cluster_with_grid(
     records: &mut Vec<BoundaryRecord>,
     leaves: &mut LeafMemos,
     starts: &HashMap<String, i64>,
+    routed: &HashSet<&str>,
 ) -> Vec<FrequentSection> {
+    let cluster_first_record = records.len();
     // Start epochs by track index: every support test reads these
     // instead of hashing an id per portion.
     let epochs: Vec<Option<i64>> = sport_tracks
@@ -4600,7 +4796,7 @@ fn detect_for_cluster_with_grid(
     }
 
     // Every boundary that survived explains itself, as data.
-    explain_boundaries(
+    let cut_sides = explain_boundaries(
         &supernodes,
         sport_tracks,
         coverage,
@@ -4620,6 +4816,12 @@ fn detect_for_cluster_with_grid(
     let track_nums: Vec<u32> = sport_tracks
         .iter()
         .map(|(id, _)| track_num(leaves, id))
+        .collect();
+    // Which tracks the fold routed this call, by track index: a render miss
+    // drops their portions to find the candidate it grew from.
+    let routed_t: Vec<bool> = sport_tracks
+        .iter()
+        .map(|(id, _)| routed.contains(id))
         .collect();
     let bounds_of: HashMap<&str, (f64, f64, f64, f64)> = sport_tracks
         .iter()
@@ -4650,7 +4852,7 @@ fn detect_for_cluster_with_grid(
     let mut orphaned: std::collections::BTreeSet<Cell> = std::collections::BTreeSet::new();
     phase!("worthiness", t_worthy);
     let t_portions = web_time::Instant::now();
-    let mut candidates: Vec<(usize, Supernode, Vec<Portion>, f64)> = Vec::new();
+    let mut candidates: Vec<Queued> = Vec::new();
     for (n_idx, node) in supernodes.iter().enumerate() {
         // Rough length from core cell count (cells are ~square).
         let approx_len = node.cells.len() as f64 * cell_size;
@@ -4665,6 +4867,7 @@ fn detect_for_cluster_with_grid(
             cells: node.cells.clone(),
             tracks: node.tracks.clone(),
         };
+        let first_record = records.len();
         if let Some(qualified) = qualify_candidate(
             leaves,
             owned,
@@ -4679,7 +4882,8 @@ fn detect_for_cluster_with_grid(
             records,
         ) {
             let (node, portions, score) = qualified;
-            candidates.push((n_idx, node, portions, score));
+            let shaped = (first_record..records.len()).collect();
+            candidates.push((n_idx, node, portions, score, shaped));
         } else {
             orphaned.extend(node.cells.iter().copied());
         }
@@ -4706,7 +4910,7 @@ fn detect_for_cluster_with_grid(
         let miss_us = std::sync::atomic::AtomicU64::new(0);
         let computed: Vec<_> = candidates
             .par_iter()
-            .map(|(_, _, portions, _)| {
+            .map(|(_, _, portions, _, _)| {
                 #[cfg(feature = "profile")]
                 let t_miss = web_time::Instant::now();
                 let (ckey, rkey) = candidate_keys(
@@ -4725,6 +4929,8 @@ fn detect_for_cluster_with_grid(
                         sport_tracks,
                         &track_nums,
                         &leaves_ro.pens,
+                        &leaves_ro.supports,
+                        &routed_t,
                         coverage.ref_lat,
                         cell_size,
                     )
@@ -4756,9 +4962,9 @@ fn detect_for_cluster_with_grid(
             if let Some(c) = cons {
                 leaves.consensus.entry(ckey).or_insert(c);
             }
-            if let Some(r) = rows {
-                keep_pens(leaves, &r, cell_size);
-                leaves.render.entry(rkey).or_insert(r);
+            match rows {
+                Some(r) => keep_render(leaves, rkey, r, cell_size),
+                None => leaves.supports.carry(&rkey),
             }
         }
         phase!("leaves", t_leaves);
@@ -4782,12 +4988,14 @@ fn detect_for_cluster_with_grid(
     let mut accepted_pts: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
     let mut acc_tracks: Vec<HashSet<u32>> = Vec::new();
     let mut emitted_portions: Vec<Vec<Portion>> = Vec::new();
-    let mut queue: std::collections::VecDeque<(usize, Supernode, Vec<Portion>, f64)> =
-        candidates.into_iter().collect();
+    let mut queue: std::collections::VecDeque<Queued> = candidates.into_iter().collect();
+    // The cells each emitted section was selected on, beside `sections`:
+    // what a cut's two sides are matched against once selection is done.
+    let mut emitted_cells: Vec<HashSet<Cell>> = Vec::new();
     let mut pooled_ever: HashSet<Cell> = HashSet::new();
     loop {
         lap!(4);
-        let Some((mark, node, portions, score)) = queue.pop_front() else {
+        let Some((mark, node, portions, score, shaped)) = queue.pop_front() else {
             // The pass drained: pool the orphaned ground and retry it.
             // Cells already retried once and cells the accepted lines
             // now stand on are dropped, so the salvage strictly
@@ -4827,6 +5035,7 @@ fn detect_for_cluster_with_grid(
                     cell_size,
                     tun,
                 );
+                let first_record = records.len();
                 let Some((rem_node, rem_portions, rem_score)) = qualify_candidate(
                     leaves,
                     remainder,
@@ -4842,13 +5051,15 @@ fn detect_for_cluster_with_grid(
                 ) else {
                     continue;
                 };
-                queue.push_back((usize::MAX, rem_node, rem_portions, rem_score));
+                let shaped = (first_record..records.len()).collect();
+                queue.push_back((usize::MAX, rem_node, rem_portions, rem_score, shaped));
             }
             if queue.is_empty() {
                 break;
             }
             continue;
         };
+        let iteration_first_record = records.len();
         // Selection backoff (rule 6): ground already represented by an
         // accepted polyline is never re-emitted. The probe walks the
         // candidate's best portion; representation means accepted
@@ -4963,6 +5174,7 @@ fn detect_for_cluster_with_grid(
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
+                    section_ids: Vec::new(),
                     reason: BoundaryReason::Backoff {
                         represented: near as u32,
                         probed: mask.len() as u32,
@@ -5030,6 +5242,7 @@ fn detect_for_cluster_with_grid(
                     records.push(BoundaryRecord {
                         latitude: mid.latitude,
                         longitude: mid.longitude,
+                        section_ids: Vec::new(),
                         reason: BoundaryReason::Backoff {
                             represented: near as u32,
                             probed: mask.len() as u32,
@@ -5047,6 +5260,7 @@ fn detect_for_cluster_with_grid(
                     records.push(BoundaryRecord {
                         latitude: probe[cut].latitude,
                         longitude: probe[cut].longitude,
+                        section_ids: Vec::new(),
                         reason: BoundaryReason::Trim {
                             kept_metres: kept_m,
                             dropped_metres: acc - kept_m,
@@ -5130,19 +5344,24 @@ fn detect_for_cluster_with_grid(
                     .map(|v| v.into_iter().unzip())
             });
             let (pens, runs): (Vec<f64>, Vec<f64>) = match cached {
-                Some(hit) => hit,
+                Some(hit) => {
+                    leaves.supports.carry(&rkey);
+                    hit
+                }
                 None => {
-                    let rows = render_leaf(
+                    let leaf = render_leaf(
                         &portions,
                         sport_tracks,
                         &track_nums,
                         &leaves.pens,
+                        &leaves.supports,
+                        &routed_t,
                         coverage.ref_lat,
                         cell_size,
                     );
-                    let out = rows.iter().map(|&(_, _, _, p, r)| (p, r)).unzip();
-                    keep_pens(leaves, &rows, cell_size);
-                    leaves.render.insert(rkey, rows);
+                    let out = leaf.rows.iter().map(|&(_, _, _, p, r)| (p, r)).unzip();
+                    leaves.render.remove(&rkey);
+                    keep_render(leaves, rkey, leaf, cell_size);
                     out
                 }
             };
@@ -5275,6 +5494,7 @@ fn detect_for_cluster_with_grid(
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
+                    section_ids: Vec::new(),
                     reason: BoundaryReason::NoSinglePass {
                         best_penalty: best,
                         portions: portions.len() as u32,
@@ -5375,6 +5595,7 @@ fn detect_for_cluster_with_grid(
                     records.push(BoundaryRecord {
                         latitude: mid.latitude,
                         longitude: mid.longitude,
+                        section_ids: Vec::new(),
                         reason: BoundaryReason::LowSupport {
                             floor: config.min_activities,
                             dropped_cells: node.cells.len() as u32,
@@ -5557,6 +5778,7 @@ fn detect_for_cluster_with_grid(
                             records.push(BoundaryRecord {
                                 latitude: wtrack[cut].latitude,
                                 longitude: wtrack[cut].longitude,
+                                section_ids: Vec::new(),
                                 reason: BoundaryReason::Trim {
                                     kept_metres: kept_m,
                                     dropped_metres: (full_m - kept_m).max(0.0),
@@ -5597,6 +5819,7 @@ fn detect_for_cluster_with_grid(
                             records.push(BoundaryRecord {
                                 latitude: seg[cut].latitude,
                                 longitude: seg[cut].longitude,
+                                section_ids: Vec::new(),
                                 reason: BoundaryReason::Trim {
                                     kept_metres: kept_m,
                                     dropped_metres: full_m - kept_m,
@@ -5730,6 +5953,7 @@ fn detect_for_cluster_with_grid(
                                 records.push(BoundaryRecord {
                                     latitude: line[cut].latitude,
                                     longitude: line[cut].longitude,
+                                    section_ids: Vec::new(),
                                     reason: BoundaryReason::Trim {
                                         kept_metres: kept_m,
                                         dropped_metres: (full_m - kept_m).max(0.0),
@@ -5744,6 +5968,7 @@ fn detect_for_cluster_with_grid(
                         records.push(BoundaryRecord {
                             latitude: mid.latitude,
                             longitude: mid.longitude,
+                            section_ids: Vec::new(),
                             reason: BoundaryReason::DrawnPopulation { kept, floor },
                         });
                         orphaned.extend(node.cells.iter().copied());
@@ -5787,6 +6012,7 @@ fn detect_for_cluster_with_grid(
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
+                    section_ids: Vec::new(),
                     reason: BoundaryReason::Backoff {
                         represented: render_mask.iter().filter(|&&m| m).count() as u32,
                         probed: render_mask.len() as u32,
@@ -5875,8 +6101,8 @@ fn detect_for_cluster_with_grid(
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
+                    section_ids: Vec::new(),
                     reason: BoundaryReason::DrawnEmpty {
-                        section_id: section.id.clone(),
                         contributors: section.activity_ids.len() as u32,
                     },
                 });
@@ -5914,6 +6140,7 @@ fn detect_for_cluster_with_grid(
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
                     longitude: mid.longitude,
+                    section_ids: Vec::new(),
                     reason: BoundaryReason::DrawnPopulation {
                         kept: occasion_support(&drawn, &epochs).0 as u32,
                         floor: creating_required.max(config.min_activities as usize) as u32,
@@ -5933,6 +6160,16 @@ fn detect_for_cluster_with_grid(
                 section.visit_count,
             );
             *section_idx += 1;
+            // The candidate stands: every record that shaped it, in this
+            // pass or while it qualified, names it. A record pushed this
+            // pass by a candidate that backed off never reaches here.
+            for r in shaped
+                .iter()
+                .copied()
+                .chain(iteration_first_record..records.len())
+            {
+                records[r].section_ids.push(section.id.clone());
+            }
             // Occupy the ground of the line the section actually SHOWS,
             // not the default portion's. The default can run wide of
             // the render (a trimmed candidate's longest pass walks
@@ -6021,6 +6258,7 @@ fn detect_for_cluster_with_grid(
                         tun,
                     );
                     let rem_cells = remainder.cells.clone();
+                    let first_record = records.len();
                     let Some((rem_node, rem_portions, rem_score)) = qualify_candidate(
                         leaves,
                         remainder,
@@ -6058,16 +6296,22 @@ fn detect_for_cluster_with_grid(
                             d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .unwrap_or((section.polyline[0].latitude, section.polyline[0].longitude));
+                    // The seam's far side is the remainder's section, if it
+                    // is emitted: the record rides with it to be named then.
+                    let mut shaped: Vec<usize> = (first_record..records.len()).collect();
+                    shaped.push(records.len());
                     records.push(BoundaryRecord {
                         latitude: seam_lat,
                         longitude: seam_lng,
+                        section_ids: vec![section.id.clone()],
                         reason: BoundaryReason::PassEnd {
                             requeued_cells: rem_node.cells.len() as u32,
                         },
                     });
-                    queue.push_back((usize::MAX, rem_node, rem_portions, rem_score));
+                    queue.push_back((usize::MAX, rem_node, rem_portions, rem_score, shaped));
                 }
             }
+            emitted_cells.push(node.cells.iter().copied().collect());
             sections.push(section);
             emitted_portions.push(portions);
         }
@@ -6112,6 +6356,11 @@ fn detect_for_cluster_with_grid(
         config.min_section_length,
         records,
     );
+    name_cut_sides(&sections, &emitted_cells, &cut_sides, records);
+    for r in &mut records[cluster_first_record..] {
+        r.section_ids.sort();
+        r.section_ids.dedup();
+    }
     phase!("seam", t_seam);
     phase!("chains", t_chains);
     let t_enrich = web_time::Instant::now();
@@ -6127,6 +6376,27 @@ fn detect_for_cluster_with_grid(
     phase!("enrich", t_enrich);
 
     sections
+}
+
+/// Name, on each cut [`explain_boundaries`] recorded, the emitted sections
+/// on its two sides: those selected on a cell of the join. A side whose
+/// candidate was dropped names nothing, so a cut between two dropped
+/// candidates names no section. `cut_sides` holds each record's index
+/// with its join's cells, `emitted_cells` each section's selection cells.
+fn name_cut_sides(
+    sections: &[FrequentSection],
+    emitted_cells: &[HashSet<Cell>],
+    cut_sides: &[(usize, Vec<Cell>)],
+    records: &mut [BoundaryRecord],
+) {
+    for (r, cells) in cut_sides {
+        let ids = &mut records[*r].section_ids;
+        for (section, own) in sections.iter().zip(emitted_cells) {
+            if cells.iter().any(|c| own.contains(c)) {
+                ids.push(section.id.clone());
+            }
+        }
+    }
 }
 
 /// Chain neighbours must MEET, not double-draw: when one line's end
@@ -6262,8 +6532,8 @@ fn reconcile_seam_overruns(
         records.push(BoundaryRecord {
             latitude: meet.latitude,
             longitude: meet.longitude,
+            section_ids: vec![sections[i].id.clone()],
             reason: BoundaryReason::SeamClip {
-                section_id: sections[i].id.clone(),
                 clipped_metres: (total - kept_m).max(0.0),
                 kept_metres: kept_m,
             },
@@ -6483,8 +6753,9 @@ pub struct IncrementalResult {
     pub carried: Vec<(String, String)>,
     /// The boundary records of every cluster this fold recomputed. A fork
     /// record names the activities its branch collected, which is what a
-    /// change at that join can say was around it. Clusters the fold left
-    /// alone contribute nothing: no change, nothing to attribute.
+    /// change at that join can say was around it, and the sections on its
+    /// sides by their ids in `catalogue`. Clusters the fold left alone
+    /// contribute nothing: no change, nothing to attribute.
     pub boundaries: Vec<BoundaryRecord>,
 }
 
@@ -6812,7 +7083,7 @@ pub(crate) fn reorient_portion_flags(
 
 fn resolve_fold(
     fresh: Vec<FrequentSection>,
-    boundaries: Vec<BoundaryRecord>,
+    mut boundaries: Vec<BoundaryRecord>,
     existing: &[FrequentSection],
     policy: &SectionUpdatePolicy,
     config: &SectionConfig,
@@ -6885,11 +7156,17 @@ fn resolve_fold(
     // Candidate fate: emit as-is, replaced by its prior, or withheld.
     let mut suppressed = vec![false; fresh.len()];
 
+    // What each fresh id is called in the catalogue: its own id, a renumbered
+    // one, the frozen prior that stands in its place, or nothing when it was
+    // withheld. The boundary records are renamed through it.
+    let mut emitted_as: HashMap<String, String> = HashMap::new();
+
     for (j, cand) in fresh.iter().enumerate() {
         let Some(pi) = carrier[j] else { continue };
         let prior = &existing[pi];
         if frozen_prior(&prior.id) {
             suppressed[j] = true;
+            emitted_as.insert(cand.id.clone(), prior.id.clone());
             if moved(prior, cand) {
                 held.push(change(prior, cand));
             }
@@ -6938,6 +7215,7 @@ fn resolve_fold(
             match carrier[j] {
                 Some(pi) => {
                     let prior = &existing[pi];
+                    emitted_as.insert(cand.id.clone(), prior.id.clone());
                     held.push(change(prior, cand));
                     adjacency_out.push(prior.clone());
                     carried.push((prior.id.clone(), prior.id.clone()));
@@ -6964,9 +7242,11 @@ fn resolve_fold(
         if suppressed[j] {
             continue;
         }
+        let fresh_id = cand.id.clone();
         if reserved.contains(&cand.id) {
             cand.id = disambiguate_id(&cand.id, &reserved, &catalogue);
         }
+        emitted_as.insert(fresh_id, cand.id.clone());
         match carrier[j] {
             Some(pi) => {
                 let prior = &existing[pi];
@@ -6983,6 +7263,16 @@ fn resolve_fold(
     }
     catalogue.extend(frozen_out);
     reorient_portion_flags(&mut catalogue, tracks);
+    for r in &mut boundaries {
+        let mut ids: Vec<String> = r
+            .section_ids
+            .iter()
+            .filter_map(|id| emitted_as.get(id).cloned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        r.section_ids = ids;
+    }
 
     IncrementalResult {
         catalogue,
@@ -7115,13 +7405,21 @@ pub struct SectionEvidenceCache {
 struct LeafMemos {
     /// Per-track lift candidate spans ([`lift_spans_tuned`]), stamped with the
     /// stream the scan read (see [`LiftMemo`]). The cross-track descent rescue
-    /// is recomputed per rebuild (bbox-gated, and free while no member carries
-    /// a candidate).
+    /// is decided per rebuild over the present membership, from `rescues`.
     lift_candidates: LiftMemo,
+    /// Per lift candidate span, what the cross-track descent rescue has found
+    /// so far (see [`RescueVerdict`]), keyed by the interned track and the
+    /// span. Each pairwise test is pure in the two tracks' points, so a fold
+    /// that adds one ride tests the old spans against the newcomer only.
+    #[serde(default)]
+    rescues: RescueMemo,
     /// Interned supernode cell sets: full-equality mapping from the sorted
     /// cell list to a stable small id, so per-track keys stay exact without
     /// hashing the whole cell list per track. Cleared together with
     /// `track_portions`, whose keys it numbers.
+    /// Not persisted, like `track_portions`: a key whose intern table is
+    /// gone names nothing.
+    #[serde(skip)]
     cell_sets: Interned<Vec<(Cell, bool)>>,
     /// Per-track footprint: the sorted distinct grid cells a track's points
     /// fall in, keyed by track and grid. A track's cut through a component
@@ -7150,6 +7448,9 @@ struct LeafMemos {
     defaults: HashMap<(u64, u64), Option<usize>>,
     /// Per contributor and component, the cells its qualifying runs lend
     /// support to: the walk over its whole track, done once.
+    /// Not persisted: a memo whose rebuild after a restart costs under a
+    /// tenth of a warm add's budget stays in memory for the process only.
+    #[serde(skip)]
     support_cells: HashMap<SupportKey, Vec<Cell>>,
     /// End clips of rendered passes, minority (`min_tracks` 0) and support.
     end_clips: HashMap<ClipKey, (usize, usize)>,
@@ -7175,6 +7476,10 @@ struct LeafMemos {
     /// are computed per track independently, so on saturated ground a new
     /// activity leaves every existing track's entry valid and pays only for
     /// its own cut.
+    /// Read only where `node_portions` misses.
+    /// Not persisted: a memo whose rebuild after a restart costs under a
+    /// tenth of a warm add's budget stays in memory for the process only.
+    #[serde(skip)]
     track_portions: HashMap<TrackPortionKey, Vec<(usize, usize, f64)>>,
     /// [`process_cluster`] results keyed by the candidate's portion set,
     /// including refusals. The id is rewritten on every hit exactly as a
@@ -7185,6 +7490,12 @@ struct LeafMemos {
     /// `(activity, start, end, penalty, run)` row per portion.
     #[allow(clippy::type_complexity)]
     render: HashMap<RenderKey, Vec<(String, usize, usize, f64, f64)>>,
+    /// Per-sample support of the passes the last fold and this one
+    /// rendered, the parent counts a grown candidate's render raises
+    /// instead of recounting (see [`render_leaf`]). Per process: a restart
+    /// only falls back to the full scan.
+    #[serde(skip)]
+    supports: SupportMemo,
     /// Drawn-line recounts ([`super::portions::compute_portions_over`]) with the intersecting
     /// track ids they were computed over. Replayed while that population is
     /// unchanged: a track outside the line's padded bounds contributes
@@ -7201,7 +7512,33 @@ struct LeafMemos {
     #[cfg(feature = "synthetic")]
     #[serde(skip)]
     recompute_work: (usize, usize),
+    /// Matcher calls the descent rescue has made over the cache's life, the
+    /// work counter for its memo. Built only for the synthetic test lane.
+    #[cfg(feature = "synthetic")]
+    #[serde(skip)]
+    rescue_matches: usize,
+    /// Point-distance tests the render's minority runs have made over the
+    /// cache's life, the work counter for [`LeafMemos::supports`]. Built
+    /// only for the synthetic test lane.
+    #[cfg(feature = "synthetic")]
+    #[serde(skip)]
+    render_tests: usize,
 }
+
+/// What the descent rescue knows about one lift candidate span: the member
+/// that came down it straight, if one has, and the sorted members tested and
+/// found not to. The verdict stands while its rescuer is among the members
+/// being rebuilt; otherwise the span is tested against every present member
+/// outside `cleared`, which is the cold verdict because the test is pure per
+/// pair.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct RescueVerdict {
+    rescuer: Option<u32>,
+    cleared: Vec<u32>,
+}
+
+/// Rescue verdicts by (interned track, span start, span end).
+type RescueMemo = HashMap<(u32, usize, usize), RescueVerdict>;
 
 /// Per-track lift candidate spans, each stamped with the stream it was
 /// scanned from: the length where one covered every point, `None` where none
@@ -7306,6 +7643,8 @@ const MEMO_RENDER_CAP: usize = 10_000;
 const MEMO_DRAWN_CAP: usize = 10_000;
 const MEMO_COVERAGE_CAP: usize = 200_000;
 const MEMO_UNIFY_CAP: usize = 200_000;
+/// Member ids held across every rescue verdict's `cleared` list, 4 bytes each.
+const MEMO_RESCUE_IDS_CAP: usize = 4_000_000;
 
 /// Complete input fingerprint of one [`process_cluster`] call: the portion
 /// set (activity id + range), the sport label baked into the id and the
@@ -7327,6 +7666,45 @@ struct RenderKey {
     portions: Vec<(u32, usize, usize)>,
     ref_lat_bits: u64,
     cell_size_bits: u64,
+}
+
+/// Per-sample distinct-track support of each pass one render read, keyed
+/// by the interned track and the pass's range.
+type PassSupport = HashMap<(u32, usize, usize), Vec<u32>>;
+
+/// The pass support of the candidates rendered in this fold and the last,
+/// so its size is bounded by two folds' candidates. Every entry is pure in
+/// its key, so a hit from either fold is exact.
+#[derive(Clone, Default)]
+struct SupportMemo {
+    this_fold: HashMap<RenderKey, PassSupport>,
+    last_fold: HashMap<RenderKey, PassSupport>,
+}
+
+impl SupportMemo {
+    fn get(&self, key: &RenderKey) -> Option<&PassSupport> {
+        self.this_fold.get(key).or_else(|| self.last_fold.get(key))
+    }
+
+    fn keep(&mut self, key: RenderKey, support: PassSupport) {
+        if self.this_fold.len() < MEMO_RENDER_CAP {
+            self.this_fold.insert(key, support);
+        }
+    }
+
+    /// Carry a candidate the render memo answered into this fold, so a ride
+    /// that grows it next fold still finds its parent.
+    fn carry(&mut self, key: &RenderKey) {
+        if !self.this_fold.contains_key(key)
+            && let Some(v) = self.last_fold.remove(key)
+        {
+            self.keep(key.clone(), v);
+        }
+    }
+
+    fn next_fold(&mut self) {
+        self.last_fold = std::mem::take(&mut self.this_fold);
+    }
 }
 
 /// Fingerprint of one drawn-line recount: the rendered pass's identity plus
@@ -7425,6 +7803,76 @@ impl SectionEvidenceCache {
     #[doc(hidden)]
     pub fn recompute_work(&self) -> (usize, usize) {
         self.leaves.recompute_work
+    }
+
+    /// Point-distance tests the render's minority runs made over every fold
+    /// into this cache, for the cost gates.
+    #[cfg(feature = "synthetic")]
+    #[doc(hidden)]
+    pub fn render_tests(&self) -> usize {
+        self.leaves.render_tests
+    }
+
+    /// Entry count of each leaf memo a persist could carry, by field name,
+    /// for the tests that pin which of them it does.
+    #[cfg(feature = "synthetic")]
+    #[doc(hidden)]
+    pub fn memo_counts(&self) -> std::collections::BTreeMap<&'static str, usize> {
+        let l = &self.leaves;
+        [
+            ("lift_candidates", l.lift_candidates.len()),
+            ("rescues", l.rescues.len()),
+            ("cell_sets", l.cell_sets.len()),
+            ("footprints", l.footprints.len()),
+            ("node_sets", l.node_sets.len()),
+            ("node_portions", l.node_portions.len()),
+            ("coverage", l.coverage.len()),
+            ("unify", l.unify.len()),
+            ("track_ids", l.track_ids.len()),
+            ("defaults", l.defaults.len()),
+            ("support_cells", l.support_cells.len()),
+            ("end_clips", l.end_clips.len()),
+            ("agreements", l.agreements.len()),
+            ("pens", l.pens.len()),
+            ("track_portions", l.track_portions.len()),
+            ("consensus", l.consensus.len()),
+            ("render", l.render.len()),
+            ("drawn", l.drawn.len()),
+            ("track_bounds", l.track_bounds.len()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// The cache as a build that also persisted the memos a restart rebuilds
+    /// cheaply wrote it, for the tests that open a row such a build left.
+    #[cfg(feature = "synthetic")]
+    #[doc(hidden)]
+    pub fn with_rebuildable_memos(&self) -> impl Serialize + '_ {
+        #[derive(Serialize)]
+        struct Cache<'a> {
+            version: u32,
+            sports: &'a HashMap<String, Vec<ClusterEvidence>>,
+            leaves: Leaves<'a>,
+        }
+        #[derive(Serialize)]
+        struct Leaves<'a> {
+            #[serde(flatten)]
+            persisted: &'a LeafMemos,
+            cell_sets: &'a Interned<Vec<(Cell, bool)>>,
+            track_portions: &'a HashMap<TrackPortionKey, Vec<(usize, usize, f64)>>,
+            support_cells: &'a HashMap<SupportKey, Vec<Cell>>,
+        }
+        Cache {
+            version: self.version,
+            sports: &self.sports,
+            leaves: Leaves {
+                persisted: &self.leaves,
+                cell_sets: &self.leaves.cell_sets,
+                track_portions: &self.leaves.track_portions,
+                support_cells: &self.leaves.support_cells,
+            },
+        }
     }
 
     /// Per-cluster `(sport, members, ref_lat, sections)` snapshot, for tests
@@ -7758,9 +8206,21 @@ fn fold_by_sport(
     if leaves.drawn.len() > MEMO_DRAWN_CAP {
         leaves.drawn.clear();
     }
+    leaves.supports.next_fold();
+    let routed: HashSet<&str> = new_activity_ids.iter().copied().collect();
+    if leaves
+        .rescues
+        .values()
+        .map(|v| v.cleared.len() + 1)
+        .sum::<usize>()
+        > MEMO_RESCUE_IDS_CAP
+    {
+        leaves.rescues.clear();
+    }
     // Each cluster is recomputed on its own. Boundary records are gathered
-    // per sport in name order so the fold's report is order-free.
-    let mut boundaries: Vec<BoundaryRecord> = Vec::new();
+    // per sport in name order so the fold's report is order-free, each with
+    // the cluster that cut it, whose section ids the assembly renumbers.
+    let mut cut_records: Vec<((String, usize), Vec<BoundaryRecord>)> = Vec::new();
     let mut sport_names: Vec<String> = cache.sports.keys().cloned().collect();
     sport_names.sort_unstable();
     let total = cache.dirty_clusters();
@@ -7784,8 +8244,9 @@ fn fold_by_sport(
                 &tun,
                 &mut cache.leaves,
                 start_epochs,
+                &routed,
             );
-            boundaries.extend(records);
+            cut_records.push(((sport.clone(), ci), records));
             let cluster = &mut cache.sports.get_mut(sport).expect("sport just listed")[ci];
             cluster.dirty = false;
             cluster.awaiting_resolve = true;
@@ -7802,7 +8263,21 @@ fn fold_by_sport(
     // `resolve_fold` is bbox-gated, so the delta cost tracks the CHANGED
     // ground rather than the whole (growing) catalogue.
     let t_assemble = web_time::Instant::now();
-    let assembled = assemble_catalogue(cache);
+    let (assembled, renamed) = assemble_catalogue(cache);
+    let boundaries = cut_records
+        .into_iter()
+        .flat_map(|(cluster, mut records)| {
+            let ids = renamed.get(&cluster);
+            for r in &mut records {
+                r.section_ids = r
+                    .section_ids
+                    .iter()
+                    .filter_map(|id| ids?.get(id).cloned())
+                    .collect();
+            }
+            records
+        })
+        .collect();
     phase!("assemble", t_assemble);
     // The resolve step reads the members of every cluster recomputed since the
     // last resolve, not only this call's: a fold resumed from a checkpoint finds
@@ -8087,6 +8562,7 @@ fn recompute_cluster(
     tun: &Tunables,
     leaves: &mut LeafMemos,
     starts: &HashMap<String, i64>,
+    routed: &HashSet<&str>,
 ) -> Vec<BoundaryRecord> {
     #[cfg(feature = "synthetic")]
     {
@@ -8130,6 +8606,7 @@ fn recompute_cluster(
         &mut records,
         leaves,
         starts,
+        routed,
     );
 
     phase!("detect", t_detect);
@@ -8140,11 +8617,18 @@ fn recompute_cluster(
     records
 }
 
+/// Each (sport, cluster index) with the catalogue id of every section id its
+/// own cut minted.
+type AssembledIds = HashMap<(String, usize), HashMap<String, String>>;
+
 /// Concatenate every cluster's sections into the full catalogue, renumbering
 /// ids per sport in SW-corner cluster order so a cached catalogue carries the
 /// same `sec_<sport>_<n>` ids the batch would assign for the same ground.
-fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
+/// Returns the renumbering beside it, so a record naming a section by the
+/// id its cluster's cut gave it can be named by the catalogue's.
+fn assemble_catalogue(cache: &SectionEvidenceCache) -> (Vec<FrequentSection>, AssembledIds) {
     let mut out = Vec::new();
+    let mut renamed: AssembledIds = HashMap::new();
     let mut sports: Vec<&String> = cache.sports.keys().collect();
     sports.sort_unstable();
     for sport in sports {
@@ -8158,15 +8642,17 @@ fn assemble_catalogue(cache: &SectionEvidenceCache) -> Vec<FrequentSection> {
         let mut idx = 0usize;
         let lower = sport.to_lowercase();
         for &ci in &order {
+            let ids = renamed.entry((sport.clone(), ci)).or_default();
             for s in &clusters[ci].sections {
                 let mut s = s.clone();
-                s.id = format!("sec_{lower}_{idx}");
+                let id = format!("sec_{lower}_{idx}");
+                ids.insert(std::mem::replace(&mut s.id, id.clone()), id);
                 idx += 1;
                 out.push(s);
             }
         }
     }
-    out
+    (out, renamed)
 }
 
 /// Minimum visits required based on section length and dataset size.
@@ -8736,6 +9222,7 @@ mod tests {
                 &mut records,
                 leaves,
                 &HashMap::new(),
+                &HashSet::new(),
             )
         };
         let cold = run(&mut leaves);
@@ -8979,6 +9466,166 @@ mod tests {
             leaves.track_bounds.len(),
             3,
             "every track in the pool must be memoised, not only the candidates"
+        );
+    }
+
+    /// `n` straight steep climbs up one line, each a hair east of the last so
+    /// every one comes within the descent pad of every other, starting
+    /// `from` steps up the slope.
+    fn climbs_up_one_line(prefix: &str, n: usize, from: usize) -> Vec<(String, Vec<GpsPoint>)> {
+        (0..n)
+            .map(|k| {
+                let pts = (0..80)
+                    .map(|i| {
+                        let step = (from + i) as f64;
+                        GpsPoint::with_elevation(
+                            46.0 + 9.0e-5 * step,
+                            7.0 + 1.0e-5 * k as f64,
+                            5.0 * step,
+                        )
+                    })
+                    .collect();
+                (format!("{prefix}{k}"), pts)
+            })
+            .collect()
+    }
+
+    fn as_pool(tracks: &[(String, Vec<GpsPoint>)]) -> Vec<(&str, &[GpsPoint])> {
+        tracks
+            .iter()
+            .map(|(id, pts)| (id.as_str(), pts.as_slice()))
+            .collect()
+    }
+
+    fn cold_keep(tracks: &[(&str, &[GpsPoint])]) -> Vec<Vec<(usize, usize)>> {
+        build_coverage_grid(
+            tracks,
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut LeafMemos::default(),
+        )
+        .keep
+    }
+
+    #[cfg(feature = "synthetic")]
+    #[test]
+    fn an_added_ride_tests_old_lift_spans_against_itself_only() {
+        // Scenario: twelve climbs, none ever descended, folded warm; then a
+        // thirteenth climb arrives on its own.
+        // Expected behaviour: the old spans are tested against the newcomer
+        // alone, and the newcomer's span against every member, rather than
+        // every span against every member again.
+        let mut tracks = climbs_up_one_line("climb", 12, 0);
+        let mut leaves = LeafMemos::default();
+        let warm = build_coverage_grid(
+            &as_pool(&tracks),
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut leaves,
+        );
+        assert_eq!(
+            leaves.rescue_matches,
+            12 * 12,
+            "every span must reach every member, or the bound below proves nothing"
+        );
+        assert!(
+            warm.keep.iter().all(|k| k != &vec![(0usize, 79usize)]),
+            "every climb must carry an unrescued lift span"
+        );
+
+        let before = leaves.rescue_matches;
+        tracks.extend(climbs_up_one_line("late", 1, 0));
+        let pool = as_pool(&tracks);
+        let added = build_coverage_grid(&pool, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        let new_spans = 1;
+        let old_unrescued_spans = 12;
+        assert!(
+            leaves.rescue_matches - before <= new_spans * tracks.len() + old_unrescued_spans,
+            "the add made {} rescue matcher calls",
+            leaves.rescue_matches - before
+        );
+        assert_eq!(added.keep, cold_keep(&pool));
+
+        let again = leaves.rescue_matches;
+        build_coverage_grid(&pool, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert_eq!(
+            leaves.rescue_matches, again,
+            "a repeat rebuild owes the matcher nothing"
+        );
+    }
+
+    #[test]
+    fn a_late_descender_rescues_cached_spans_as_a_cold_pass_does() {
+        let mut tracks = climbs_up_one_line("climb", 12, 0);
+        let mut leaves = LeafMemos::default();
+        build_coverage_grid(
+            &as_pool(&tracks),
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut leaves,
+        );
+
+        let mut down = tracks[0].1.clone();
+        down.reverse();
+        tracks.push(("down".to_string(), down));
+        let pool = as_pool(&tracks);
+        let added = build_coverage_grid(&pool, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert_eq!(added.keep, cold_keep(&pool));
+        assert!(
+            added.keep[..12]
+                .iter()
+                .all(|k| k == &vec![(0usize, 79usize)]),
+            "the straight descent must rescue every old climb"
+        );
+
+        // The rescuer leaves the membership: the verdict it settled must not
+        // outlive it.
+        let without = as_pool(&tracks[..12]);
+        let dropped = build_coverage_grid(&without, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        assert_eq!(dropped.keep, cold_keep(&without));
+        assert!(dropped.keep.iter().all(|k| k != &vec![(0usize, 79usize)]));
+    }
+
+    #[test]
+    fn a_bridge_merging_two_warm_clusters_rescues_as_a_cold_pass_does() {
+        // Two groups of climbs on one slope, one above the other, each folded
+        // warm on its own; then one straight descent of the whole slope joins
+        // them.
+        let below = climbs_up_one_line("below", 6, 0);
+        let above = climbs_up_one_line("above", 6, 80);
+        let mut leaves = LeafMemos::default();
+        build_coverage_grid(
+            &as_pool(&below),
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut leaves,
+        );
+        build_coverage_grid(
+            &as_pool(&above),
+            &[],
+            100.0,
+            &Tunables::DEFAULT,
+            &mut leaves,
+        );
+
+        let mut bridge: Vec<GpsPoint> = (0..160)
+            .map(|i| GpsPoint::with_elevation(46.0 + 9.0e-5 * i as f64, 7.0, 5.0 * i as f64))
+            .collect();
+        bridge.reverse();
+        let mut merged = below.clone();
+        merged.extend(above.iter().cloned());
+        merged.push(("bridge".to_string(), bridge));
+        let pool = as_pool(&merged);
+        let warm = build_coverage_grid(&pool, &[], 100.0, &Tunables::DEFAULT, &mut leaves);
+        let cold = cold_keep(&pool);
+        assert_eq!(warm.keep, cold);
+        assert!(
+            cold[..12].iter().all(|k| k == &vec![(0usize, 79usize)]),
+            "the bridge must rescue both groups, or the comparison proves nothing"
         );
     }
 
@@ -9688,14 +10335,13 @@ mod seam_tests {
             panic!("one clip, one record, got {}", records.len());
         };
         let BoundaryReason::SeamClip {
-            section_id,
             clipped_metres,
             kept_metres,
         } = &record.reason
         else {
             panic!("the seam pass records a SeamClip, got {:?}", record.reason);
         };
-        assert_eq!(section_id, "s_quiet");
+        assert_eq!(record.section_ids, ["s_quiet"]);
         // The 200 m lane plus the 31 m jump onto the diverging leg.
         assert!(
             (225.0..=237.0).contains(clipped_metres),
@@ -10361,6 +11007,311 @@ mod a_memo_sweep {
             "folded {} sections, cold {}",
             catalogue.len(),
             cold.sections.len()
+        );
+    }
+}
+
+/// Scenario: a candidate rendered last fold gains the portions of a ride
+/// routed this fold, so its render memo misses on the grown portion set.
+///
+/// Expected behaviour: the render raises the parent's per-sample support by
+/// the routed tracks alone and returns the rows a full scan returns, bit for
+/// bit, at a cost that scales with the new portions rather than the square of
+/// the candidate.
+#[cfg(all(test, feature = "synthetic"))]
+mod a_grown_render {
+    use super::*;
+
+    const LAT: f64 = 46.0;
+    const CELL: f64 = 100.0;
+
+    /// A street east from the origin, a point every 10 m, `north` metres off
+    /// the centre line, with a detour `away` metres north between `from` and
+    /// `to` metres along.
+    fn street(len_m: f64, north: f64, detour: Option<(f64, f64, f64)>) -> Vec<GpsPoint> {
+        (0..=(len_m / 10.0) as usize)
+            .map(|i| {
+                let x = i as f64 * 10.0;
+                let off = match detour {
+                    Some((from, to, away)) if x >= from && x <= to => away,
+                    _ => 0.0,
+                };
+                GpsPoint::new(
+                    LAT + (north + off) / 111_132.0,
+                    7.0 + x / (111_320.0 * LAT.to_radians().cos()),
+                )
+            })
+            .collect()
+    }
+
+    fn whole(tracks: &[Vec<GpsPoint>], ts: std::ops::Range<usize>) -> Vec<Portion> {
+        ts.map(|t| (t, 0, tracks[t].len(), 0.0)).collect()
+    }
+
+    /// The child's render derived from the parent's kept support, and the
+    /// same render with no support at hand.
+    fn grown(
+        tracks: &[Vec<GpsPoint>],
+        parent: &[Portion],
+        added: &[Portion],
+    ) -> (RenderLeaf, RenderLeaf) {
+        let views: Vec<(&str, &[GpsPoint])> =
+            tracks.iter().map(|t| ("ride", t.as_slice())).collect();
+        let nums: Vec<u32> = (0..tracks.len() as u32).collect();
+        let none = vec![false; tracks.len()];
+        let mut routed = none.clone();
+        for p in added {
+            routed[p.0] = true;
+        }
+        let mut memo = SupportMemo::default();
+        let before = render_leaf(
+            parent,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &memo,
+            &none,
+            LAT,
+            CELL,
+        );
+        memo.keep(render_key(parent, &nums, LAT, CELL), before.support);
+        memo.next_fold();
+        let child: Vec<Portion> = parent.iter().chain(added).copied().collect();
+        let derived = render_leaf(
+            &child,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &memo,
+            &routed,
+            LAT,
+            CELL,
+        );
+        let full = render_leaf(
+            &child,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &SupportMemo::default(),
+            &routed,
+            LAT,
+            CELL,
+        );
+        (derived, full)
+    }
+
+    fn assert_same(derived: &RenderLeaf, full: &RenderLeaf) {
+        let bits = |l: &RenderLeaf| -> Vec<(usize, usize, u64, u64)> {
+            l.rows
+                .iter()
+                .map(|r| (r.1, r.2, r.3.to_bits(), r.4.to_bits()))
+                .collect()
+        };
+        assert_eq!(
+            bits(derived),
+            bits(full),
+            "derived rows differ from the full scan"
+        );
+        assert_eq!(
+            derived.support, full.support,
+            "derived support differs from the full scan"
+        );
+    }
+
+    /// Four rides on one street, the last with a 200 m detour 40 m north, so
+    /// the detour reads as a minority run.
+    fn four_with_a_detour() -> Vec<Vec<GpsPoint>> {
+        vec![
+            street(1000.0, 0.0, None),
+            street(1000.0, 3.0, None),
+            street(1000.0, -3.0, None),
+            street(1000.0, 1.5, Some((300.0, 500.0, 40.0))),
+        ]
+    }
+
+    #[test]
+    fn a_new_track_with_two_passes_derives_the_full_scan_rows() {
+        let mut tracks = four_with_a_detour();
+        let mut there_back = street(1000.0, 2.0, Some((300.0, 500.0, 40.0)));
+        let turn = there_back.len();
+        there_back.extend(street(1000.0, -2.0, None).into_iter().rev());
+        tracks.push(there_back);
+        let added = [(4, 0, turn, 0.0), (4, turn, tracks[4].len(), 0.0)];
+        let (derived, full) = grown(&tracks, &whole(&tracks, 0..4), &added);
+        assert!(
+            full.rows.iter().any(|r| r.4 > 0.0),
+            "the detour must read as a run"
+        );
+        assert_same(&derived, &full);
+        assert!(
+            derived.tests < full.tests,
+            "the derived render must test fewer points"
+        );
+    }
+
+    #[test]
+    fn a_new_track_far_from_every_sample_derives_the_full_scan_rows() {
+        let mut tracks = four_with_a_detour();
+        tracks.push(street(1000.0, 500.0, None));
+        let added = whole(&tracks, 4..5);
+        let (derived, full) = grown(&tracks, &whole(&tracks, 0..4), &added);
+        assert_same(&derived, &full);
+    }
+
+    #[test]
+    fn contributors_crossing_the_floor_of_three_derive_the_full_scan_rows() {
+        // Two rides render no run at all; the third lifts the candidate to
+        // the floor and the detour starts to count.
+        let tracks = vec![
+            street(1000.0, 0.0, None),
+            street(1000.0, 1.5, Some((300.0, 500.0, 40.0))),
+            street(1000.0, -3.0, None),
+        ];
+        let (before, _) = grown(&tracks[..2], &whole(&tracks, 0..1), &whole(&tracks, 1..2));
+        assert!(
+            before.rows.iter().all(|r| r.4 == 0.0),
+            "under the floor, no run"
+        );
+        let (derived, full) = grown(&tracks, &whole(&tracks, 0..2), &whole(&tracks, 2..3));
+        assert!(
+            full.rows.iter().any(|r| r.4 > 0.0),
+            "at the floor the detour reads as a run"
+        );
+        assert_same(&derived, &full);
+    }
+
+    #[test]
+    fn a_parent_with_no_kept_support_falls_back_to_the_full_scan() {
+        let mut tracks = four_with_a_detour();
+        tracks.push(street(1000.0, 2.0, None));
+        let views: Vec<(&str, &[GpsPoint])> =
+            tracks.iter().map(|t| ("ride", t.as_slice())).collect();
+        let nums: Vec<u32> = (0..tracks.len() as u32).collect();
+        let mut routed = vec![false; tracks.len()];
+        routed[4] = true;
+        let mut memo = SupportMemo::default();
+        // Kept support for another portion set is no parent of this one.
+        let other = whole(&tracks, 0..3);
+        let kept = render_leaf(
+            &other,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &memo,
+            &routed,
+            LAT,
+            CELL,
+        );
+        memo.keep(render_key(&other, &nums, LAT, CELL), kept.support);
+        let child = whole(&tracks, 0..5);
+        let fallen = render_leaf(
+            &child,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &memo,
+            &routed,
+            LAT,
+            CELL,
+        );
+        let full = render_leaf(
+            &child,
+            &views,
+            &nums,
+            &HashMap::new(),
+            &SupportMemo::default(),
+            &routed,
+            LAT,
+            CELL,
+        );
+        assert_same(&fallen, &full);
+        assert_eq!(
+            fallen.tests, full.tests,
+            "with no parent every pass scans the whole index"
+        );
+    }
+
+    #[test]
+    fn a_hundred_pass_candidate_gaining_one_pays_for_the_new_pass_only() {
+        // A hundred rides on one street, each a metre or so off the next, so
+        // every pass is within reach of every sample: the full scan's n².
+        let mut tracks: Vec<Vec<GpsPoint>> = (0..101)
+            .map(|i| street(1000.0, (i % 11) as f64 - 5.0, None))
+            .collect();
+        tracks[37] = street(1000.0, 1.0, Some((300.0, 500.0, 40.0)));
+        let (derived, full) = grown(&tracks, &whole(&tracks, 0..100), &whole(&tracks, 100..101));
+        assert_same(&derived, &full);
+        // The derived render tests each old sample against the one new pass
+        // and the new pass's samples against all 101, about 2/101 of the
+        // full scan, which tests every sample against all 101.
+        assert!(
+            derived.tests * 25 < full.tests,
+            "derived {} tests against the full scan's {}",
+            derived.tests,
+            full.tests
+        );
+    }
+
+    #[test]
+    fn a_fold_of_one_ride_pays_for_its_portions_not_the_candidate_square() {
+        let rides: Vec<(String, Vec<GpsPoint>)> = (0..40)
+            .map(|i| {
+                (
+                    format!("ride{i:02}"),
+                    street(2000.0, (i % 9) as f64 - 4.0, None),
+                )
+            })
+            .collect();
+        let sports: HashMap<String, String> = rides
+            .iter()
+            .map(|(id, _)| (id.clone(), "Ride".into()))
+            .collect();
+        let starts: HashMap<String, i64> = rides
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (id.clone(), 1_700_000_000 + i as i64 * 86_400))
+            .collect();
+        let config = SectionConfig::default();
+        let policy = SectionUpdatePolicy::default();
+        let fold = |cache: &mut SectionEvidenceCache,
+                    existing: &[FrequentSection],
+                    pool: &[(String, Vec<GpsPoint>)],
+                    ids: &[&str]| {
+            detect_sections_incremental_dated(
+                cache,
+                existing,
+                pool,
+                ids,
+                &[],
+                &sports,
+                &starts,
+                &config,
+                &policy,
+            )
+            .catalogue
+        };
+
+        let mut warm = SectionEvidenceCache::new();
+        let ids: Vec<&str> = rides[..39].iter().map(|(id, _)| id.as_str()).collect();
+        let catalogue = fold(&mut warm, &[], &rides[..39], &ids);
+        assert!(!catalogue.is_empty(), "the street must emit a section");
+        let before = warm.render_tests();
+        let folded = fold(&mut warm, &catalogue, &rides, &["ride39"]);
+        let one_ride = warm.render_tests() - before;
+
+        let mut cold = SectionEvidenceCache::new();
+        let all: Vec<&str> = rides.iter().map(|(id, _)| id.as_str()).collect();
+        let batch = fold(&mut cold, &[], &rides, &all);
+        let enc = |s: &[FrequentSection]| serde_json::to_string(s).unwrap();
+        assert_eq!(
+            enc(&folded),
+            enc(&batch),
+            "the fold must cut what the batch cuts"
+        );
+        assert!(
+            one_ride * 5 < cold.render_tests(),
+            "one ride's render made {one_ride} tests against a cold render's {}",
+            cold.render_tests()
         );
     }
 }

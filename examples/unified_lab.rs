@@ -573,29 +573,16 @@ fn write_sections_table(
     min_activities: u32,
 ) {
     let mut clipped: HashMap<&str, f64> = HashMap::new();
-    let mut drawn_empty: HashMap<&str, u32> = HashMap::new();
     for r in boundaries {
-        match &r.reason {
-            BoundaryReason::SeamClip {
-                section_id,
-                clipped_metres,
-                ..
-            } => {
-                *clipped.entry(section_id.as_str()).or_default() += clipped_metres;
+        if let BoundaryReason::SeamClip { clipped_metres, .. } = &r.reason {
+            for id in &r.section_ids {
+                *clipped.entry(id.as_str()).or_default() += clipped_metres;
             }
-            BoundaryReason::DrawnEmpty {
-                section_id,
-                contributors,
-            } => {
-                drawn_empty.insert(section_id.as_str(), *contributors);
-            }
-            _ => {}
         }
     }
     let mut out = String::from(
         "id\tmetres\tactivities\tvisits\trequired_visits\trequired_visits_base\t\
-         occasion_days\tactivity_floor\tsupport_floor\tsupport_floor_base\tseam_clipped_m\t\
-         drawn_empty\trep\n",
+         occasion_days\tactivity_floor\tsupport_floor\tsupport_floor_base\tseam_clipped_m\trep\n",
     );
     for s in sections {
         let mut days: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -615,7 +602,7 @@ fn write_sections_table(
         let support_floor = occasion_days as u32 >= required.max(min_activities);
         let support_floor_base = occasion_days as u32 >= required_base.max(min_activities);
         out.push_str(&format!(
-            "{}\t{:.0}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\t{}\n",
+            "{}\t{:.0}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{}\n",
             s.id,
             s.distance_meters,
             s.activity_ids.len(),
@@ -627,7 +614,6 @@ fn write_sections_table(
             u8::from(support_floor),
             u8::from(support_floor_base),
             clipped.get(s.id.as_str()).copied().unwrap_or(0.0),
-            u8::from(drawn_empty.contains_key(s.id.as_str())),
             s.representative_activity_id,
         ));
     }
@@ -1393,13 +1379,15 @@ fn main() {
                         let feats: Vec<serde_json::Value> = brs
                             .iter()
                             .map(|r| {
+                                let mut properties = serde_json::to_value(&r.reason).unwrap();
+                                properties["section_ids"] = serde_json::json!(r.section_ids);
                                 serde_json::json!({
                                     "type": "Feature",
                                     "geometry": {
                                         "type": "Point",
                                         "coordinates": [r.longitude, r.latitude],
                                     },
-                                    "properties": serde_json::to_value(&r.reason).unwrap(),
+                                    "properties": properties,
                                 })
                             })
                             .collect();

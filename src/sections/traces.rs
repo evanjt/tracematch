@@ -31,10 +31,11 @@ pub fn extract_activity_passes(
     let longitude_pad =
         threshold_m / (111_000.0 * section_polyline[0].latitude.to_radians().cos().abs()).max(1.0);
 
-    // Degree-space bounding box of the polyline, padded by the threshold. The
-    // near-predicate below is squared-degree distance, so a track point
-    // outside this box cannot be near any polyline point: four comparisons
-    // answer most points of a long track without touching the R-tree.
+    // Degree-space bounding box of the polyline, padded by the threshold at
+    // the latitude the index projects with. The near-predicate below is that
+    // projected distance in metres, so a track point outside this box cannot
+    // be near any polyline point: four comparisons answer most points of a
+    // long track without touching the R-tree.
     let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
     for p in section_polyline {
         bb.0 = bb.0.min(p.latitude);

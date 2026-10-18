@@ -34,12 +34,13 @@ fn reason_keys(reason: BoundaryReason) -> Vec<String> {
     let record = BoundaryRecord {
         latitude: 0.0,
         longitude: 0.0,
+        section_ids: vec!["s".into()],
         reason,
     };
     let value: Value = serde_json::to_value(&record).expect("BoundaryRecord serialises");
     assert_eq!(
         keys(&value),
-        vec!["latitude", "longitude", "reason"],
+        vec!["latitude", "longitude", "reason", "section_ids"],
         "BoundaryRecord's own keys"
     );
     keys(&value["reason"])
@@ -209,18 +210,14 @@ fn boundary_reason_payloads_stay_snake_case() {
     );
     assert_eq!(
         reason_keys(BoundaryReason::SeamClip {
-            section_id: "s".into(),
             clipped_metres: 1.0,
             kept_metres: 1.0,
         }),
-        vec!["clipped_metres", "kept_metres", "kind", "section_id"]
+        vec!["clipped_metres", "kept_metres", "kind"]
     );
     assert_eq!(
-        reason_keys(BoundaryReason::DrawnEmpty {
-            section_id: "s".into(),
-            contributors: 1,
-        }),
-        vec!["contributors", "kind", "section_id"]
+        reason_keys(BoundaryReason::DrawnEmpty { contributors: 1 }),
+        vec!["contributors", "kind"]
     );
 }
 
@@ -231,6 +228,7 @@ fn boundary_reason_tags_match_the_sites_switch() {
         let record = BoundaryRecord {
             latitude: 0.0,
             longitude: 0.0,
+            section_ids: Vec::new(),
             reason,
         };
         serde_json::to_value(&record).unwrap()["reason"]["kind"]
@@ -275,17 +273,13 @@ fn boundary_reason_tags_match_the_sites_switch() {
     );
     assert_eq!(
         tag(BoundaryReason::SeamClip {
-            section_id: String::new(),
             clipped_metres: 0.0,
             kept_metres: 0.0,
         }),
         "seam_clip"
     );
     assert_eq!(
-        tag(BoundaryReason::DrawnEmpty {
-            section_id: String::new(),
-            contributors: 0,
-        }),
+        tag(BoundaryReason::DrawnEmpty { contributors: 0 }),
         "drawn_empty"
     );
 }
