@@ -548,3 +548,52 @@ fn a_coarsely_sampled_corridor_is_counted_by_its_outings() {
     );
     assert_catalogue_invariants(&tracks, &out.sections);
 }
+
+/// Two outings a few metres apart, one starting and ending a little
+/// short of the other, found a section that both of them count on as a
+/// full traversal.
+#[test]
+fn two_close_passes_that_found_a_section_both_count_on_it() {
+    let hike = shapes::track(&shapes::wobble(
+        &shapes::densify(&[(0.0, 0.0), (1000.0, 0.0)]),
+        shapes::HUMAN_WOBBLE_M,
+        0.3,
+    ));
+    let run = shapes::track(&shapes::wobble(
+        &shapes::densify(&[(-30.0, 6.0), (1020.0, 6.0)]),
+        shapes::HUMAN_WOBBLE_M,
+        1.9,
+    ));
+    let tracks = vec![("hike".to_string(), hike), ("run".to_string(), run)];
+    let out = detect_dated(&tracks, &[("hike", 100), ("run", 114)]);
+    assert_eq!(out.sections.len(), 1, "{:?}", out.boundaries);
+    let s = &out.sections[0];
+    let mut ids: Vec<&str> = s
+        .activity_portions
+        .iter()
+        .map(|p| p.activity_id.as_str())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["hike", "run"], "both founders must count on it");
+    assert_eq!(s.visit_count, 2);
+}
+
+#[test]
+fn two_offset_passes_sharing_part_of_their_length_both_count_on_the_shared_line() {
+    let hike = shapes::track(&shapes::wobble(
+        &shapes::densify(&[(0.0, 0.0), (1000.0, 0.0)]),
+        shapes::HUMAN_WOBBLE_M,
+        0.3,
+    ));
+    let run = shapes::track(&shapes::wobble(
+        &shapes::densify(&[(150.0, 18.0), (1300.0, 18.0)]),
+        shapes::HUMAN_WOBBLE_M,
+        1.9,
+    ));
+    let tracks = vec![("hike".to_string(), hike), ("run".to_string(), run)];
+    let out = detect_dated(&tracks, &[("hike", 100), ("run", 114)]);
+    assert_eq!(out.sections.len(), 1, "{:?}", out.boundaries);
+    let s = &out.sections[0];
+    assert_eq!(s.visit_count, 2);
+    assert_eq!(s.activity_portions.len(), 2);
+}
