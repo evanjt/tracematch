@@ -522,40 +522,29 @@ fn a_drawn_population_on_two_days_is_kept() {
 }
 
 #[test]
-fn a_drawn_line_no_one_passes_is_recorded_and_dropped() {
+fn a_coarsely_sampled_corridor_is_counted_by_its_outings() {
     // Six outings along one 1000 m corridor, each recorded a point every
-    // 250 m. The coverage grid bridges the gaps, so the corridor clusters
-    // and draws a line, but a pass is counted on the cells a track's own
-    // points fall in and none of them reaches the majority of the drawn
-    // line. Nothing traverses what would be shown, so nothing is shown.
+    // 250 m, wider than a partition cell. A pass is judged on the ground
+    // between its points, not on the cells they land in, so every outing
+    // runs the drawn line end to end and counts on it, and no redraw
+    // comes up empty.
     let tracks = shapes::coarse_sampled_corridor(6);
     let out = detect(&tracks);
 
-    let rec = out
-        .boundaries
-        .iter()
-        .find(|r| matches!(r.reason, BoundaryReason::DrawnEmpty { .. }))
-        .unwrap_or_else(|| panic!("no drawn-empty record: {:?}", out.boundaries));
-    let BoundaryReason::DrawnEmpty { contributors } = &rec.reason else {
-        unreachable!()
-    };
     assert!(
-        *contributors >= SectionConfig::default().min_activities,
-        "the record must name the cluster the redraw emptied, not an already-thin one"
-    );
-    assert!(
-        rec.section_ids.is_empty(),
-        "the emptied candidate never reaches the catalogue, so the record names no section: {:?}",
-        rec.section_ids
-    );
-    assert!(
-        out.sections.iter().all(|s| !s.activity_portions.is_empty()),
-        "no section may be emitted with no traversal: {:?}",
-        out.sections
+        !out.boundaries
             .iter()
-            .filter(|s| s.activity_portions.is_empty())
-            .map(|s| &s.id)
-            .collect::<Vec<_>>()
+            .any(|r| matches!(r.reason, BoundaryReason::DrawnEmpty { .. })),
+        "{:?}",
+        out.boundaries
+    );
+    assert_eq!(out.sections.len(), 1, "{:?}", out.boundaries);
+    let mut members = out.sections[0].activity_ids.clone();
+    members.sort();
+    assert_eq!(
+        members.len(),
+        tracks.len(),
+        "every outing counts: {members:?}"
     );
     assert_catalogue_invariants(&tracks, &out.sections);
 }

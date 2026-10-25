@@ -38,7 +38,26 @@ fn endpoints_match(a: &FrequentSection, b: &FrequentSection, tol_m: f64) -> bool
 /// Returns the final result plus the catalogue as it stood when the pins
 /// were taken.
 fn drip_with_pins(pin_after: usize) -> (tracematch::IncrementalResult, Vec<FrequentSection>) {
-    let tracks = shapes::late_fork(6, 6);
+    drip_tracks_with_pins(shapes::late_fork(6, 6), pin_after)
+}
+
+/// The late-fork corpus, then four more outings straight through the
+/// junction, each running the whole trunk.
+fn late_fork_then_through() -> Vec<(String, Vec<GpsPoint>)> {
+    let mut tracks = shapes::late_fork(6, 6);
+    tracks.extend(
+        shapes::late_fork(16, 0)
+            .into_iter()
+            .skip(12)
+            .map(|(id, pts)| (id.replace("early", "through"), pts)),
+    );
+    tracks
+}
+
+fn drip_tracks_with_pins(
+    tracks: Vec<(String, Vec<GpsPoint>)>,
+    pin_after: usize,
+) -> (tracematch::IncrementalResult, Vec<FrequentSection>) {
     let sports: HashMap<String, String> = shapes::pooled(&tracks);
     let cfg = SectionConfig::default();
     let mut cache = SectionEvidenceCache::new();
@@ -238,10 +257,10 @@ fn unpin_releases_the_withheld_recut() {
 
 #[test]
 fn pinned_evidence_grows_append_only_on_frozen_geometry() {
-    // Branch outings still traverse the trunk's first kilometre, so the
-    // pinned trunk's traversal evidence must keep rising while its
-    // geometry, id, and name stay frozen.
-    let (res, pinned) = drip_with_pins(6);
+    // Outings arriving after the pin that run the whole trunk are
+    // traversals of it, so the pinned trunk's evidence must keep rising
+    // while its geometry, id, and name stay frozen.
+    let (res, pinned) = drip_tracks_with_pins(late_fork_then_through(), 6);
     let trunk = &pinned[0];
     let kept = res
         .catalogue
@@ -279,6 +298,26 @@ fn pinned_evidence_grows_append_only_on_frozen_geometry() {
             "grafted portion must be a real range"
         );
     }
+}
+
+#[test]
+fn partial_passes_add_no_evidence_to_a_pinned_trunk() {
+    // The branch outings run only the trunk's first kilometre before
+    // peeling off. A pass over part of a section is no traversal of it,
+    // so none of them joins the pinned trunk or adds to its count.
+    let (res, pinned) = drip_with_pins(6);
+    let trunk = &pinned[0];
+    let kept = res
+        .catalogue
+        .iter()
+        .find(|s| s.id == trunk.id)
+        .expect("pinned section survives");
+    assert_eq!(kept.visit_count, trunk.visit_count);
+    assert!(
+        kept.activity_ids.iter().all(|a| a.starts_with("early_")),
+        "no branch outing may count on the trunk: {:?}",
+        kept.activity_ids
+    );
 }
 
 #[test]

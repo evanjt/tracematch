@@ -16,8 +16,9 @@ use rayon::prelude::*;
 /// same stretch is split across nodes and a track can run the line without
 /// belonging to the node it came from. Counting from the cluster loses
 /// those traversals; counting from the line asks everyone. The matcher is
-/// [`LineMatcher`]: a pass must cover the majority of the line in one
-/// contiguous run, so a brush or a parallel variant never counts.
+/// [`LineMatcher`]: a pass must run the entire line within
+/// [`GROUND_TOL_M`](super::GROUND_TOL_M) of it, so a brush, a parallel
+/// path or a pass over part of the line never counts.
 pub fn compute_activity_portions(
     representative_polyline: &[GpsPoint],
     all_tracks: &std::collections::HashMap<&str, &[GpsPoint]>,
@@ -158,7 +159,7 @@ impl<'a> PreparedLine<'a> {
     }
 
     /// As [`Self::new`], counting a pass that runs up to `lateral_m` metres
-    /// (rounded up to whole cells) beside the line.
+    /// beyond [`GROUND_TOL_M`](super::GROUND_TOL_M) beside the line.
     pub fn with_lateral_tolerance(
         line: &'a [GpsPoint],
         config: &SectionConfig,
@@ -169,7 +170,14 @@ impl<'a> PreparedLine<'a> {
         }
         Some(Self {
             line,
-            bounds: polyline_bounds(line, config.proximity_threshold.max(lateral_m)),
+            // Never narrower than the matcher's tolerance, so the box
+            // refuses no ride the matcher would count.
+            bounds: polyline_bounds(
+                line,
+                config
+                    .proximity_threshold
+                    .max(super::GROUND_TOL_M + lateral_m.max(0.0)),
+            ),
             matcher: LineMatcher::with_lateral_tolerance(line, config, lateral_m),
             ref_tree: build_rtree(line),
         })
@@ -184,9 +192,9 @@ impl<'a> PreparedLine<'a> {
     }
 }
 
-/// The cell a pass is scored in: a track counts on a line when its points
-/// share the line's cells, so this is the attach bar the proximity
-/// setting scales.
+/// The cell a pass is looked for in: the matcher finds candidate passes
+/// in the line's cells, which the proximity setting scales, and judges
+/// each on the ground within [`GROUND_TOL_M`](super::GROUND_TOL_M).
 pub fn line_match_cell_m(config: &SectionConfig) -> f64 {
     super::unified::cluster_cell_size(config)
 }
@@ -920,6 +928,133 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Points every 10 m along `bearing_deg` from the origin, from `from_m`
+    /// to `to_m` of arc, `offset_m` to the right of the bearing.
+    fn bearing_line(bearing_deg: f64, from_m: f64, to_m: f64, offset_m: f64) -> Vec<GpsPoint> {
+        let (lat0, lng0) = (46.2_f64, 7.3_f64);
+        let m_lat = 111_320.0;
+        let m_lng = m_lat * lat0.to_radians().cos();
+        let (sin, cos) = bearing_deg.to_radians().sin_cos();
+        let steps = ((to_m - from_m) / 10.0).round() as i64;
+        (0..=steps)
+            .map(|k| {
+                let along = from_m + (to_m - from_m) * k as f64 / steps as f64;
+                let north = along * cos - offset_m * sin;
+                let east = along * sin + offset_m * cos;
+                GpsPoint::new(lat0 + north / m_lat, lng0 + east / m_lng)
+            })
+            .collect()
+    }
+
+    /// Scenario: a ride runs the far bank of a river, parallel to a section
+    /// line and 60 to 100 m off it, the whole way along.
+    /// Expected behaviour: no traversal, whatever the bearing, since every
+    /// point lies beyond `GROUND_TOL_M` of the line.
+    #[test]
+    fn a_parallel_path_off_the_line_is_no_traversal() {
+        let config = SectionConfig::default();
+        for bearing in [0.0, 37.0, 90.0, 141.0, 233.0] {
+            let line = bearing_line(bearing, 0.0, 1200.0, 0.0);
+            for offset in [60.0, 80.0, 100.0] {
+                for side in [1.0, -1.0] {
+                    let ride = bearing_line(bearing, -300.0, 1500.0, side * offset);
+                    let passes = track_portions("bank", &ride, &line, &config);
+                    assert!(
+                        passes.is_empty(),
+                        "a ride {offset} m off a line at bearing {bearing} counted {passes:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Scenario: a ride runs a 1.2 km line end to end and carries on along
+    /// the same road for another 80% of its length, half before and half
+    /// after.
+    /// Expected behaviour: one traversal, cut at the points nearest the
+    /// line's two ends, so its distance is the section's and not the ride's.
+    #[test]
+    fn a_pass_overrunning_the_line_is_cut_to_its_ends() {
+        let config = SectionConfig::default();
+        let line = bearing_line(20.0, 0.0, 1200.0, 0.0);
+        let ride = bearing_line(20.0, -480.0, 1680.0, 0.0);
+        let passes = track_portions("long", &ride, &line, &config);
+        assert_eq!(passes.len(), 1, "one traversal, got {passes:?}");
+        let p = &passes[0];
+        assert!(
+            (p.distance_meters - 1200.0).abs() <= 10.0,
+            "the traversal is the line's length, got {} m",
+            p.distance_meters
+        );
+        let (s, e) = (p.start_index as usize, p.end_index as usize);
+        assert!(haversine_distance(&ride[s], &line[0]) <= 10.0);
+        assert!(haversine_distance(&ride[e - 1], &line[line.len() - 1]) <= 10.0);
+
+        let reverse: Vec<GpsPoint> = ride.iter().rev().copied().collect();
+        let back = track_portions("long-back", &reverse, &line, &config);
+        assert_eq!(back.len(), 1, "one reverse traversal, got {back:?}");
+        assert!((back[0].distance_meters - 1200.0).abs() <= 10.0);
+        assert_eq!(back[0].direction, Direction::Reverse);
+    }
+
+    /// Scenario: a ride runs the first half of a line cleanly, on it, and
+    /// turns off; another runs the last 60% of it.
+    /// Expected behaviour: neither is a traversal, since a pass counts only
+    /// when it covers the entire section.
+    #[test]
+    fn a_clean_pass_over_part_of_the_line_is_no_traversal() {
+        let config = SectionConfig::default();
+        let line = bearing_line(110.0, 0.0, 1200.0, 0.0);
+        let first_half = bearing_line(110.0, -200.0, 600.0, 0.0);
+        let last_part = bearing_line(110.0, 480.0, 1400.0, 0.0);
+        assert!(track_portions("half", &first_half, &line, &config).is_empty());
+        assert!(track_portions("part", &last_part, &line, &config).is_empty());
+    }
+
+    /// Scenario: GPS at a section's ends: one ride starts 30 m into the
+    /// line, another stops 30 m short of its end.
+    /// Expected behaviour: both count, since each line end lies within
+    /// `GROUND_TOL_M` of the ride; one that starts 120 m in does not.
+    #[test]
+    fn a_pass_starting_short_of_an_end_still_counts() {
+        let config = SectionConfig::default();
+        let line = bearing_line(300.0, 0.0, 1200.0, 0.0);
+        let late_start = bearing_line(300.0, 30.0, 1400.0, 0.0);
+        let early_stop = bearing_line(300.0, -200.0, 1170.0, 0.0);
+        let too_late = bearing_line(300.0, 120.0, 1400.0, 0.0);
+        assert_eq!(track_portions("late", &late_start, &line, &config).len(), 1);
+        assert_eq!(
+            track_portions("early", &early_stop, &line, &config).len(),
+            1
+        );
+        assert!(track_portions("too-late", &too_late, &line, &config).is_empty());
+    }
+
+    /// Scenario: a ride runs a line up and back three times, turning at
+    /// each of its ends with no ground beyond them.
+    /// Expected behaviour: six traversals, one per leg, each from end to
+    /// end, since a return leg reaches the end it turned at.
+    #[test]
+    fn a_return_from_a_turn_at_the_line_end_counts() {
+        let config = SectionConfig::default();
+        let line = bearing_line(0.0, 0.0, 800.0, 0.0);
+        let back: Vec<GpsPoint> = line.iter().rev().copied().collect();
+        let ride: Vec<GpsPoint> = (0..6)
+            .flat_map(|leg| {
+                if leg % 2 == 0 {
+                    line.clone()
+                } else {
+                    back.clone()
+                }
+            })
+            .collect();
+        let passes = track_portions("repeats", &ride, &line, &config);
+        assert_eq!(passes.len(), 6, "{passes:?}");
+        for p in &passes {
+            assert!((p.distance_meters - 800.0).abs() <= 10.0, "{p:?}");
         }
     }
 

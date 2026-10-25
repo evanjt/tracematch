@@ -388,12 +388,13 @@ fn usage_cliff_ends_the_busy_corridor() {
 #[test]
 fn scattered_traffic_is_still_one_corridor() {
     // Scenario: twelve outings ride one corridor, each drifting across
-    // a wide lane band, so any single evidence cell records only the
-    // subset whose lane crossed it. The travelling population is the
-    // same everywhere along the corridor.
-    // Expected behaviour: per-cell count noise is not a usage boundary.
-    // The corridor surfaces whole with an honest count instead of
-    // shattering into fragments that all die below the support floor.
+    // a lane band 110 m wide, so any single evidence cell records only
+    // the subset whose lane crossed it, and two outings can run further
+    // apart than the ground tolerance.
+    // Expected behaviour: per-cell count noise is not a usage boundary,
+    // so the corridor ground stays covered by a section. A member counts
+    // only where its pass stays on the drawn line end to end, so the
+    // visit count is the outings that rode that lane, not the band.
     let tracks = shapes::scattered_corridor(12);
     let sections = detect(&tracks);
     dump(&sections);
@@ -405,12 +406,34 @@ fn scattered_traffic_is_still_one_corridor() {
         "scattered corridor ground must survive whole (coverage {:.0}%)",
         coverage(&spine, &sections, 90.0) * 100.0
     );
-    let busiest = sections.iter().map(|s| s.visit_count).max().unwrap_or(0);
-    assert!(
-        busiest >= 9,
-        "the corridor's population must be counted, not one cell's sample (max {} visits)",
-        busiest
-    );
+    let tol = tracematch::sections::GROUND_TOL_M;
+    for s in &sections {
+        for p in &s.activity_portions {
+            let track = &tracks
+                .iter()
+                .find(|(id, _)| *id == p.activity_id)
+                .unwrap()
+                .1;
+            let pass = &track[p.start_index as usize..p.end_index as usize];
+            assert!(
+                s.polyline.iter().all(|q| min_dist(q, pass) <= tol),
+                "{}: {}'s pass leaves part of the line unridden",
+                s.id,
+                p.activity_id
+            );
+            let off = pass
+                .iter()
+                .filter(|q| min_dist(q, &s.polyline) > tol)
+                .count();
+            assert!(
+                off <= tracematch::sections::TRACK_GAP_POINTS,
+                "{}: {} points of {}'s pass run off the line",
+                s.id,
+                off,
+                p.activity_id
+            );
+        }
+    }
 }
 
 #[test]

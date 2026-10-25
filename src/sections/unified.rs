@@ -2640,20 +2640,31 @@ fn finish_pass(
 /// Pass matcher for a section's drawn line: the same cell-run and
 /// single-pass machinery detection uses, held to the line.
 ///
-/// A pass counts only when one contiguous run covers the majority of the
-/// line's cells (rule 9's bar, no constant of its own). Brushing an end,
-/// weaving nearby, or running a parallel variant never counts; a lap, a
-/// return leg, and an interval rep each count once.
+/// A pass counts only when it covers the entire line on the ground. Each
+/// single pass is cut to its runs of points within the tolerance of the
+/// line, [`GROUND_TOL_M`] plus any lateral tolerance, bridging
+/// [`TRACK_GAP_POINTS`](super::TRACK_GAP_POINTS) points beyond it. A run
+/// counts when every station of the line lies within that same tolerance
+/// of it: it reaches both ends, so GPS that starts or stops up to one
+/// tolerance short of an end still counts, and it runs between them. The
+/// run is then trimmed to its points nearest the line's two ends. A
+/// parallel path beyond the tolerance, a brush, and a clean pass over part
+/// of the line never count; a lap, a return leg, and an interval rep each
+/// count once.
 pub(super) struct LineMatcher {
     grid: CellGrid,
     pass_grid: CellGrid,
-    core: HashSet<Cell>,
-    /// The core grown by the lateral tolerance, in whole cells: where a
-    /// pass may begin and end, and how far from the line it may run.
-    reach: HashSet<Cell>,
-    reach_cells: i32,
+    /// The line's cells grown by the lateral tolerance and one ring of
+    /// jitter: where a candidate pass is looked for.
     dilated: HashSet<Cell>,
-    min_pass_m: f64,
+    /// The line's segments, asked whether a pass point is on the ground.
+    line_index: SegmentIndex,
+    /// The tolerance a pass runs within, and the cell of `line_index`.
+    tol_m: f64,
+    stations: Vec<GpsPoint>,
+    first: GpsPoint,
+    last: GpsPoint,
+    ref_lat: f64,
 }
 
 /// `cells` and every cell within `rings` cells of one, square rings.
@@ -2677,8 +2688,8 @@ impl LineMatcher {
         Self::with_lateral_tolerance(line, config, 0.0)
     }
 
-    /// `lateral_m` is how far a pass may run from the line and still
-    /// count, rounded up to whole cells. Zero is the detection bar.
+    /// `lateral_m` is how far beyond [`GROUND_TOL_M`] a pass may run from
+    /// the line and still count. Zero is the detection bar.
     pub(super) fn with_lateral_tolerance(
         line: &[GpsPoint],
         config: &SectionConfig,
@@ -2697,22 +2708,23 @@ impl LineMatcher {
                 core.extend([a, b]);
             }
         }
-        let reach_cells = (lateral_m.max(0.0) / cell_size).ceil() as i32;
-        let reach = grow_cells(&core, reach_cells);
-        // One ring of jitter tolerance mid-run, as portions_for grants.
-        let dilated = grow_cells(&reach, 1);
+        let tol_m = GROUND_TOL_M + lateral_m.max(0.0);
+        // The candidate search reaches past the tolerance by one ring of
+        // jitter, as portions_for grants, so the cut below decides.
+        let dilated = grow_cells(&core, (tol_m / cell_size).ceil() as i32 + 1);
         let pass_grid = CellGrid::new(cell_size / Tunables::DEFAULT.pass_subgrid, ref_lat);
+        let (_, station_ix) = line_stations(line);
+        let origin = GpsPoint::new(0.0, 0.0);
         Self {
             grid,
             pass_grid,
-            core,
-            reach,
-            reach_cells,
             dilated,
-            // The majority bar again, in metres: a line a couple of
-            // cells long degenerates to "touched one cell" on the cell
-            // count alone, and a doorstep GPS blip must not be a pass.
-            min_pass_m: 0.5 * crate::matching::calculate_route_distance(line),
+            line_index: SegmentIndex::new(line, ref_lat, tol_m),
+            tol_m,
+            stations: station_ix.iter().map(|&k| line[k]).collect(),
+            first: line.first().copied().unwrap_or(origin),
+            last: line.last().copied().unwrap_or(origin),
+            ref_lat,
         }
     }
 
@@ -2721,54 +2733,71 @@ impl LineMatcher {
     pub(super) fn passes(&self, track: &[GpsPoint]) -> Vec<(usize, usize)> {
         let tun = &Tunables::DEFAULT;
         let mut out = Vec::new();
-        if self.core.is_empty() {
+        if self.stations.is_empty() {
             return out;
         }
         for (run_s, run_e, _) in runs_in_cells(track, &self.dilated, &self.grid) {
-            let mut s = run_s;
-            let mut e = run_e;
-            let in_core = |p: &GpsPoint| {
-                self.reach
-                    .contains(&self.grid.cell_of(p.latitude, p.longitude))
-            };
-            while s < e && !in_core(&track[s]) {
-                s += 1;
-            }
-            while e > s && !in_core(&track[e - 1]) {
-                e -= 1;
-            }
-            if e <= s + 1 {
-                continue;
-            }
-            for (ps, pe) in simple_pass_ranges(&track[s..e], &self.pass_grid, tun) {
-                let (start, end) = (s + ps, s + pe);
-                if end <= start + 1 {
-                    continue;
-                }
-                let pass_cells: HashSet<Cell> = track[start..end]
-                    .iter()
-                    .map(|p| self.grid.cell_of(p.latitude, p.longitude))
-                    .collect();
-                // A core cell is covered when the pass has a cell within
-                // the lateral tolerance of it, so the count only rises
-                // with the tolerance.
-                let covered = if self.reach_cells == 0 {
-                    pass_cells.iter().filter(|c| self.core.contains(c)).count()
-                } else {
-                    grow_cells(&pass_cells, self.reach_cells)
-                        .iter()
-                        .filter(|c| self.core.contains(c))
-                        .count()
+            // The splitter cuts a turnaround once the return has re-entered
+            // ground the pass already covered, a few points past the turn.
+            // A pass straight after a counted one starts where that one was
+            // trimmed, so a return from a turn at the line's end still
+            // reaches that end.
+            let mut counted_to: Option<(usize, usize)> = None;
+            for (ps, pe) in simple_pass_ranges(&track[run_s..run_e], &self.pass_grid, tun) {
+                let (start, end) = (run_s + ps, run_s + pe);
+                let from = match counted_to {
+                    Some((cut, trimmed)) if cut == start => trimmed.min(start),
+                    _ => start,
                 };
-                if 2 * covered >= self.core.len()
-                    && crate::matching::calculate_route_distance(&track[start..end])
-                        >= self.min_pass_m
-                {
-                    out.push((start, end));
+                counted_to = None;
+                for (s, e) in self.ground_runs(track, from, end) {
+                    if self.covers_line(&track[s..e]) {
+                        let pass = self.trim_to_ends(track, s, e);
+                        out.push(pass);
+                        counted_to = Some((end, pass.1));
+                    }
                 }
             }
         }
         out
+    }
+
+    /// The runs of `track[start..end]` within the tolerance of the line.
+    fn ground_runs(&self, track: &[GpsPoint], start: usize, end: usize) -> Vec<(usize, usize)> {
+        ground_runs(&track[start..end], |p| self.line_index.near(p))
+            .into_iter()
+            .map(|(s, e)| (start + s, start + e))
+            .collect()
+    }
+
+    /// Whether every station of the line lies within the tolerance of the
+    /// run, so the run reaches both ends and runs between them.
+    fn covers_line(&self, run: &[GpsPoint]) -> bool {
+        let reach = RunReach::new(run, self.ref_lat, self.tol_m);
+        self.stations.iter().all(|p| reach.near(p))
+    }
+
+    /// `track[s..e]` trimmed to its points nearest the line's first and
+    /// last points. A closed line's two ends lie within [`GROUND_TOL_M`]
+    /// of each other, one place, so a lap keeps the run it came with.
+    fn trim_to_ends(&self, track: &[GpsPoint], s: usize, e: usize) -> (usize, usize) {
+        let nearest = |target: &GpsPoint| {
+            (s..e)
+                .min_by(|&a, &b| {
+                    let da = crate::geo_utils::haversine_distance(&track[a], target);
+                    let db = crate::geo_utils::haversine_distance(&track[b], target);
+                    da.total_cmp(&db)
+                })
+                .unwrap_or(s)
+        };
+        let (a, b) = (nearest(&self.first), nearest(&self.last));
+        let (lo, hi) = (a.min(b), a.max(b));
+        if hi == lo || crate::geo_utils::haversine_distance(&self.first, &self.last) <= GROUND_TOL_M
+        {
+            (s, e)
+        } else {
+            (lo, hi + 1)
+        }
     }
 }
 
@@ -3074,74 +3103,220 @@ fn has_support_at(
     }
 }
 
-/// What [`ContributorReach::floor_stretch`] found: the stretch, or the
-/// most occasions that ran any stretch whole and the floor that stretch
-/// faced.
-type FloorStretch = Result<(usize, usize), (u32, u32)>;
-
-/// One contributor segment in metres, with the index of its portion.
-type ReachSegment = (u32, (f64, f64), (f64, f64));
-
-/// Every contributing portion's segments, indexed so a drawn line can
-/// ask which contributors run which of its stretches end to end.
-/// Built once per candidate and read for every pass it considers.
-struct ContributorReach {
-    /// Segment ends in metres, keyed on [`GROUND_TOL_M`] cells, with
-    /// the index of the portion they belong to.
-    grid: HashMap<Cell, Vec<ReachSegment>>,
-    /// The track of each portion, by portion index.
-    tracks: Vec<usize>,
-    m_lat: f64,
-    m_lng: f64,
+/// The maximal runs of `points` on the ground, as `on_ground` judges it,
+/// bridging up to [`TRACK_GAP_POINTS`](super::TRACK_GAP_POINTS) points off
+/// it, each ending at its last point on the ground. A run of one point is
+/// no run.
+fn ground_runs(points: &[GpsPoint], on_ground: impl Fn(&GpsPoint) -> bool) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut last_near = 0;
+    for (i, p) in points.iter().enumerate() {
+        if on_ground(p) {
+            if open.is_none() {
+                open = Some(i);
+            }
+            last_near = i;
+        } else if let Some(s) = open
+            && i - last_near > super::TRACK_GAP_POINTS
+        {
+            runs.push((s, last_near + 1));
+            open = None;
+        }
+    }
+    if let Some(s) = open {
+        runs.push((s, last_near + 1));
+    }
+    runs.retain(|&(s, e)| e >= s + 2);
+    runs
 }
 
-impl ContributorReach {
-    fn new(portions: &[Portion], sport_tracks: &[(&str, &[GpsPoint])], ref_lat: f64) -> Self {
-        let mut reach = ContributorReach {
-            grid: HashMap::new(),
-            tracks: portions.iter().map(|p| p.0).collect(),
+/// One ground run, asked which of a line's stations lie within `tol_m` of
+/// it. A run that covers every station of a stretch runs that stretch
+/// whole: the one test [`LineMatcher`] counts a pass by and
+/// [`ContributorReach::floor_stretch`] finds the drawn stretch by, so the
+/// floor never draws a line its own recount empties.
+struct RunReach {
+    index: SegmentIndex,
+    /// The run's extent grown by the tolerance, so a station beyond it is
+    /// refused without a grid lookup.
+    lat: (f64, f64),
+    lng: (f64, f64),
+}
+
+impl RunReach {
+    fn new(run: &[GpsPoint], ref_lat: f64, tol_m: f64) -> Self {
+        let d_lat = tol_m / 111_132.0;
+        let d_lng = tol_m / (111_320.0 * ref_lat.to_radians().cos()).max(1.0);
+        let (mut lat, mut lng) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
+        for p in run {
+            lat = (lat.0.min(p.latitude), lat.1.max(p.latitude));
+            lng = (lng.0.min(p.longitude), lng.1.max(p.longitude));
+        }
+        RunReach {
+            index: SegmentIndex::new(run, ref_lat, tol_m),
+            lat: (lat.0 - d_lat, lat.1 + d_lat),
+            lng: (lng.0 - d_lng, lng.1 + d_lng),
+        }
+    }
+
+    fn near(&self, p: &GpsPoint) -> bool {
+        (self.lat.0..=self.lat.1).contains(&p.latitude)
+            && (self.lng.0..=self.lng.1).contains(&p.longitude)
+            && self.index.near(p)
+    }
+}
+
+/// Minimum arc between the stations a line is checked at. Derived from
+/// `GROUND_TOL_M` as a fifth of it, so a run's ends land within about a
+/// fifth of the tolerance a pass may stray, and each station is a distance
+/// check against a grid rather than every line point.
+const STATION_M: f64 = GROUND_TOL_M / 5.0;
+
+/// The cumulative arc of `line` at each point, and its stations: indices
+/// at least [`STATION_M`] of arc apart, the last point always kept, so a
+/// stretch's ends are real points. A line runs whole when every station
+/// is within the tolerance of the run, which is the one test
+/// [`ContributorReach::floor_stretch`] and [`LineMatcher`] share.
+fn line_stations(line: &[GpsPoint]) -> (Vec<f64>, Vec<usize>) {
+    let mut cum = vec![0.0; line.len()];
+    for k in 1..line.len() {
+        cum[k] = cum[k - 1] + crate::geo_utils::haversine_distance(&line[k - 1], &line[k]);
+    }
+    let mut stations: Vec<usize> = Vec::new();
+    for k in 0..line.len() {
+        if k + 1 == line.len()
+            || stations
+                .last()
+                .is_none_or(|&l| cum[k] - cum[l] >= STATION_M)
+        {
+            stations.push(k);
+        }
+    }
+    (cum, stations)
+}
+
+/// A polyline's segments in local metres, indexed on a grid whose cell is
+/// the tolerance it is asked about, so whether a point lies within that
+/// tolerance of the polyline reads at most two rings of cells.
+struct SegmentIndex {
+    cell_m: f64,
+    m_lat: f64,
+    m_lng: f64,
+    segments: Vec<((f64, f64), (f64, f64))>,
+    grid: HashMap<Cell, Vec<u32>>,
+}
+
+impl SegmentIndex {
+    fn new(points: &[GpsPoint], ref_lat: f64, cell_m: f64) -> Self {
+        let mut index = SegmentIndex {
+            cell_m,
             m_lat: 111_132.0,
             m_lng: 111_320.0 * ref_lat.to_radians().cos(),
+            segments: Vec::with_capacity(points.len().saturating_sub(1)),
+            grid: HashMap::new(),
         };
-        // Each segment is sampled at half the tolerance along its length,
-        // so a point within the tolerance of a segment finds it two cells
-        // out at most.
-        for (j, &(t, s, e, _)) in portions.iter().enumerate() {
-            for w in sport_tracks[t].1[s..e].windows(2) {
-                let (a, b) = (reach.xy(&w[0]), reach.xy(&w[1]));
-                let len = f64::hypot(b.0 - a.0, b.1 - a.1);
-                let steps = (len / (GROUND_TOL_M / 2.0)).ceil().max(1.0) as usize;
-                let mut last: Option<Cell> = None;
-                for i in 0..=steps {
-                    let f = i as f64 / steps as f64;
-                    let c = Self::cell_of((a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f));
-                    if last != Some(c) {
-                        reach.grid.entry(c).or_default().push((j as u32, a, b));
-                        last = Some(c);
+        let pairs: Vec<(GpsPoint, GpsPoint)> = match points {
+            [p] => vec![(*p, *p)],
+            _ => points.windows(2).map(|w| (w[0], w[1])).collect(),
+        };
+        // Sampled at half a cell along each segment, so a point within the
+        // tolerance of a segment finds it two cells out at most.
+        for (a, b) in pairs {
+            let (a, b) = (index.xy(&a), index.xy(&b));
+            let i = index.segments.len() as u32;
+            index.segments.push((a, b));
+            let len = f64::hypot(b.0 - a.0, b.1 - a.1);
+            let steps = (len / (cell_m / 2.0)).ceil().max(1.0) as usize;
+            let mut last: Option<Cell> = None;
+            for k in 0..=steps {
+                let f = k as f64 / steps as f64;
+                let c = index.cell_of((a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f));
+                if last != Some(c) {
+                    let v = index.grid.entry(c).or_default();
+                    if v.last() != Some(&i) {
+                        v.push(i);
                     }
+                    last = Some(c);
                 }
             }
         }
-        reach
+        index
     }
 
     fn xy(&self, p: &GpsPoint) -> (f64, f64) {
         (p.longitude * self.m_lng, p.latitude * self.m_lat)
     }
 
-    fn cell_of((x, y): (f64, f64)) -> Cell {
+    fn cell_of(&self, (x, y): (f64, f64)) -> Cell {
         (
-            (y / GROUND_TOL_M).floor() as i32,
-            (x / GROUND_TOL_M).floor() as i32,
+            (y / self.cell_m).floor() as i32,
+            (x / self.cell_m).floor() as i32,
         )
+    }
+
+    /// Whether `p` lies within the index's cell of the polyline.
+    fn near(&self, p: &GpsPoint) -> bool {
+        let q = self.xy(p);
+        let c = self.cell_of(q);
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                let Some(v) = self.grid.get(&(c.0 + dy, c.1 + dx)) else {
+                    continue;
+                };
+                for &i in v {
+                    let (a, b) = self.segments[i as usize];
+                    let (sx, sy) = (b.0 - a.0, b.1 - a.1);
+                    let l2 = sx * sx + sy * sy;
+                    let f = if l2 > 0.0 {
+                        (((q.0 - a.0) * sx + (q.1 - a.1) * sy) / l2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    if f64::hypot(q.0 - (a.0 + sx * f), q.1 - (a.1 + sy * f)) <= self.cell_m {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+/// What [`ContributorReach::floor_stretch`] found: the stretch, or the
+/// most occasions that ran any stretch whole and the floor that stretch
+/// faced.
+type FloorStretch = Result<(usize, usize), (u32, u32)>;
+
+/// Every contributing portion, so a drawn line can ask which
+/// contributors run which of its stretches end to end. Built once per
+/// candidate and read for every pass it considers.
+struct ContributorReach<'a> {
+    /// Each portion's track index and points.
+    portions: Vec<(usize, &'a [GpsPoint])>,
+    ref_lat: f64,
+}
+
+impl<'a> ContributorReach<'a> {
+    fn new(portions: &[Portion], sport_tracks: &[(&str, &'a [GpsPoint])], ref_lat: f64) -> Self {
+        ContributorReach {
+            portions: portions
+                .iter()
+                .map(|&(t, s, e, _)| (t, &sport_tracks[t].1[s..e]))
+                .collect(),
+            ref_lat,
+        }
     }
 
     /// The longest stretch of `line` the support floor runs whole.
     ///
     /// `Ok((a, b))` is the longest inclusive index range of `line` that
-    /// enough contributors run end to end: a contributor's portion stays
-    /// within [`GROUND_TOL_M`] of every station of the stretch, so it
-    /// reaches both ends and runs between them. Enough is rule 4's
+    /// enough contributors run end to end: one ground run of a
+    /// contributor's portion, its points within [`GROUND_TOL_M`] of the
+    /// line as [`LineMatcher`] cuts them, comes within [`GROUND_TOL_M`] of
+    /// every station of the stretch, so it reaches both ends and runs
+    /// between them. A portion that only crosses the line, however often,
+    /// runs none of it. Enough is rule 4's
     /// floor, [`required_visits_for_length`] of the stretch's length
     /// against `corpus` and never under `min_activities`, counted by
     /// occasion as [`has_support`] counts it. A stretch under
@@ -3155,70 +3330,30 @@ impl ContributorReach {
         corpus: usize,
         config: &SectionConfig,
     ) -> FloorStretch {
-        // Minimum arc between stations. Derived from `GROUND_TOL_M` as a
-        // fifth of it, so a stretch's ends land within about a fifth of
-        // the tolerance a contributor may stray, and each station is a
-        // distance check against the grid rather than every line point.
-        const STATION_M: f64 = GROUND_TOL_M / 5.0;
-        // Stations: line indices at least STATION_M of arc apart, the
-        // last point always kept, so a stretch's ends are real points.
-        let mut cum = vec![0.0; line.len()];
-        for k in 1..line.len() {
-            cum[k] = cum[k - 1] + crate::geo_utils::haversine_distance(&line[k - 1], &line[k]);
-        }
-        let mut stations: Vec<usize> = Vec::new();
-        for k in 0..line.len() {
-            if k + 1 == line.len()
-                || stations
-                    .last()
-                    .is_none_or(|&l| cum[k] - cum[l] >= STATION_M)
-            {
-                stations.push(k);
-            }
-        }
+        let (cum, stations) = line_stations(line);
         if stations.len() < 2 {
             return Err((0, config.min_activities));
         }
-        let seg_dist = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
-            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-            let l2 = dx * dx + dy * dy;
-            let f = if l2 > 0.0 {
-                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            f64::hypot(p.0 - (a.0 + dx * f), p.1 - (a.1 + dy * f))
-        };
+        let station_points: Vec<GpsPoint> = stations.iter().map(|&k| line[k]).collect();
+        let on_line = SegmentIndex::new(line, self.ref_lat, GROUND_TOL_M);
 
-        // Each contributor's maximal runs of covered stations.
-        let mut covered = vec![vec![false; stations.len()]; self.tracks.len()];
-        for (si, &k) in stations.iter().enumerate() {
-            let p = self.xy(&line[k]);
-            let c = Self::cell_of(p);
-            for dy in -2..=2i32 {
-                for dx in -2..=2i32 {
-                    let Some(v) = self.grid.get(&(c.0 + dy, c.1 + dx)) else {
-                        continue;
-                    };
-                    for &(j, a, b) in v {
-                        if !covered[j as usize][si] && seg_dist(p, a, b) <= GROUND_TOL_M {
-                            covered[j as usize][si] = true;
-                        }
-                    }
-                }
-            }
-        }
+        // Each contributor's maximal runs of stations covered by one of
+        // its ground runs.
         let mut runs: Vec<(usize, usize, usize)> = Vec::new();
-        for (j, mask) in covered.iter().enumerate() {
-            let mut start = None;
-            for (si, &m) in mask.iter().chain(std::iter::once(&false)).enumerate() {
-                match (m, start) {
-                    (true, None) => start = Some(si),
-                    (false, Some(a)) => {
-                        runs.push((a, si - 1, self.tracks[j]));
-                        start = None;
+        for &(t, points) in &self.portions {
+            for (s, e) in ground_runs(points, |p| on_line.near(p)) {
+                let reach = RunReach::new(&points[s..e], self.ref_lat, GROUND_TOL_M);
+                let mask = station_points.iter().map(|p| reach.near(p));
+                let mut start = None;
+                for (si, m) in mask.chain(std::iter::once(false)).enumerate() {
+                    match (m, start) {
+                        (true, None) => start = Some(si),
+                        (false, Some(a)) => {
+                            runs.push((a, si - 1, t));
+                            start = None;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -9049,6 +9184,89 @@ mod tests {
             &tun,
         );
         (cell_tracks, cell_passes)
+    }
+
+    /// A point `east_m` east and `north_m` north of a fixed origin.
+    fn at_m(east_m: f64, north_m: f64) -> GpsPoint {
+        let lat0 = 46.5_f64;
+        GpsPoint::new(
+            lat0 + north_m / 111_132.0,
+            6.6 + east_m / (111_320.0 * lat0.to_radians().cos()),
+        )
+    }
+
+    /// A path through `corners`, sampled every 10 m.
+    fn sampled(corners: &[(f64, f64)]) -> Vec<GpsPoint> {
+        let mut out = vec![at_m(corners[0].0, corners[0].1)];
+        for w in corners.windows(2) {
+            let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+            let steps = (f64::hypot(x1 - x0, y1 - y0) / 10.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f64 / steps as f64;
+                out.push(at_m(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f));
+            }
+        }
+        out
+    }
+
+    /// Scenario: a 1 km line, and three outings on three days that weave
+    /// across it every 80 m, 150 m to either side, so every point of the
+    /// line lies within the ground tolerance of each outing somewhere, and
+    /// three more that ride the line end to end.
+    /// Expected behaviour: the weavers run no stretch of the line whole and
+    /// the floor finds none; the riders run all of it and the floor finds
+    /// the whole line, the same verdict the pass matcher gives each.
+    #[test]
+    fn an_outing_weaving_across_a_line_runs_no_stretch_of_it() {
+        let line = sampled(&[(0.0, 0.0), (1000.0, 0.0)]);
+        let weave = |phase: f64| {
+            let corners: Vec<(f64, f64)> = (0..=13)
+                .map(|k| {
+                    let side = if k % 2 == 0 { -150.0 } else { 150.0 };
+                    (-40.0 + phase + 80.0 * k as f64, side)
+                })
+                .collect();
+            sampled(&corners)
+        };
+        let weavers = [weave(0.0), weave(20.0), weave(40.0)];
+        let riders = [
+            sampled(&[(-100.0, 5.0), (1100.0, 5.0)]),
+            sampled(&[(-100.0, -5.0), (1100.0, -5.0)]),
+            sampled(&[(1100.0, 0.0), (-100.0, 0.0)]),
+        ];
+        let config = SectionConfig::default();
+        let matcher = LineMatcher::new(&line, &config);
+        let reach_of = |tracks: &[Vec<GpsPoint>]| {
+            let named: Vec<(&str, &[GpsPoint])> =
+                tracks.iter().map(|t| ("outing", t.as_slice())).collect();
+            let portions: Vec<Portion> = tracks
+                .iter()
+                .enumerate()
+                .map(|(t, pts)| (t, 0, pts.len(), 0.0))
+                .collect();
+            let epochs: Vec<Option<i64>> =
+                (0..tracks.len()).map(|t| Some(t as i64 * 86_400)).collect();
+            ContributorReach::new(&portions, &named, 46.5).floor_stretch(
+                &line,
+                &epochs,
+                tracks.len(),
+                &config,
+            )
+        };
+
+        for w in &weavers {
+            assert!(matcher.passes(w).is_empty(), "a weaver counted as a pass");
+        }
+        let found = reach_of(&weavers);
+        assert!(
+            found.is_err(),
+            "the floor drew {found:?} that no weaver runs"
+        );
+
+        for r in &riders {
+            assert_eq!(matcher.passes(r).len(), 1, "a rider did not count");
+        }
+        assert_eq!(reach_of(&riders), Ok((0, line.len() - 1)));
     }
 
     #[test]

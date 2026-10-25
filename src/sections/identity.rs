@@ -89,6 +89,14 @@ pub const DEFAULT_K: u8 = 3;
 /// and 1,397 after five, because stable ground recurs.
 pub const TOMBSTONE_HORIZON_STEPS: u64 = 1_500;
 
+/// Share of a held section's rides a longer cut may leave off and still be that
+/// section re-cut. Past it the cut is separate ground and splits off.
+pub const SPLIT_SHED_SHARE: f64 = 0.2;
+
+fn default_split_shed_share() -> f64 {
+    SPLIT_SHED_SHARE
+}
+
 fn default_tombstone_horizon_steps() -> u64 {
     TOMBSTONE_HORIZON_STEPS
 }
@@ -555,6 +563,20 @@ pub fn plan_identity_memo(
     params: &IdentityParams,
     memo: &mut HashMap<(u64, u64), (f64, f64)>,
 ) -> IdentityPlan {
+    plan_identity_forbidding(prior, next, params, memo, &|_, _| false)
+}
+
+/// [`plan_identity_memo`] where `forbid(i, j)` removes the same-corridor edge
+/// between prior `i` and candidate `j`: the pair share ground but must not be
+/// one section. Asked once for a candidate that exactly one prior reaches, and
+/// never for a prior paired with its own line.
+pub fn plan_identity_forbidding(
+    prior: &[PriorSection],
+    next: &[CandidateSection],
+    params: &IdentityParams,
+    memo: &mut HashMap<(u64, u64), (f64, f64)>,
+    forbid: &dyn Fn(usize, usize) -> bool,
+) -> IdentityPlan {
     PLANS_RUN.with(|n| n.set(n.get() + 1));
     let np = prior.len();
     let nc = next.len();
@@ -621,6 +643,20 @@ pub fn plan_identity_memo(
             edge[i][j] = cov_pc.max(cov_cp) >= CARRY_COVERAGE;
             mo[i][j] = cov_pc.min(cov_cp);
             contained[i][j] = cov_pc >= CARRY_COVERAGE;
+        }
+    }
+    // A pair the caller forbids is not an edge. Only a candidate a single
+    // prior reaches can be forbidden: one that several reach is a merge, and
+    // the merge rule settles who carries it.
+    for j in 0..nc {
+        let mut reach = (0..np).filter(|&i| edge[i][j]);
+        let (Some(i), None) = (reach.next(), reach.next()) else {
+            continue;
+        };
+        if prior[i].polyline != next[j].polyline && forbid(i, j) {
+            edge[i][j] = false;
+            mo[i][j] = 0.0;
+            contained[i][j] = false;
         }
     }
 
@@ -910,6 +946,14 @@ pub struct HysteresisParams {
     /// older blob take the default rather than failing.
     #[serde(default = "default_tombstone_horizon_steps")]
     pub tombstone_horizon_steps: u64,
+    /// Share of a held section's rides a longer line may leave off before it is
+    /// no longer that section. A cut that grows the line and would shed more
+    /// than this share of the rides is separate ground: it mints its own id,
+    /// and the held section keeps its rides until the batch stops drawing it.
+    /// Never written to the registry blob: a tuning, not state, so the blob's
+    /// bytes are unchanged and every decode takes the current value.
+    #[serde(skip, default = "default_split_shed_share")]
+    pub split_shed_share: f64,
 }
 
 impl Default for HysteresisParams {
@@ -921,6 +965,7 @@ impl Default for HysteresisParams {
             merge_mutual_floor: 0.0,
             merge_size_ratio: 0.3,
             tombstone_horizon_steps: TOMBSTONE_HORIZON_STEPS,
+            split_shed_share: SPLIT_SHED_SHARE,
         }
     }
 }
@@ -1081,6 +1126,9 @@ pub struct HysteresisState {
     steps: u64,
 }
 
+/// The shed report of a caller that has none: no cut leaves a ride off.
+const NO_SHED: fn(&str, usize) -> f64 = |_, _| 0.0;
+
 impl Default for HysteresisState {
     fn default() -> Self {
         Self::new(HysteresisParams::default())
@@ -1168,7 +1216,7 @@ impl HysteresisState {
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
-        self.fold(next, loses, &|_, _| 1, true)
+        self.fold(next, loses, &NO_SHED, &|_, _| 1, true)
     }
 
     /// [`step_assign_guarded`](Self::step_assign_guarded) for a step that
@@ -1184,7 +1232,35 @@ impl HysteresisState {
         loses: &dyn Fn(&str, usize) -> bool,
         credit: &dyn Fn(&str, PendingChange<'_>) -> u32,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
-        self.fold(next, loses, credit, true)
+        self.fold(next, loses, &NO_SHED, credit, true)
+    }
+
+    /// [`step_assign_credited`](Self::step_assign_credited) where the caller
+    /// also reports `shed(id, j)`: the share of held `id`'s rides that
+    /// candidate `j` leaves off. A candidate that grows the line and sheds more
+    /// than [`HysteresisParams::split_shed_share`] is not a re-cut of `id`. It
+    /// is separate ground that mints its own id, and `id` keeps its rides until
+    /// the batch stops drawing it. Asked only for a pair that shares a
+    /// corridor, and at most once per step for each.
+    pub fn step_assign_shedding(
+        &mut self,
+        next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
+        shed: &dyn Fn(&str, usize) -> f64,
+        credit: &dyn Fn(&str, PendingChange<'_>) -> u32,
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.fold(next, loses, shed, credit, true)
+    }
+
+    /// [`rerun_assign_guarded`](Self::rerun_assign_guarded) with the shed
+    /// report of [`step_assign_shedding`](Self::step_assign_shedding).
+    pub fn rerun_assign_shedding(
+        &mut self,
+        next: &[CandidateSection],
+        loses: &dyn Fn(&str, usize) -> bool,
+        shed: &dyn Fn(&str, usize) -> f64,
+    ) -> (StepOutcome, Vec<CandidateResolution>) {
+        self.fold(next, loses, shed, &|_, _| 1, false)
     }
 
     /// [`step_assign_guarded`](Self::step_assign_guarded) for a step with no
@@ -1197,13 +1273,14 @@ impl HysteresisState {
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
-        self.fold(next, loses, &|_, _| 1, false)
+        self.fold(next, loses, &NO_SHED, &|_, _| 1, false)
     }
 
     fn fold(
         &mut self,
         next: &[CandidateSection],
         loses: &dyn Fn(&str, usize) -> bool,
+        shed: &dyn Fn(&str, usize) -> f64,
         credit: &dyn Fn(&str, PendingChange<'_>) -> u32,
         arrival: bool,
     ) -> (StepOutcome, Vec<CandidateResolution>) {
@@ -1271,7 +1348,37 @@ impl HysteresisState {
         // The coverage memo is threaded through both passes, so the second pays
         // only for the pairs whose prior geometry it changed.
         let mut memo: HashMap<(u64, u64), (f64, f64)> = HashMap::new();
-        let first = plan_identity_memo(&prior, next, &params, &mut memo);
+        // A longer cut that leaves off too many of a held section's rides is
+        // not that section. Its edge to the section is removed, so it carries
+        // a section of its own and the held one is carried by whatever still
+        // draws it, or dissolves. The parent is kept for the lineage.
+        let shed_cache: RefCell<BTreeMap<(String, usize), f64>> = RefCell::new(BTreeMap::new());
+        let split_parents: RefCell<BTreeMap<usize, String>> = RefCell::new(BTreeMap::new());
+        let forbid = |i: usize, j: usize| -> bool {
+            let id = prior[i].id.as_str();
+            let Some(held) = self.visible.get(id) else {
+                return false;
+            };
+            if polyline_metres(&next[j].polyline) <= polyline_metres(&held.polyline) {
+                return false;
+            }
+            let key = (id.to_string(), j);
+            let cached = shed_cache.borrow().get(&key).copied();
+            let share = cached.unwrap_or_else(|| {
+                let share = shed(id, j);
+                shed_cache.borrow_mut().insert(key, share);
+                share
+            });
+            let splits = share > self.params.split_shed_share;
+            if splits {
+                split_parents
+                    .borrow_mut()
+                    .entry(j)
+                    .or_insert_with(|| id.to_string());
+            }
+            splits
+        };
+        let first = plan_identity_forbidding(&prior, next, &params, &mut memo, &forbid);
         let prior_index: BTreeMap<&str, usize> = prior
             .iter()
             .enumerate()
@@ -1302,7 +1409,7 @@ impl HysteresisState {
             .map(|d| d.split_from().map(str::to_string))
             .collect();
         let plan = if reseeded {
-            plan_identity_memo(&seeded, next, &params, &mut memo)
+            plan_identity_forbidding(&seeded, next, &params, &mut memo, &forbid)
         } else {
             first
         };
@@ -1418,7 +1525,8 @@ impl HysteresisState {
                 split_froms[j] = d
                     .split_from()
                     .map(str::to_string)
-                    .or_else(|| lineage[j].clone());
+                    .or_else(|| lineage[j].clone())
+                    .or_else(|| split_parents.borrow().get(&j).cloned());
                 new_visible.insert(
                     id,
                     HeldSection {
@@ -3141,6 +3249,78 @@ mod tests {
         assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
         assert_eq!(out.recut_applied, 0);
         assert_eq!(asked.borrow().as_slice(), &[(id.clone(), 0)]);
+    }
+
+    /// A longer cut that leaves off more than the shed share of a held
+    /// section's rides is separate ground. It mints its own id with the held
+    /// section as parent, and the held section keeps its ground until the
+    /// batch has stopped drawing it for `k` steps.
+    #[test]
+    fn a_longer_cut_that_sheds_past_the_share_splits_off() {
+        let p = line(46.0, 7.0, 100);
+        let grown = line(46.0, 7.0, 140);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let sheds = |_: &str, _: usize| SPLIT_SHED_SHARE + 0.05;
+        let none = |_: &str, _: usize| false;
+        let once = |_: &str, _: PendingChange<'_>| 1;
+
+        let (out, r) = state.step_assign_shedding(&[cand(grown.clone(), 12)], &none, &sheds, &once);
+        assert_eq!(r[0].fate, CandidateFate::Minted);
+        assert_eq!(r[0].split_from.as_deref(), Some(id.as_str()));
+        assert_ne!(r[0].id, id);
+        assert_eq!(out.recut_applied, 0);
+        assert_eq!(state.ground_of(&id), Some(p.as_slice()));
+        assert_eq!(state.visible_len(), 2);
+
+        // The next step finds the split settled: the minted id carries the
+        // cut and the held one is not re-captured by it.
+        let minted = r[0].id.clone();
+        for _ in 1..DEFAULT_K {
+            let (out, r) =
+                state.step_assign_shedding(&[cand(grown.clone(), 12)], &none, &sheds, &once);
+            assert_eq!(r[0].id, minted);
+            assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+            assert_eq!(out.minted, 0);
+        }
+        assert!(state.is_tombstoned(&id), "the held section dissolves");
+        assert_eq!(state.visible_ids(), vec![minted]);
+    }
+
+    /// At or under the share a longer cut is the same section re-cut: the
+    /// debounce holds it, as it always has.
+    #[test]
+    fn a_longer_cut_that_sheds_within_the_share_is_a_re_cut() {
+        let p = line(46.0, 7.0, 100);
+        let grown = line(46.0, 7.0, 140);
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let sheds = |_: &str, _: usize| SPLIT_SHED_SHARE;
+        let lost = |_: &str, _: usize| true;
+        let once = |_: &str, _: PendingChange<'_>| 1;
+        let (_, r) = state.step_assign_shedding(&[cand(grown.clone(), 12)], &lost, &sheds, &once);
+        assert_eq!(r[0].id, id);
+        assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+        assert_eq!(state.visible_len(), 1);
+    }
+
+    /// Only a line that grows can split off. A shorter cut that sheds the
+    /// same share stays a re-cut of the held section.
+    #[test]
+    fn a_shorter_cut_that_sheds_past_the_share_is_a_re_cut() {
+        let p = line(46.0, 7.0, 100);
+        let shorter = p[10..].to_vec();
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(p.clone(), 20)]);
+        let id = r[0].id.clone();
+        let sheds = |_: &str, _: usize| 0.9;
+        let lost = |_: &str, _: usize| true;
+        let once = |_: &str, _: PendingChange<'_>| 1;
+        let (_, r) = state.step_assign_shedding(&[cand(shorter, 12)], &lost, &sheds, &once);
+        assert_eq!(r[0].id, id);
+        assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
     }
 
     /// The same extent with the same or more visits stays a free update,
