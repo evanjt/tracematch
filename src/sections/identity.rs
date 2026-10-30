@@ -1569,6 +1569,31 @@ impl HysteresisState {
         self.tombstones.remove(id);
     }
 
+    /// Retain in this state, as tombstones, the ground `other` holds that this
+    /// state does not, and return the ids so retained.
+    ///
+    /// A caller that rewinds to an earlier state calls this with the state it
+    /// left, so ground minted since is not forgotten: if it re-emerges it
+    /// returns under the id it had, and no fresh mint can land on one of those
+    /// ids because the ordinal never falls behind `other`'s. Ids this state
+    /// already holds, visible or tombstoned, are left as they are.
+    pub fn retain_unheld_from(&mut self, other: &HysteresisState) -> Vec<String> {
+        self.ordinal = self.ordinal.max(other.ordinal);
+        self.steps = self.steps.max(other.steps);
+        let mut kept = Vec::new();
+        let held = other.visible.iter().chain(other.tombstones.iter());
+        for (id, section) in held {
+            if self.visible.contains_key(id) || self.tombstones.contains_key(id) {
+                continue;
+            }
+            let mut tomb = section.clone();
+            tomb.retired_at = Some(section.retired_at.unwrap_or(self.steps));
+            self.tombstones.insert(id.clone(), tomb);
+            kept.push(id.clone());
+        }
+        kept
+    }
+
     /// Add one visible prior under a fresh id without planning it against the
     /// held view, and return that id. The ground is held as given, as a mint
     /// would hold it, junior to every id already minted, and every other
