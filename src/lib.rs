@@ -36,7 +36,7 @@
 //! }
 //! ```
 
-use geo::{Coord, LineString, algorithm::simplify::Simplify};
+use geo::{Coord, LineString, algorithm::simplify::SimplifyIdx};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -300,47 +300,45 @@ impl RouteSignature {
             return None;
         }
 
-        // Filter invalid points and convert to geo coordinates
-        let coords: Vec<Coord> = points
-            .iter()
-            .filter(|p| p.is_valid())
-            .map(|p| Coord {
-                x: p.longitude,
-                y: p.latitude,
-            })
-            .collect();
+        // Filter invalid points; the kept ones are the source for every vertex below,
+        // so a vertex keeps its elevation.
+        let valid: Vec<GpsPoint> = points.iter().filter(|p| p.is_valid()).copied().collect();
 
-        if coords.len() < 2 {
+        if valid.len() < 2 {
             return None;
         }
 
-        let line = LineString::new(coords);
+        let line = LineString::new(
+            valid
+                .iter()
+                .map(|p| Coord {
+                    x: p.longitude,
+                    y: p.latitude,
+                })
+                .collect(),
+        );
 
-        // Douglas-Peucker simplification
-        let simplified = line.simplify(&config.simplification_tolerance);
+        // Douglas-Peucker simplification, as the indices it keeps
+        let kept = line.simplify_idx(&config.simplification_tolerance);
 
         // Limit to max points if needed (uniform sampling)
-        let final_coords: Vec<Coord> = if simplified.0.len() > config.max_simplified_points as usize
-        {
+        let final_indices: Vec<usize> = if kept.len() > config.max_simplified_points as usize {
             // Spread over the closed range so the first and last vertices are kept.
-            let last = simplified.0.len() - 1;
+            let last = kept.len() - 1;
             let slots = config.max_simplified_points as usize;
             let step = last as f64 / (slots - 1).max(1) as f64;
             (0..slots)
-                .map(|i| simplified.0[((i as f64 * step).round() as usize).min(last)])
+                .map(|i| kept[((i as f64 * step).round() as usize).min(last)])
                 .collect()
         } else {
-            simplified.0.clone()
+            kept
         };
 
-        if final_coords.len() < 2 {
+        if final_indices.len() < 2 {
             return None;
         }
 
-        let simplified_points: Vec<GpsPoint> = final_coords
-            .iter()
-            .map(|c| GpsPoint::new(c.y, c.x))
-            .collect();
+        let simplified_points: Vec<GpsPoint> = final_indices.iter().map(|&i| valid[i]).collect();
 
         let total_distance = calculate_route_distance(&simplified_points);
 

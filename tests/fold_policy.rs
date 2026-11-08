@@ -511,3 +511,83 @@ fn emitted_ids_stay_unique_under_pins() {
         "the pinned id must survive verbatim"
     );
 }
+
+/// Scenario: a library holds ground at home, and a ride lands in a cluster
+/// half a degree away. The cached fold reuses the home cluster's sections
+/// without the tracks to measure them again.
+///
+/// Expected behaviour: every home section comes back as it went in, the line
+/// running the same way and each lap keeping its direction along it. A lap's
+/// direction feeds its bests and the athlete's direction toggle, so one that
+/// changes on a fold elsewhere is a wrong number.
+#[test]
+fn a_fold_elsewhere_leaves_a_clusters_directions_alone() {
+    for (shape, home) in [
+        ("oval_stem", shapes::oval_stem(6)),
+        ("lollipop", shapes::lollipop(6)),
+        ("parallel_variants", shapes::parallel_variants(6, 30.0)),
+        ("weekender", shapes::persona_weekender()),
+        ("racer", shapes::persona_racer()),
+        ("small_oval_stem", shapes::small_oval_stem(6)),
+        ("small_oval_seam", shapes::small_oval_seam_excursion()),
+    ] {
+        let away = shapes::translate_deg(shapes::plain_corridor(1), 0.5, 0.5);
+        let mut sports = shapes::pooled(&home);
+        sports.extend(shapes::pooled(&away));
+        let cfg = SectionConfig::default();
+        let policy = SectionUpdatePolicy::default();
+        let mut cache = SectionEvidenceCache::new();
+
+        let home_ids: Vec<&str> = home.iter().map(|(id, _)| id.as_str()).collect();
+        let before = detect_sections_incremental_cached_with_policy(
+            &mut cache,
+            &[],
+            &home,
+            &home_ids,
+            &[],
+            &sports,
+            &cfg,
+            &policy,
+        );
+        assert!(!before.catalogue.is_empty(), "{shape}: no section at home");
+
+        let mut pool = home.clone();
+        pool.extend(away.iter().cloned());
+        let after = detect_sections_incremental_cached_with_policy(
+            &mut cache,
+            &before.catalogue,
+            &pool,
+            &[away[0].0.as_str()],
+            &[],
+            &sports,
+            &cfg,
+            &policy,
+        );
+
+        for held in &before.catalogue {
+            let next = after
+                .carried
+                .iter()
+                .find(|(prior, _)| prior == &held.id)
+                .and_then(|(_, id)| after.catalogue.iter().find(|s| &s.id == id))
+                .unwrap_or_else(|| panic!("{shape}: {} was not carried", held.id));
+            assert!(
+                next.polyline == held.polyline,
+                "{shape}: {} changed its line",
+                held.id
+            );
+            let directions = |s: &FrequentSection| {
+                s.activity_portions
+                    .iter()
+                    .map(|p| (p.activity_id.clone(), p.start_index, p.direction))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                directions(next),
+                directions(held),
+                "{shape}: {} changed its laps' directions",
+                held.id
+            );
+        }
+    }
+}

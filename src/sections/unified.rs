@@ -2695,15 +2695,22 @@ impl LineMatcher {
         config: &SectionConfig,
         lateral_m: f64,
     ) -> Self {
+        // A line turned end for end is the same ground, so nothing here may
+        // read which end comes first: the projection takes the higher latitude
+        // of the two ends, and each segment's cells are walked from the same
+        // end.
         let cell_size = cluster_cell_size(config);
-        let ref_lat = line.first().map(|p| p.latitude).unwrap_or(0.0);
+        let ref_lat = match (line.first(), line.last()) {
+            (Some(a), Some(b)) => a.latitude.max(b.latitude),
+            _ => 0.0,
+        };
         let grid = CellGrid::new(cell_size, ref_lat);
         let mut core: HashSet<Cell> = HashSet::new();
         for w in line.windows(2) {
             let a = grid.cell_of(w[0].latitude, w[0].longitude);
             let b = grid.cell_of(w[1].latitude, w[1].longitude);
             if bridges(&grid, &w[0], &w[1], Tunables::DEFAULT.bridge_max_m) {
-                core.extend(bresenham_cells(a, b));
+                core.extend(bresenham_cells(a.min(b), a.max(b)));
             } else {
                 core.extend([a, b]);
             }
@@ -6560,19 +6567,27 @@ fn detect_for_cluster_with_grid(
         .map(|(i, (id, _))| (*id, i))
         .collect();
     for s in sections.iter_mut() {
-        let mut e = super::interestingness::enrich(&s.polyline, s.distance_meters);
-        e.is_lift = match (
+        let is_lift = match (
             s.representative_range,
             track_at.get(s.representative_activity_id.as_str()),
         ) {
             (Some(range), Some(&t)) => on_lift_ground(range, &coverage.keep[t]),
             _ => false,
         };
-        s.elevation_gain_m = e.elevation_gain_m;
-        s.avg_grade_percent = e.avg_grade_percent;
-        s.enrichment = e;
+        enrich_section(s, is_lift);
     }
     phase!("enrich", t_enrich);
+
+    // Direction is measured here, against the line as finally drawn and with
+    // every member's track at hand. The chain and seam passes re-slice lines
+    // without recutting their portions, and the cached fold reuses these
+    // sections where it holds no tracks to measure them again.
+    let track_map: HashMap<&str, (&[GpsPoint], &[f64])> = sport_tracks
+        .iter()
+        .map(|&(id, pts)| (id, (pts, &[][..])))
+        .collect();
+    reorient_portion_flags(&mut sections, &track_map);
+    orient_to_majority(&mut sections);
 
     sections
 }
@@ -6889,18 +6904,6 @@ fn detect_by_sport(
         );
         all_sections.extend(sections);
     }
-
-    let track_map: HashMap<&str, (&[GpsPoint], &[f64])> = tracks
-        .iter()
-        .enumerate()
-        .map(|(i, (id, pts))| {
-            (
-                id.as_str(),
-                (pts.as_slice(), seconds.get(i).copied().unwrap_or(NO_TIME)),
-            )
-        })
-        .collect();
-    reorient_portion_flags(&mut all_sections, &track_map);
 
     info!(
         "[Unified] {} sections, {} boundary records",
@@ -7297,6 +7300,91 @@ pub(crate) fn reorient_portion_flags(
     }
 }
 
+/// The share of a section's portions that must ride against its line before
+/// the line turns to face them. Derived from a sweep of 0.5 to 0.8 over the
+/// private corpus (283 sections) and over GeoLife one person at a time (727
+/// sections). The rule: the lowest share at which no section ridden 40 to 60 % against turns.
+/// At 0.55 four private and 26 GeoLife sections of that kind turn, at 0.5 49
+/// and 122. From 0.6 none do. Raising it only leaves fewer lines turned (50 at
+/// 0.6, 25 at 0.7 and 12 at 0.8 on the private corpus), so the lowest share
+/// that passes is kept.
+const MAJORITY_FLIP_SHARE: f64 = 0.6;
+
+/// How many more portions must ride against a section's line than with it
+/// before the line turns. The same sweep measured that at
+/// [`MAJORITY_FLIP_SHARE`] a lead of 0 and a lead of 1 turn the same sections
+/// (50 private, 103 GeoLife), so only a lead of 2 or more changes anything. The rule: the lowest lead that stops a section
+/// turning on a margin of one portion, such as 3 against 2, where one more
+/// ride either way decides it. That is 14 private and 28 GeoLife sections. A
+/// lead of 3 or 4 holds back a further 6 to 8 private sections without that
+/// reason, so 2 is kept. A fold one activity at a time ended on the same line
+/// as a single batch for every section, at the share and lead above and at
+/// 0.5 with a lead of 0.
+const MAJORITY_FLIP_LEAD: usize = 2;
+
+/// Profile and shape off a section's own emitted line, in the order it runs.
+fn enrich_section(section: &mut FrequentSection, is_lift: bool) {
+    let mut e = super::interestingness::enrich(&section.polyline, section.distance_meters);
+    e.is_lift = is_lift;
+    section.elevation_gain_m = e.elevation_gain_m;
+    section.avg_grade_percent = e.avg_grade_percent;
+    section.enrichment = e;
+}
+
+/// Turn a section's line end for end, with everything that reads its order:
+/// the per-point density, each portion's direction and the profile.
+///
+/// `representative_range` still names the slice of the representative's track
+/// the line was cut from, and `representative_reversed` says the line reads it
+/// backwards.
+fn reverse_line(section: &mut FrequentSection) {
+    section.polyline.reverse();
+    section.representative_reversed = !section.representative_reversed;
+    section.point_density.reverse();
+    for portion in section.activity_portions.iter_mut() {
+        portion.direction = match portion.direction {
+            crate::Direction::Same => crate::Direction::Reverse,
+            crate::Direction::Reverse => crate::Direction::Same,
+            crate::Direction::Partial => crate::Direction::Partial,
+        };
+    }
+    let is_lift = section.enrichment.is_lift;
+    enrich_section(section, is_lift);
+}
+
+/// Turn each section's line to face the way most of its portions ride.
+///
+/// The line's first point is where the app puts the start, and a portion's
+/// flag is measured against the line, so a line left in its representative's
+/// order labels the majority reverse and starts them at their finish. A line
+/// turns only when [`MAJORITY_FLIP_SHARE`] of its portions ride against it
+/// and they outnumber the rest by [`MAJORITY_FLIP_LEAD`]. Reads the flags
+/// [`reorient_portion_flags`] measured against the current line.
+fn orient_to_majority(sections: &mut [FrequentSection]) {
+    for section in sections.iter_mut() {
+        if section.is_user_defined || section.polyline.len() < 2 {
+            continue;
+        }
+        let total = section.activity_portions.len();
+        let against = section
+            .activity_portions
+            .iter()
+            .filter(|p| p.direction.is_reverse_like())
+            .count();
+        let with = section
+            .activity_portions
+            .iter()
+            .filter(|p| p.direction.is_forward_like())
+            .count();
+        if total > 0
+            && against as f64 >= MAJORITY_FLIP_SHARE * total as f64
+            && against >= with + MAJORITY_FLIP_LEAD
+        {
+            reverse_line(section);
+        }
+    }
+}
+
 fn resolve_fold(
     fresh: Vec<FrequentSection>,
     mut boundaries: Vec<BoundaryRecord>,
@@ -7477,8 +7565,10 @@ fn resolve_fold(
         }
         catalogue.push(cand);
     }
+    // A frozen line holds its geometry, its direction included, so its flags
+    // are measured against it and it is never turned.
+    reorient_portion_flags(&mut frozen_out, tracks);
     catalogue.extend(frozen_out);
-    reorient_portion_flags(&mut catalogue, tracks);
     for r in &mut boundaries {
         let mut ids: Vec<String> = r
             .section_ids
@@ -9078,6 +9168,7 @@ mod resolve_track_requirement {
             polyline,
             representative_activity_id: "absent".to_string(),
             representative_range: None,
+            representative_reversed: false,
             activity_ids: vec!["absent".to_string()],
             activity_portions: portions,
             visit_count: 1,
@@ -9478,6 +9569,36 @@ mod tests {
             "ref_lat {} is not on the quantisation lattice",
             g1.ref_lat
         );
+    }
+
+    /// Scenario: a sparse line, its points several cells apart at headings
+    /// that are not a whole number of cells, is turned end for end.
+    /// Expected behaviour: the matcher holds the same cells either way, so a
+    /// pass is judged on the ground and not on which end the line starts at.
+    #[test]
+    fn a_turned_line_holds_the_same_cells() {
+        let config = SectionConfig::default();
+        let line: Vec<GpsPoint> = [
+            (0.0, 0.0),
+            (-600.0, -500.0),
+            (-1200.0, -800.0),
+            (-1300.0, -1400.0),
+        ]
+        .iter()
+        .map(|&(north, east): &(f64, f64)| {
+            GpsPoint::new(
+                47.37 + north / 111_320.0,
+                8.55 + east / (111_320.0 * 47.37f64.to_radians().cos()),
+            )
+        })
+        .collect();
+        let mut turned = line.clone();
+        turned.reverse();
+
+        let drawn = LineMatcher::new(&line, &config);
+        let turned = LineMatcher::new(&turned, &config);
+
+        assert_eq!(drawn.dilated, turned.dilated);
     }
 
     #[test]
@@ -10545,6 +10666,7 @@ mod seam_tests {
             polyline: pts,
             representative_activity_id: "a".to_string(),
             representative_range: None,
+            representative_reversed: false,
             activity_ids: vec!["a".to_string()],
             activity_portions: Vec::new(),
             visit_count: visits,
@@ -10810,6 +10932,7 @@ mod portion_flag_tests {
             polyline,
             representative_activity_id: "a".to_string(),
             representative_range: None,
+            representative_reversed: false,
             activity_ids: vec!["a".to_string()],
             activity_portions: portions,
             visit_count: 1,
@@ -10941,6 +11064,290 @@ mod portion_flag_tests {
         reorient_portion_flags(&mut sections, &tracks);
 
         assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
+    }
+}
+
+/// Scenario: a section's line comes out in its representative's order, and
+/// most of the section's laps may ride it the other way.
+///
+/// Expected behaviour: the line faces the way most laps ride, so they read
+/// `Same` and start where they start; a section ridden about evenly both ways
+/// keeps the direction it was drawn in, fold after fold.
+#[cfg(test)]
+mod majority_direction_tests {
+    use super::*;
+    use crate::Direction;
+
+    const POINTS: usize = 40;
+
+    /// A line running north, its elevation climbing with it.
+    fn climbing_north() -> Vec<GpsPoint> {
+        (0..POINTS)
+            .map(|i| {
+                GpsPoint::with_elevation(47.0 + i as f64 * 0.0005, 8.0, 400.0 + i as f64 * 2.0)
+            })
+            .collect()
+    }
+
+    fn descending_south() -> Vec<GpsPoint> {
+        let mut line = climbing_north();
+        line.reverse();
+        line
+    }
+
+    /// One lap per id, each along the whole line: `north` of them climbing
+    /// north and `south` of them descending south.
+    fn laps(north: usize, south: usize) -> Vec<(String, Vec<GpsPoint>)> {
+        (0..north)
+            .map(|i| (format!("north{i:02}"), climbing_north()))
+            .chain((0..south).map(|i| (format!("south{i:02}"), descending_south())))
+            .collect()
+    }
+
+    fn lookup(laps: &[(String, Vec<GpsPoint>)]) -> HashMap<&str, (&[GpsPoint], &[f64])> {
+        laps.iter()
+            .map(|(id, pts)| (id.as_str(), (pts.as_slice(), &[][..])))
+            .collect()
+    }
+
+    /// A section drawn along `polyline` with one portion per lap, its flags
+    /// measured against the line, as a cluster's detection emits it.
+    fn section(polyline: Vec<GpsPoint>, laps: &[(String, Vec<GpsPoint>)]) -> FrequentSection {
+        let distance_meters = crate::matching::calculate_route_distance(&polyline);
+        let mut s = FrequentSection {
+            id: "sec".to_string(),
+            name: None,
+            sport_type: "Ride".to_string(),
+            polyline,
+            representative_activity_id: laps[0].0.clone(),
+            representative_range: Some((0, POINTS as u32)),
+            representative_reversed: false,
+            activity_ids: laps.iter().map(|(id, _)| id.clone()).collect(),
+            activity_portions: laps
+                .iter()
+                .map(|(id, _)| SectionPortion {
+                    activity_id: id.clone(),
+                    start_index: 0,
+                    end_index: POINTS as u32,
+                    distance_meters,
+                    direction: Direction::Same,
+                })
+                .collect(),
+            visit_count: laps.len() as u32,
+            distance_meters,
+            activity_traces: HashMap::new(),
+            confidence: 1.0,
+            observation_count: laps.len() as u32,
+            average_spread: 0.0,
+            point_density: Vec::new(),
+            scale: None,
+            is_user_defined: false,
+            stability: 1.0,
+            elevation_gain_m: None,
+            avg_grade_percent: None,
+            version: 1,
+            updated_at: None,
+            created_at: None,
+            enrichment: Default::default(),
+            rank: None,
+        };
+        enrich_section(&mut s, false);
+        reorient_portion_flags(std::slice::from_mut(&mut s), &lookup(laps));
+        s
+    }
+
+    /// The cold path's direction step: flags measured against the line, then
+    /// the line turned to face the majority.
+    fn orient(sections: &mut [FrequentSection], laps: &[(String, Vec<GpsPoint>)]) {
+        reorient_portion_flags(sections, &lookup(laps));
+        orient_to_majority(sections);
+    }
+
+    fn count(section: &FrequentSection, direction: Direction) -> usize {
+        section
+            .activity_portions
+            .iter()
+            .filter(|p| p.direction == direction)
+            .count()
+    }
+
+    fn starts_south(section: &FrequentSection) -> bool {
+        section.polyline[0].latitude < section.polyline[section.polyline.len() - 1].latitude
+    }
+
+    fn fold(
+        existing: &[FrequentSection],
+        fresh: FrequentSection,
+        laps: &[(String, Vec<GpsPoint>)],
+    ) -> FrequentSection {
+        let out = resolve_fold(
+            vec![fresh],
+            Vec::new(),
+            existing,
+            &SectionUpdatePolicy::default(),
+            &SectionConfig::default(),
+            &lookup(laps),
+            &mut HashMap::new(),
+        );
+        assert_eq!(out.catalogue.len(), 1, "the fold kept one section");
+        assert_eq!(out.carried.len(), 1, "the fold carried the prior");
+        out.catalogue.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_line_most_laps_ride_against_turns_to_face_them() {
+        let laps = laps(2, 8);
+        let mut sections = vec![section(climbing_north(), &laps)];
+
+        orient(&mut sections, &laps);
+
+        assert!(
+            !starts_south(&sections[0]),
+            "the start sits at the north end, where 8 laps start"
+        );
+        assert_eq!(count(&sections[0], Direction::Same), 8);
+        assert!(
+            sections[0].representative_reversed,
+            "the line reads its representative's slice backwards"
+        );
+        assert_eq!(count(&sections[0], Direction::Reverse), 2);
+    }
+
+    /// The profile is read in the order the line runs, so a turned line's
+    /// climb becomes its descent.
+    #[test]
+    fn a_turned_line_reads_its_profile_the_way_it_now_runs() {
+        let laps = laps(2, 8);
+        let mut sections = vec![section(climbing_north(), &laps)];
+        assert!(sections[0].elevation_gain_m.unwrap() > 50.0);
+
+        orient(&mut sections, &laps);
+
+        assert!(sections[0].elevation_gain_m.unwrap() < 1.0);
+        assert!(sections[0].enrichment.elevation_loss_m.unwrap() > 50.0);
+        assert!(sections[0].avg_grade_percent.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn a_line_most_laps_ride_with_stays_as_drawn() {
+        let laps = laps(8, 2);
+        let mut sections = vec![section(climbing_north(), &laps)];
+
+        orient(&mut sections, &laps);
+
+        assert!(starts_south(&sections[0]));
+        assert_eq!(count(&sections[0], Direction::Same), 8);
+        assert!(!sections[0].representative_reversed);
+    }
+
+    /// The bar is 60 per cent of the portions and a lead of two: both have to
+    /// hold, and meeting both exactly is enough.
+    #[test]
+    fn the_line_turns_only_past_both_the_share_and_the_lead() {
+        for (north, south, turns) in [
+            (4, 6, true),
+            (2, 3, false),
+            (12, 13, false),
+            (0, 2, true),
+            (0, 1, false),
+        ] {
+            let laps = laps(north, south);
+            let mut sections = vec![section(climbing_north(), &laps)];
+
+            orient(&mut sections, &laps);
+
+            assert_eq!(
+                !starts_south(&sections[0]),
+                turns,
+                "{north} north, {south} south"
+            );
+        }
+    }
+
+    #[test]
+    fn a_section_the_athlete_drew_is_never_turned() {
+        let laps = laps(0, 10);
+        let mut sections = vec![section(climbing_north(), &laps)];
+        sections[0].is_user_defined = true;
+
+        orient(&mut sections, &laps);
+
+        assert!(starts_south(&sections[0]));
+        assert_eq!(count(&sections[0], Direction::Reverse), 10);
+    }
+
+    /// A detected cut, measured and turned the way a cluster's detection
+    /// leaves it before the fold sees it.
+    fn cut(polyline: Vec<GpsPoint>, laps: &[(String, Vec<GpsPoint>)]) -> FrequentSection {
+        let mut sections = vec![section(polyline, laps)];
+        orient(&mut sections, laps);
+        sections.pop().unwrap()
+    }
+
+    /// The fold carries a prior an older build drew north while 80 per cent
+    /// of its laps ride south. The carried line is the fresh cut's, turned.
+    #[test]
+    fn a_fold_carries_the_fresh_cut_turned_to_its_majority() {
+        let laps = laps(2, 8);
+        let prior = section(climbing_north(), &laps);
+
+        let out = fold(&[prior], cut(climbing_north(), &laps), &laps);
+
+        assert!(!starts_south(&out));
+        assert!(out.representative_reversed);
+        assert_eq!(count(&out, Direction::Same), 8);
+    }
+
+    /// A section ridden 13 one way and 12 the other is never turned, so its
+    /// line runs the way its representative rode, fold after fold, whichever
+    /// way the prior ran. The direction is a function of the pool and not of
+    /// the order the laps arrived in.
+    #[test]
+    fn a_near_even_section_keeps_its_representatives_order_across_folds() {
+        let laps = laps(12, 13);
+        for (drawn, south) in [(climbing_north(), false), (descending_south(), true)] {
+            let prior = section(descending_south(), &laps);
+
+            let once = fold(&[prior], cut(drawn.clone(), &laps), &laps);
+            let twice = fold(
+                std::slice::from_ref(&once),
+                cut(drawn.clone(), &laps),
+                &laps,
+            );
+
+            for out in [&once, &twice] {
+                assert_eq!(!starts_south(out), south, "drawn south: {south}");
+                assert!(!out.representative_reversed);
+            }
+        }
+    }
+
+    /// A pinned line holds its geometry, so the fold measures its laps against
+    /// it and leaves it facing the way it was drawn.
+    #[test]
+    fn a_fold_never_turns_a_pinned_line() {
+        let laps = laps(0, 10);
+        let prior = section(climbing_north(), &laps);
+        let out = resolve_fold(
+            vec![section(climbing_north(), &laps)],
+            Vec::new(),
+            std::slice::from_ref(&prior),
+            &SectionUpdatePolicy {
+                pinned_ids: vec![prior.id.clone()],
+                freeze_all_geometry: false,
+            },
+            &SectionConfig::default(),
+            &lookup(&laps),
+            &mut HashMap::new(),
+        );
+
+        let pinned = out
+            .catalogue
+            .iter()
+            .find(|s| s.id == prior.id)
+            .expect("the pin survives");
+        assert!(starts_south(pinned));
+        assert_eq!(count(pinned, Direction::Reverse), 10);
     }
 }
 

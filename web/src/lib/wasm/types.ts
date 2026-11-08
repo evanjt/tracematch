@@ -74,6 +74,8 @@ export interface FrequentSection {
   representativeActivityId: string;
   // The reference triple's range into the representative activity.
   representativeRange?: [number, number];
+  // Whether the line reads that range backwards, turned to face its majority.
+  representativeReversed: boolean;
   activityIds: string[];
   activityPortions: SectionPortion[];
   visitCount: number;

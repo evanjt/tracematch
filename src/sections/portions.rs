@@ -971,6 +971,52 @@ mod tests {
         }
     }
 
+    /// Scenario: a section's line is turned end for end to face the way most
+    /// of its passes ride, and rides beside it are matched against it again.
+    /// Expected behaviour: a ride counts the same passes against the line
+    /// read either way, wherever it sits beside the line and whatever the
+    /// line's heading, so turning a line never adds or drops a member.
+    #[test]
+    fn a_line_read_backwards_counts_the_same_passes() {
+        let config = SectionConfig::default();
+        let m_per_deg_lat = 111_320.0;
+        let lat0: f64 = 47.37;
+        let m_per_deg_lon = m_per_deg_lat * lat0.to_radians().cos();
+        let build = |north_m: f64, east_m: f64, offset_m: f64| -> Vec<GpsPoint> {
+            (0..=120)
+                .map(|i| {
+                    let f = i as f64 / 120.0;
+                    GpsPoint::new(
+                        lat0 + f * north_m / m_per_deg_lat,
+                        8.55 + (f * east_m + offset_m) / m_per_deg_lon,
+                    )
+                })
+                .collect()
+        };
+        let headings = [(2400.0, 0.0), (2400.0, 900.0), (1500.0, 1300.0)];
+        for &(north, east) in &headings {
+            let line = build(north, east, 0.0);
+            let mut turned = line.clone();
+            turned.reverse();
+            let drawn = PreparedLine::new(&line, &config).expect("a 121-point line prepares");
+            let turned = PreparedLine::new(&turned, &config).expect("a 121-point line prepares");
+            for offset in 0..=80 {
+                let ride = build(north, east, offset as f64);
+                let spans = |l: &PreparedLine| -> Vec<(u32, u32)> {
+                    l.portions("ride", &ride)
+                        .iter()
+                        .map(|p| (p.start_index, p.end_index))
+                        .collect()
+                };
+                assert_eq!(
+                    spans(&drawn),
+                    spans(&turned),
+                    "a ride {offset} m east of a line heading {north} m north and {east} m east"
+                );
+            }
+        }
+    }
+
     /// Scenario: a ride runs a 1.2 km line end to end and carries on along
     /// the same road for another 80% of its length, half before and half
     /// after.

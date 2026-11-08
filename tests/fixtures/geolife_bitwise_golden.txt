@@ -1,57 +1,58 @@
+# rebased 2026-11-08, 1f60f1b turns a section's line to face the way most of its passes ride, once the other way holds 60 per cent of them and two more than the held way, and stores which way it reads its reference range; 13 of 122 sections turned end for end, none added, dropped, trimmed or extended; cold, add and bulk costs below the golden, peak heap up 5.3 per cent
 # rebased 2026-10-25, b51abbc counts a traversal only along the whole section line and splits a grown line off when it would shed over a fifth of the held rides; 2 of 16 GeoLife sections redrawn, about 41 of 284 private-corpus sections moved, costs up about a quarter on the private corpus
 # rebased 2026-10-18, measuring a section's stability on the pass chosen as its medoid moves stability only; 16 to 16 sections, digests identical with stability left out; costs within 1% of the unfixed run
 # rebased 2026-10-18, 1704a33 draws a section over the stretch its support floor runs whole and keeps a boundary where riders start or end
 # rebased 2026-10-18, 0e4d8ce keeps redrawn sections to the visit-day minimum and 48fe86a moves the incremental states only
 # rebased 2026-10-07, 3030f0c ends a section pass at its last on-section point; 148 to 148 sections, none changed; costs within 10%
 L 0 0
-A 24dc0a35ea6d858d
+A db6e7d358e2be00c
 E_A 1448df14d4ef5a6e
-B_cold f2065f81b6731072
+B_cold eea0fc554bfccd83
 E_B_cold cffe62232bb94bc0
-B_add_01 3482c740c0b79db8
+B_add_01 931a9811137a17b9
 E_B_add_01 1a89dcc2c4c61703
-B_add_02 6250e9eeb699d33d
+B_add_02 4a8b0ecbfdd56b4c
 E_B_add_02 59cdd5c0e7822f04
-B_add_03 5cbe7b20416a8db1
+B_add_03 fd7ea9bd19ca646e
 E_B_add_03 59cdd5c0e7822f04
-B_add_04 3431007482916c32
+B_add_04 c580f0361631e28b
 E_B_add_04 59cdd5c0e7822f04
-B_add_05 b48b3af3e86567ac
+B_add_05 9f445bb2989ccc6b
 E_B_add_05 bd3107b3ab511055
-B_add_06 6ed9f74e508a8dcc
+B_add_06 9ec6fa67fc728ba9
 E_B_add_06 0a0a7b120c5cea62
-B_add_07 0e6e831138a67d8f
+B_add_07 010c80aa68837ec2
 E_B_add_07 0a0a7b120c5cea62
-B_add_08 eff082f92e32a21b
+B_add_08 528141316ec23b02
 E_B_add_08 0a0a7b120c5cea62
-B_add_09 f177a30acf1b49c3
+B_add_09 1965d7872a52b69a
 E_B_add_09 1906a41df98e92ef
-B_add_10 9d1a6dde652436c0
+B_add_10 cd0623b9246ec859
 E_B_add_10 77d973e70c89af4b
-B_add_11 2ee1b277bd68d3f5
+B_add_11 1eddd3961e63cfe6
 E_B_add_11 1cf9b2e903940698
-B_add_12 e5ea69d2fb08853e
+B_add_12 cfc2e26ce5a2e9f5
 E_B_add_12 bfd8d32e063972d8
-B_add_13 04b364091351b7de
+B_add_13 125402cf171d1d85
 E_B_add_13 b4ad7334ea7d2394
-B_add_14 ca966454b24b9f1e
+B_add_14 823e7200eab73141
 E_B_add_14 280a020c2ee908b8
-B_add_15 ca966454b24b9f1e
+B_add_15 823e7200eab73141
 E_B_add_15 280a020c2ee908b8
-B_add_16 bb4c099187d2aa21
+B_add_16 cbeabc8929062178
 E_B_add_16 280a020c2ee908b8
-B_add_17 461fc522710797d4
+B_add_17 d331b921332eb453
 E_B_add_17 280a020c2ee908b8
-B_add_18 cc24f594018b76fc
+B_add_18 5425ce8c5cd56797
 E_B_add_18 5543fa3d7b5f3f4f
-B_add_19 cc24f594018b76fc
+B_add_19 5425ce8c5cd56797
 E_B_add_19 5543fa3d7b5f3f4f
-B_add_20 24dc0a35ea6d858d
+B_add_20 db6e7d358e2be00c
 E_B_add_20 1448df14d4ef5a6e
-C 24dc0a35ea6d858d
+C db6e7d358e2be00c
 E_C 1448df14d4ef5a6e
-perf_cold_ms 348
-perf_add_median_ms 91
-perf_add_p95_ms 149
-perf_bulk_ms 316
-perf_peak_bytes 16429204
+perf_cold_ms 268
+perf_add_median_ms 66
+perf_add_p95_ms 99
+perf_bulk_ms 223
+perf_peak_bytes 17306161
