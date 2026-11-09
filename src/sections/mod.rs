@@ -432,11 +432,17 @@ pub(crate) fn process_cluster_with(
     // Stability of the chosen pass against the other passes' weighted
     // centroid. The line is that pass's own slice, so measuring it against
     // the line would read 1.0 by construction.
-    let stability = compute_stability(
-        &representative_polyline,
-        &agreement.polyline,
-        config.proximity_threshold,
-    );
+    // With no observation anywhere the centroid is the reference copied, which
+    // would read as perfect agreement.
+    let stability = if agreement.point_density.iter().any(|&d| d > 0) {
+        compute_stability(
+            &representative_polyline,
+            &agreement.polyline,
+            config.proximity_threshold,
+        )
+    } else {
+        0.0
+    };
 
     Some(FrequentSection {
         id: format!("sec_{}_{}", sport_type.to_lowercase(), idx),

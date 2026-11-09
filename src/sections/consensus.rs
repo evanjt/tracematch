@@ -159,18 +159,22 @@ pub fn compute_consensus_polyline(
     let mut point_density = Vec::with_capacity(reference.len());
     let mut total_spread = 0.0;
     let mut total_point_observations = 0u32;
+    let mut observed_points = 0usize;
 
     for result in point_results {
         consensus_points.push(result.point);
         point_density.push(result.density);
         total_spread += result.spread_sum;
         total_point_observations += result.observations;
+        if result.observations > 0 {
+            observed_points += 1;
+        }
     }
 
     // Compute overall metrics
     let observation_count = trace_trees.len() as u32;
     let average_spread = if total_point_observations > 0 {
-        total_spread / (reference.len() as f64)
+        total_spread / (observed_points as f64)
     } else {
         proximity_threshold // Default to max threshold if no observations
     };
@@ -192,3 +196,53 @@ pub fn compute_consensus_polyline(
 
 /// One traversal: the activity and its zero-based pass over the section.
 pub type TraceKey = (String, u32);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(latitude: f64, longitude: f64) -> GpsPoint {
+        GpsPoint {
+            latitude,
+            longitude,
+            elevation: None,
+        }
+    }
+
+    /// Reference points 1.1 km apart, so each trace point has one nearest neighbour.
+    fn reference() -> Vec<GpsPoint> {
+        (0..4).map(|i| point(46.0 + i as f64 * 0.01, 6.0)).collect()
+    }
+
+    /// 0.0005 degrees of latitude is about 55.6 m; 0.00036 is about 40 m.
+    const OFFSET_40_M: f64 = 0.00036;
+
+    #[test]
+    fn spread_is_the_mean_over_observed_reference_points_only() {
+        let reference = reference();
+        let trace = vec![
+            point(46.0 + OFFSET_40_M, 6.0),
+            point(46.01 + OFFSET_40_M, 6.0),
+        ];
+
+        let result = compute_consensus_polyline(&reference, &[trace], 100.0);
+
+        assert_eq!(result.point_density, vec![1, 1, 0, 0]);
+        assert!(
+            (result.average_spread - 40.0).abs() < 0.5,
+            "spread {} should be the 40 m mean of the two observed points",
+            result.average_spread
+        );
+    }
+
+    #[test]
+    fn spread_is_the_threshold_when_no_point_was_observed() {
+        let reference = reference();
+        let trace = vec![point(47.0, 7.0)];
+
+        let result = compute_consensus_polyline(&reference, &[trace], 100.0);
+
+        assert_eq!(result.point_density, vec![0, 0, 0, 0]);
+        assert_eq!(result.average_spread, 100.0);
+    }
+}
