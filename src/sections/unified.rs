@@ -1150,7 +1150,8 @@ impl<'a> LiftLine<'a> {
         super::find_all_track_portions(op, self.line, tun.descent_match_m)
             .into_iter()
             .any(|(ps, pe, _)| {
-                let pe = pe.min(op.len() - 1);
+                // The portion end is exclusive; the last point on the line is the one before it.
+                let pe = pe.min(op.len()) - 1;
                 if pe <= ps + 2 {
                     return false;
                 }

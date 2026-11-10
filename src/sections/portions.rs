@@ -340,7 +340,8 @@ pub fn find_all_track_portions_with_gap(
             if gap_count > max_gap {
                 // End this run
                 let start = current_start.unwrap();
-                let end = i - gap_count;
+                // Exclusive end: one past the last near point, as for the final run.
+                let end = i - gap_count + 1;
                 if end > start {
                     let distance = calculate_route_distance(&track[start..end]);
                     runs.push(OverlapRun {
@@ -1139,5 +1140,35 @@ mod tests {
             "Turning point at {} should be near the peak",
             turns[0]
         );
+    }
+
+    /// A track that follows the reference for `near` points, then leaves it.
+    fn track_then_far(reference: &[GpsPoint], far: usize) -> Vec<GpsPoint> {
+        let mut track: Vec<GpsPoint> = reference.to_vec();
+        for k in 0..far {
+            track.push(GpsPoint::new(45.01 + k as f64 * 0.0001, 7.01));
+        }
+        track
+    }
+
+    #[test]
+    fn run_end_is_exclusive_whether_it_closes_mid_track_or_at_the_end() {
+        let reference = make_linear_reference(10);
+        let at_end =
+            find_all_track_portions_with_gap(&track_then_far(&reference, 0), &reference, 30.0, 3);
+        let mid_track =
+            find_all_track_portions_with_gap(&track_then_far(&reference, 6), &reference, 30.0, 3);
+        assert_eq!(at_end.len(), 1);
+        assert_eq!((at_end[0].0, at_end[0].1), (0, 10));
+        assert_eq!(mid_track.len(), 1);
+        assert_eq!((mid_track[0].0, mid_track[0].1), (0, 10));
+    }
+
+    #[test]
+    fn run_end_includes_last_near_point_for_a_gap_within_tolerance_at_the_end() {
+        let reference = make_linear_reference(10);
+        let trailing =
+            find_all_track_portions_with_gap(&track_then_far(&reference, 2), &reference, 30.0, 3);
+        assert_eq!((trailing[0].0, trailing[0].1), (0, 10));
     }
 }
