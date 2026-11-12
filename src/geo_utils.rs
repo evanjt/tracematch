@@ -10,6 +10,7 @@
 //! | Function | Description |
 //! |----------|-------------|
 //! | [`haversine_distance`] | Great-circle distance between two GPS points |
+//! | [`distance_to_segment`] | Distance from a point to a segment, on a flat projection |
 //! | [`compute_bounds`] | Bounding box of a GPS track |
 //!
 //! ## Example
@@ -90,6 +91,35 @@ pub fn haversine_distance(p1: &GpsPoint, p2: &GpsPoint) -> f64 {
     let point1 = Point::new(p1.longitude, p1.latitude);
     let point2 = Point::new(p2.longitude, p2.latitude);
     Haversine::distance(point1, point2)
+}
+
+/// Metres from `point` to the segment `a`-`b`, on a local flat projection
+/// centred on `point`.
+///
+/// Degrees are scaled at 111 km of latitude, so the result runs about 0.2 %
+/// short of [`haversine_distance`] over the same points. The nearest point is
+/// clamped to the segment's ends, and a zero-length segment measures to its
+/// single vertex.
+pub fn distance_to_segment(point: &GpsPoint, a: &GpsPoint, b: &GpsPoint) -> f64 {
+    const METRES_PER_DEGREE: f64 = 111_000.0;
+    let lng_scale = point.latitude.to_radians().cos() * METRES_PER_DEGREE;
+    let to_xy = |p: &GpsPoint| {
+        (
+            (p.longitude - point.longitude) * lng_scale,
+            (p.latitude - point.latitude) * METRES_PER_DEGREE,
+        )
+    };
+    let (ax, ay) = to_xy(a);
+    let (bx, by) = to_xy(b);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    let t = if len_sq > 0.0 {
+        (-(ax * dx + ay * dy) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    (cx * cx + cy * cy).sqrt()
 }
 
 // =============================================================================
@@ -286,5 +316,64 @@ mod tests {
     fn short_track_is_none() {
         assert!(elevation_stats(&track(&[Some(500.0)])).is_none());
         assert!(elevation_stats(&[]).is_none());
+    }
+
+    #[test]
+    fn segment_distance_beside_the_middle_is_the_perpendicular() {
+        // The segment runs east-west at 47 N, about 75 m long, and the point
+        // sits 0.0001 degrees (about 11 m) north of its middle.
+        let a = GpsPoint::new(47.0, 7.999);
+        let b = GpsPoint::new(47.0, 8.001);
+        let p = GpsPoint::new(47.0001, 8.0);
+        let d = distance_to_segment(&p, &a, &b);
+        assert!((d - 11.1).abs() < 0.1, "distance {d}");
+    }
+
+    #[test]
+    fn segment_distance_on_the_segment_is_zero() {
+        let a = GpsPoint::new(47.0, 7.999);
+        let b = GpsPoint::new(47.0, 8.001);
+        let p = GpsPoint::new(47.0, 8.0);
+        let d = distance_to_segment(&p, &a, &b);
+        assert!(d.abs() < 1e-6, "distance {d}");
+    }
+
+    #[test]
+    fn segment_distance_past_the_far_end_clamps_to_that_end() {
+        let a = GpsPoint::new(47.0, 7.999);
+        let b = GpsPoint::new(47.0, 8.001);
+        let p = GpsPoint::new(47.0001, 8.002);
+        let d = distance_to_segment(&p, &a, &b);
+        let expected = haversine_distance(&p, &b);
+        assert!(
+            (d - expected).abs() < expected * 0.005,
+            "distance {d} expected {expected}"
+        );
+    }
+
+    #[test]
+    fn segment_distance_past_the_near_end_clamps_to_that_end() {
+        let a = GpsPoint::new(47.0, 7.999);
+        let b = GpsPoint::new(47.0, 8.001);
+        let p = GpsPoint::new(47.0001, 7.996);
+        let d = distance_to_segment(&p, &a, &b);
+        let expected = haversine_distance(&p, &a);
+        assert!(
+            (d - expected).abs() < expected * 0.005,
+            "distance {d} expected {expected}"
+        );
+    }
+
+    #[test]
+    fn segment_distance_of_zero_length_is_the_distance_to_the_point() {
+        let a = GpsPoint::new(47.0, 8.001);
+        let p = GpsPoint::new(47.0, 8.0);
+        let d = distance_to_segment(&p, &a, &a);
+        let expected = haversine_distance(&p, &a);
+        assert!(d.is_finite(), "distance {d}");
+        assert!(
+            (d - expected).abs() < expected * 0.005,
+            "distance {d} expected {expected}"
+        );
     }
 }

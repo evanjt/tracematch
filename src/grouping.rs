@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(feature = "parallel")]
 use std::sync::OnceLock;
 
-use crate::geo_utils::haversine_distance;
+use crate::geo_utils::{distance_to_segment, haversine_distance};
 use crate::grouping_filter::{
     RouteEndpointCells, cell_size_for_endpoint_threshold, endpoint_grid_filtered_pairs,
 };
@@ -895,30 +895,6 @@ fn is_point_near_route(point: &GpsPoint, route: &[GpsPoint], threshold: f64) -> 
             .windows(2)
             .any(|w| distance_to_segment(point, &w[0], &w[1]) < threshold),
     }
-}
-
-/// Metres from `point` to the segment `a`-`b`, on a local flat projection
-/// centred on `point`.
-fn distance_to_segment(point: &GpsPoint, a: &GpsPoint, b: &GpsPoint) -> f64 {
-    const METRES_PER_DEGREE: f64 = 111_000.0;
-    let lng_scale = point.latitude.to_radians().cos() * METRES_PER_DEGREE;
-    let to_xy = |p: &GpsPoint| {
-        (
-            (p.longitude - point.longitude) * lng_scale,
-            (p.latitude - point.latitude) * METRES_PER_DEGREE,
-        )
-    };
-    let (ax, ay) = to_xy(a);
-    let (bx, by) = to_xy(b);
-    let (dx, dy) = (bx - ax, by - ay);
-    let len_sq = dx * dx + dy * dy;
-    let t = if len_sq > 0.0 {
-        (-(ax * dx + ay * dy) / len_sq).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let (cx, cy) = (ax + t * dx, ay + t * dy);
-    (cx * cx + cy * cy).sqrt()
 }
 
 /// Split threshold for divergent route detection.
