@@ -28,6 +28,8 @@ const BAND: Band = Band {
     time_floor_ms: 50,
     bytes_factor: 1.20,
     bytes_floor: 16 * 1024 * 1024,
+    work_factor: 1.10,
+    work_floor: 1_000,
 };
 
 /// A golden of its own per test: `check` reads the path and writes it when it
@@ -113,6 +115,25 @@ fn comments_and_cost_lines_are_not_scenarios() {
         &[("perf_cold_ms", 100)],
         &BAND,
     );
+}
+
+/// Scenario: a golden recorded when the gate also timed the fold still holds
+/// `_ms` lines.
+///
+/// Expected behaviour: each is reported as a line to clear, never as a
+/// divergence, and the work lines the harness now measures pass.
+#[test]
+fn a_recorded_clock_nothing_measures_is_a_line_to_clear() {
+    let golden =
+        "A 0000000000000001\nperf_cold_ms 100\nperf_bulk_ms 90\nperf_cold_members_work 5000\n";
+    let over = baseline::regressions(golden, &[("perf_cold_members_work", 5000)], &BAND);
+    assert_eq!(over.len(), 2, "{over:?}");
+    assert!(
+        over.iter()
+            .all(|l| l.contains("nothing measures it any more")),
+        "{over:?}"
+    );
+    assert!(over.iter().all(|l| !l.contains("divergence")), "{over:?}");
 }
 
 /// Scenario: a golden carrying a signed-off rebase is re-derived because the

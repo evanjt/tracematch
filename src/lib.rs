@@ -75,6 +75,9 @@ pub mod synthetic;
 // Lifecycle scenarios for end-to-end pipeline testing (depends on synthetic)
 #[cfg(feature = "synthetic")]
 pub mod scenarios;
+#[cfg(feature = "counters")]
+#[doc(hidden)]
+pub use sections::FoldWork;
 pub use sections::{
     BoundaryReason, BoundaryRecord, CandidateFate, CandidateResolution, CandidateSection, Decision,
     Detection, FoldStopped, FrequentSection, HysteresisParams, HysteresisState, IdentityParams,

@@ -433,7 +433,7 @@ fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
         .iter()
         .find(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. }))
         .unwrap_or_else(|| panic!("no drawn-population record: {:?}", out.boundaries));
-    let BoundaryReason::DrawnPopulation { kept, floor } = rec.reason else {
+    let BoundaryReason::DrawnPopulation { kept, floor, .. } = rec.reason else {
         unreachable!()
     };
     assert_eq!(
@@ -450,6 +450,52 @@ fn a_drawn_population_under_the_floor_is_recorded_and_dropped() {
         min_dist(&at, &axis) < 50.0,
         "the record must sit on the dropped corridor"
     );
+}
+
+/// Scenario: corridors whose candidates are dropped under the floor that
+/// created them, one where the pass the line was drawn from is run whole by
+/// too few occasions, one where the redraw leaves too few members.
+///
+/// Expected behaviour: each record names the activity the line was drawn
+/// from and the range of that activity's track, so a reader can tie the
+/// record to the pass that was judged.
+#[test]
+fn a_drawn_population_record_names_the_pass_it_was_drawn_from() {
+    let corpora = [
+        ("short_hop_corridor", shapes::short_hop_corridor(8)),
+        (
+            "chain_with_an_overrunning_cover",
+            shapes::chain_with_an_overrunning_cover(2, 2, 100.0),
+        ),
+    ];
+    for (name, tracks) in corpora {
+        let out = detect(&tracks);
+        let records: Vec<_> = out
+            .boundaries
+            .iter()
+            .filter(|r| matches!(r.reason, BoundaryReason::DrawnPopulation { .. }))
+            .collect();
+        assert!(!records.is_empty(), "{name}: no drawn-population record");
+        for rec in records {
+            let v = serde_json::to_value(&rec.reason).unwrap();
+            let id = v["representative"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: the record names no activity: {v}"));
+            let (_, track) = tracks
+                .iter()
+                .find(|(t, _)| t == id)
+                .unwrap_or_else(|| panic!("{name}: {id} is no activity of the corpus"));
+            let range = v["range"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: the record names no range: {v}"));
+            let (s, e) = (range[0].as_u64().unwrap(), range[1].as_u64().unwrap());
+            assert!(
+                s < e && e as usize <= track.len(),
+                "{name}: range {s}..{e} of {id}'s {} points",
+                track.len()
+            );
+        }
+    }
 }
 
 /// A corridor's same-day through riders can stand only on a trimmed stretch

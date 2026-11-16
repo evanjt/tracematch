@@ -1,19 +1,21 @@
 //! Cost baselines, recorded beside the bitwise digests.
 //!
 //! A digest says the fold's output did not change. These numbers say it did
-//! not get slower or heavier producing it. A time cannot be compared for
-//! equality the way a digest can, so each number is bounded above its
-//! recorded baseline by a band: a ratio, which absorbs the machine, and an
-//! absolute floor, which absorbs noise on a small number. A rise must clear
-//! both to count. A faster or lighter run never fails.
+//! not get heavier producing it. A cost line is heap (`*_bytes`) or work
+//! (`*_work`, a count the fold keeps of what it did). Neither depends on the
+//! machine's load, so a gate judges them. A time does, and belongs in the
+//! bench. Each number is bounded above its recorded baseline by a band: a
+//! ratio and an absolute floor that absorbs noise on a small number. A rise
+//! must clear both to count. A lighter run never fails.
 //!
 //! Recorded in the same golden file as the digests, under a `perf_` prefix,
 //! and rebased by the same switch, which carries the reason: see
 //! `REBASE_ENV`.
 //!
-//! Times are only meaningful in a release build, so a debug run compares the
+//! The heap is only meaningful in a release build, so a debug run compares the
 //! digests, skips the numbers, and carries the recorded ones forward rather
-//! than overwriting them with figures nobody can use.
+//! than overwriting them with figures nobody can use. The time band stays for
+//! the one budget test that still judges a clock against its own baseline.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -128,23 +130,27 @@ pub fn anchor_peak() -> PeakWindow {
 
 /// How far above its baseline a number may drift before it is a regression.
 ///
-/// Time and memory get their own band because they drift for different
+/// Time, memory and work get their own bands because they drift for different
 /// reasons. A wall clock varies with the machine, so its band has to hold a
-/// slow runner. An allocation count is the code's, not the machine's, so its
-/// band can be tight. A metric named `*_bytes` takes the byte band, every
-/// other takes the time one.
+/// slow runner. An allocation count and a work counter are the code's, not
+/// the machine's, so their bands can be tight. A metric named `*_bytes` takes
+/// the byte band, `*_work` the work band, every other the time one.
 #[derive(Clone, Copy, Debug)]
 pub struct Band {
     pub time_factor: f64,
     pub time_floor_ms: u64,
     pub bytes_factor: f64,
     pub bytes_floor: u64,
+    pub work_factor: f64,
+    pub work_floor: u64,
 }
 
 impl Band {
     fn of(&self, name: &str) -> (f64, u64) {
         if name.ends_with("_bytes") {
             (self.bytes_factor, self.bytes_floor)
+        } else if name.ends_with("_work") {
+            (self.work_factor, self.work_floor)
         } else {
             (self.time_factor, self.time_floor_ms)
         }

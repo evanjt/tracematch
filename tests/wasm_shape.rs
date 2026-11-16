@@ -207,8 +207,13 @@ fn boundary_reason_payloads_stay_snake_case() {
         vec!["kind", "requeued_cells"]
     );
     assert_eq!(
-        reason_keys(BoundaryReason::DrawnPopulation { kept: 1, floor: 1 }),
-        vec!["floor", "kept", "kind"]
+        reason_keys(BoundaryReason::DrawnPopulation {
+            kept: 1,
+            floor: 1,
+            representative: String::new(),
+            range: (0, 0),
+        }),
+        vec!["floor", "kept", "kind", "range", "representative"]
     );
     assert_eq!(
         reason_keys(BoundaryReason::SeamClip {
@@ -270,7 +275,12 @@ fn boundary_reason_tags_match_the_sites_switch() {
         "pass_end"
     );
     assert_eq!(
-        tag(BoundaryReason::DrawnPopulation { kept: 0, floor: 0 }),
+        tag(BoundaryReason::DrawnPopulation {
+            kept: 0,
+            floor: 0,
+            representative: String::new(),
+            range: (0, 0),
+        }),
         "drawn_population"
     );
     assert_eq!(

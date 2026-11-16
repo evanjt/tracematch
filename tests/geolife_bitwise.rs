@@ -35,16 +35,16 @@ fn golden_path(named: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
-/// This gate runs on shared CI runners with a quarter of the cores that
-/// recorded the golden, so the clock band is wide enough to catch only an
-/// order-of-magnitude regression. Allocation does not vary with the runner,
-/// so the heap is bounded properly here. The private corpus carries the tight
-/// clock band.
+/// This gate runs on shared CI runners, and neither the heap nor a work
+/// counter varies with the runner, so both are bounded properly here. A time
+/// belongs in the bench.
 const BAND: Band = Band {
     time_factor: 10.0,
     time_floor_ms: 250,
     bytes_factor: 1.25,
     bytes_floor: 8 * 1024 * 1024,
+    work_factor: 1.10,
+    work_floor: 1_000,
 };
 const MAX_USERS: usize = 200;
 const MAX_PER_USER: usize = 120;

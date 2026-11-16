@@ -323,10 +323,17 @@ pub enum BoundaryReason {
     /// so what the section shows is not repeated ground. `kept` is the
     /// most that ran a stretch whole and `floor` what that stretch
     /// needed. The section is dropped and its cells go back to the
-    /// orphan pool. Distinct from
+    /// orphan pool. `representative` and `range` name the pass the
+    /// line was drawn from, the activity and the half-open range of its
+    /// track, so the record ties to the candidate it judged. Distinct from
     /// [`BoundaryReason::LowSupport`], which cuts a thin stretch and
     /// keeps the section on the remnant.
-    DrawnPopulation { kept: u32, floor: u32 },
+    DrawnPopulation {
+        kept: u32,
+        floor: u32,
+        representative: String,
+        range: (u32, u32),
+    },
     /// The section's one real pass ended here but its corridor's
     /// ground runs on. The ground beyond re-entered the candidate
     /// queue on its own merits; this record marks the seam between a
@@ -1084,7 +1091,7 @@ fn rescue_confirmed(
                         {
                             continue;
                         }
-                        #[cfg(feature = "synthetic")]
+                        #[cfg(feature = "counters")]
                         {
                             leaves.rescue_matches += 1;
                         }
@@ -1394,10 +1401,11 @@ fn fold_track_into_grid(
         std::collections::hash_map::Entry::Occupied(mut e) => {
             let (_, sc) = e.get_mut();
             if seq - sc.last_seq > tun.pass_away_cells {
-                match sc.levels.iter_mut().find(|(lvl, _)| match (*lvl, ele) {
-                    (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
-                    _ => true,
-                }) {
+                match sc
+                    .levels
+                    .iter_mut()
+                    .find(|(lvl, _)| same_elevation_level(*lvl, ele, tun.ele_level_tol_m))
+                {
                     Some((_, n)) => *n = (*n + 1).min(PASS_CLASS_MAX),
                     None => sc.levels.push((ele, 1)),
                 }
@@ -1569,10 +1577,8 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> (usiz
     let mut recent: std::collections::VecDeque<Option<usize>> =
         std::collections::VecDeque::with_capacity(tun.pass_window + 1);
 
-    let same_level = |a: Option<f64>, b: Option<f64>| match (a, b) {
-        (Some(a), Some(b)) => (a - b).abs() < tun.ele_level_tol_m,
-        _ => true,
-    };
+    let same_level =
+        |a: Option<f64>, b: Option<f64>| same_elevation_level(a, b, tun.ele_level_tol_m);
 
     for (i, p) in pts.iter().enumerate() {
         let c = fine.cell_of(p.latitude, p.longitude);
@@ -1622,14 +1628,12 @@ fn simple_pass_range(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> (usiz
 /// A resumed stretch is its own traversal only when it re-covers the
 /// majority of the previous pass: laps, out-and-back returns and the leg
 /// after an interval rep do, a false cut at a sharp corner does not and
-/// is rejoined. Majority is rule 9's bar, so this needs no constant.
+/// is rejoined. Covering is judged on the ground, a point of the previous
+/// pass within [`GROUND_TOL_M`] of the resumed stretch, so a return on the
+/// far side of a road is as much a return as one on the same line. Majority
+/// is rule 9's bar, so this needs no constant.
 fn simple_pass_ranges(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> Vec<(usize, usize)> {
-    let cells_of = |r: (usize, usize)| -> HashSet<Cell> {
-        pts[r.0..r.1]
-            .iter()
-            .map(|p| fine.cell_of(p.latitude, p.longitude))
-            .collect()
-    };
+    let ref_lat = pts.iter().map(|p| p.latitude).fold(f64::MIN, f64::max);
     let mut out: Vec<(usize, usize)> = Vec::new();
     let mut base = 0usize;
     while base + 1 < pts.len() {
@@ -1642,10 +1646,10 @@ fn simple_pass_ranges(pts: &[GpsPoint], fine: &CellGrid, tun: &Tunables) -> Vec<
         let next = (base + s, base + e);
         match out.last_mut() {
             Some(prev) => {
-                let prev_cells = cells_of(*prev);
-                let next_cells = cells_of(next);
-                let shared = prev_cells.iter().filter(|c| next_cells.contains(c)).count();
-                if 2 * shared >= prev_cells.len() {
+                let reach = RunReach::new(&pts[next.0..next.1], ref_lat, GROUND_TOL_M);
+                let prev_pts = &pts[prev.0..prev.1];
+                let covered = prev_pts.iter().filter(|p| reach.near(p)).count();
+                if 2 * covered >= prev_pts.len() {
                     out.push(next);
                 } else {
                     prev.1 = next.1;
@@ -2751,20 +2755,41 @@ impl LineMatcher {
             // trimmed, so a return from a turn at the line's end still
             // reaches that end.
             let mut counted_to: Option<(usize, usize)> = None;
+            // Where the ranges since the last counted pass began. The
+            // splitter may cut a stretch that runs the line whole a few
+            // points after it re-entered the ground, leaving its first
+            // part at the tail of the range before; that range counted
+            // nothing, so the next one looks back to where they began.
+            let mut uncounted_from: Option<usize> = None;
             for (ps, pe) in simple_pass_ranges(&track[run_s..run_e], &self.pass_grid, tun) {
                 let (start, end) = (run_s + ps, run_s + pe);
                 let from = match counted_to {
                     Some((cut, trimmed)) if cut == start => trimmed.min(start),
-                    _ => start,
+                    _ => uncounted_from.unwrap_or(start),
                 };
                 counted_to = None;
+                let mut counted = false;
                 for (s, e) in self.ground_runs(track, from, end) {
                     if self.covers_line(&track[s..e]) {
                         let pass = self.trim_to_ends(track, s, e);
+                        // A leg the trim set aside ahead of the pass, such
+                        // as a return held in one range with the ride after
+                        // it, runs the line on its own.
+                        for (ls, le) in self.ground_runs(track, s, pass.0) {
+                            if self.covers_line(&track[ls..le]) {
+                                out.push(self.trim_to_ends(track, ls, le));
+                            }
+                        }
                         out.push(pass);
                         counted_to = Some((end, pass.1));
+                        counted = true;
                     }
                 }
+                uncounted_from = if counted {
+                    None
+                } else {
+                    Some(from.min(uncounted_from.unwrap_or(start)))
+                };
             }
         }
         out
@@ -3181,27 +3206,297 @@ impl RunReach {
 /// check against a grid rather than every line point.
 const STATION_M: f64 = GROUND_TOL_M / 5.0;
 
-/// The cumulative arc of `line` at each point, and its stations: indices
-/// at least [`STATION_M`] of arc apart, the last point always kept, so a
-/// stretch's ends are real points. A line runs whole when every station
-/// is within the tolerance of the run, which is the one test
+/// Whether a rendered line is a duplicate of ground already accepted: it
+/// touches that ground and adds less unrepresented travel than a section
+/// needs. A line shorter than twice the minimum owes only the larger
+/// share of itself, so a short line that is mostly its own ground is not
+/// a duplicate because one end meets a neighbour.
+fn render_is_duplicate(touches_accepted: bool, fresh_m: f64, render_m: f64, min_len: f64) -> bool {
+    touches_accepted && fresh_m < min_len.min(render_m / 2.0)
+}
+
+/// Whether [`line_stations`] walks `line` from its last point. The walk
+/// starts at the end whose point sorts higher by (latitude, longitude), so
+/// a line and the same line turned end for end walk the same ground. Where
+/// the two ends are one point, the first pair of points that differ decides.
+fn walks_from_last(line: &[GpsPoint]) -> bool {
+    let key = |p: &GpsPoint| (p.latitude, p.longitude);
+    line.iter().rev().map(key).gt(line.iter().map(key))
+}
+
+/// The arc of `line` at each point, measured from the walk's start, and its
+/// stations: indices at least [`STATION_M`] of arc apart, the last point
+/// always kept, so a stretch's ends are real points. The walk runs from the
+/// canonical end ([`walks_from_last`]), so the stations are the same points
+/// whichever way the line is stored. The indices come back in ascending
+/// order, and the arc between two of them is the magnitude of the
+/// difference of their entries in `cum`. A line runs whole when every
+/// station is within the tolerance of the run, which is the one test
 /// [`ContributorReach::floor_stretch`] and [`LineMatcher`] share.
 fn line_stations(line: &[GpsPoint]) -> (Vec<f64>, Vec<usize>) {
-    let mut cum = vec![0.0; line.len()];
-    for k in 1..line.len() {
-        cum[k] = cum[k - 1] + crate::geo_utils::haversine_distance(&line[k - 1], &line[k]);
+    let mut walk: Vec<usize> = (0..line.len()).collect();
+    if walks_from_last(line) {
+        walk.reverse();
     }
+    let mut cum = vec![0.0; line.len()];
     let mut stations: Vec<usize> = Vec::new();
-    for k in 0..line.len() {
-        if k + 1 == line.len()
-            || stations
-                .last()
-                .is_none_or(|&l| cum[k] - cum[l] >= STATION_M)
-        {
+    let mut kept_at = 0.0;
+    for (w, &k) in walk.iter().enumerate() {
+        if w > 0 {
+            let prev = walk[w - 1];
+            cum[k] = cum[prev] + crate::geo_utils::haversine_distance(&line[prev], &line[k]);
+        }
+        if stations.is_empty() || w + 1 == walk.len() || cum[k] - kept_at >= STATION_M {
             stations.push(k);
+            kept_at = cum[k];
         }
     }
+    stations.sort_unstable();
     (cum, stations)
+}
+
+/// Whether two elevations are one level of the ground: within `tol_m` of
+/// each other, or either one unknown, since a fix with no elevation cannot be
+/// told from the level it is compared with. Ground re-arrived at beyond the
+/// tolerance is stacked above or below, a switchback's next leg, and is never
+/// a repeat of the ground below it.
+fn same_elevation_level(a: Option<f64>, b: Option<f64>, tol_m: f64) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() < tol_m,
+        _ => true,
+    }
+}
+
+/// The index of the point where `line` turns back over ground it has
+/// already travelled, or `None` when it never does.
+///
+/// A line turns back when a station of it lies within [`GROUND_TOL_M`] of an
+/// earlier station that is more than twice that far behind it along the
+/// line, and the two head opposite ways. The arc gap leaves a corner alone,
+/// whose two sides are close but only a corner's arc apart, and the heading
+/// leaves a lap alone, which passes its own ground the same way. The turn is
+/// the point of the line between the first such pair that lies farthest from
+/// the earlier station, a hairpin's apex. "Earlier" is along the walk of
+/// [`line_stations`], so a line and the same line turned end for end turn at
+/// the same ground.
+fn hairpin_turn(line: &[GpsPoint]) -> Option<usize> {
+    // Derived: three stations either side, [`STATION_M`] of arc each, so a
+    // heading reads about 60 m of line, past a fix's jitter and under the
+    // tolerance a hairpin's legs must lie within.
+    const HEADING_SPAN: usize = 3;
+    if line.len() < 3 {
+        return None;
+    }
+    let (cum, mut stations) = line_stations(line);
+    // Walked from the canonical end, so "earlier" is the same ground
+    // whichever way the line is stored.
+    if walks_from_last(line) {
+        stations.reverse();
+    }
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * line[0].latitude.to_radians().cos();
+    let xy = |k: usize| (line[k].latitude * m_lat, line[k].longitude * m_lng);
+    let heading = |p: usize| {
+        let a = xy(stations[p.saturating_sub(HEADING_SPAN)]);
+        let b = xy(stations[(p + HEADING_SPAN).min(stations.len() - 1)]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let n = dx.hypot(dy).max(1e-9);
+        (dx / n, dy / n)
+    };
+    let cell = |(x, y): (f64, f64)| {
+        (
+            (x / GROUND_TOL_M).floor() as i32,
+            (y / GROUND_TOL_M).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (p, &k) in stations.iter().enumerate() {
+        let (x, y) = xy(k);
+        let h = heading(p);
+        let (cx, cy) = cell((x, y));
+        let back = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dy| (cx + dx, cy + dy)))
+            .filter_map(|c| grid.get(&c))
+            .flatten()
+            .copied()
+            .filter(|&q| {
+                let kq = stations[q];
+                let (qx, qy) = xy(kq);
+                let hq = heading(q);
+                (cum[k] - cum[kq]).abs() > 2.0 * GROUND_TOL_M
+                    && (x - qx).hypot(y - qy) < GROUND_TOL_M
+                    && h.0 * hq.0 + h.1 * hq.1 < -0.5
+            })
+            .min();
+        if let Some(q) = back {
+            let (lo, hi) = (stations[q].min(k), stations[q].max(k));
+            let from = xy(stations[q]);
+            let reach = |t: usize| (xy(t).0 - from.0).hypot(xy(t).1 - from.1);
+            let apex = (lo..=hi).fold(lo, |best, t| if reach(t) > reach(best) { t } else { best });
+            return (apex > 0 && apex + 1 < line.len()).then_some(apex);
+        }
+        grid.entry((cx, cy)).or_default().push(p);
+    }
+    None
+}
+
+/// The share of a hairpin's shorter leg that its longer leg must run over for
+/// the turn to be an out-and-back, and its return to be dropped as a pass of
+/// the other: three quarters. Derived from the shares measured on a corpus of
+/// 1,201 activities: the shorter legs of the turns the cut meets are run over
+/// by under 0.35 (a return that rejoins its own ground for a stretch, and
+/// switchback legs) or by over 0.85 (a return over the outbound), apart from
+/// eight legs under 170 m between. A leg run over less than this is mostly
+/// ground the line travels once, and dropping it would drop that ground from
+/// the section.
+const RETURN_SHARE: f64 = 0.75;
+
+/// Whether `short` runs back over `long`: more than [`RETURN_SHARE`] of its
+/// length lies within [`GROUND_TOL_M`] of a point of `long` at the same
+/// elevation level ([`same_elevation_level`]). The legs of a switchback climb
+/// lie within the tolerance of each other in plan and are stacked, so each
+/// leg is new ground and not a return.
+fn runs_back_over(short: &[GpsPoint], long: &[GpsPoint]) -> bool {
+    let Some(first) = long.first() else {
+        return false;
+    };
+    let tol_m = Tunables::DEFAULT.ele_level_tol_m;
+    let m_lat = 111_132.0;
+    let m_lng = 111_320.0 * first.latitude.to_radians().cos();
+    let xy = |p: &GpsPoint| (p.latitude * m_lat, p.longitude * m_lng);
+    let cell = |(x, y): (f64, f64)| {
+        (
+            (x / GROUND_TOL_M).floor() as i32,
+            (y / GROUND_TOL_M).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32), Vec<&GpsPoint>> = HashMap::new();
+    for p in long {
+        grid.entry(cell(xy(p))).or_default().push(p);
+    }
+    let covered = |p: &GpsPoint| {
+        let (x, y) = xy(p);
+        let (cx, cy) = cell((x, y));
+        (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dy| (cx + dx, cy + dy)))
+            .filter_map(|c| grid.get(&c))
+            .flatten()
+            .any(|q| {
+                let (qx, qy) = xy(q);
+                (x - qx).hypot(y - qy) < GROUND_TOL_M
+                    && same_elevation_level(q.elevation, p.elevation, tol_m)
+            })
+    };
+    let (mut total, mut over) = (0.0, 0.0);
+    for w in short.windows(2) {
+        let step = crate::geo_utils::haversine_distance(&w[0], &w[1]);
+        total += step;
+        if covered(&w[1]) {
+            over += step;
+        }
+    }
+    over > RETURN_SHARE * total
+}
+
+/// The range of `line` that draws one leg of every hairpin in it, as a
+/// half-open index range. Each turn ([`hairpin_turn`]) cuts the line in two
+/// and the longer leg stays, so a line drawn over both legs of an
+/// out-and-back is drawn over one, and the other leg is a reverse pass of
+/// it. Equal legs keep the one that holds the line's canonical start
+/// ([`walks_from_last`]), so the choice does not depend on how the line is
+/// stored. A turn whose shorter leg does not run back over the longer
+/// ([`runs_back_over`]) is no out-and-back and leaves the line whole, as does
+/// a line that never turns back.
+fn single_leg(line: &[GpsPoint]) -> (usize, usize) {
+    let (mut s, mut e) = (0, line.len());
+    while let Some(t) = hairpin_turn(&line[s..e]) {
+        let t = s + t;
+        let (first, second) = (&line[s..=t], &line[t..e]);
+        let keep_first = match crate::matching::calculate_route_distance(first)
+            .partial_cmp(&crate::matching::calculate_route_distance(second))
+        {
+            Some(std::cmp::Ordering::Greater) => true,
+            Some(std::cmp::Ordering::Less) => false,
+            _ => !walks_from_last(&line[s..e]),
+        };
+        let (kept, dropped) = if keep_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        if !runs_back_over(dropped, kept) {
+            break;
+        }
+        if keep_first {
+            e = t + 1;
+        } else {
+            s = t;
+        }
+    }
+    (s, e)
+}
+
+/// The part of `track[range]` a section is drawn over when that pass turns
+/// back on itself: one leg of each hairpin ([`single_leg`]), as an absolute
+/// half-open range of `track`, or `None` when the pass is drawn whole or the
+/// leg is under `min_section_length`.
+///
+/// The turn's apex is where the leg begins on the ground, but the pass
+/// counter ([`LineMatcher`]) begins the pass that leaves a turn where the
+/// walk re-enters ground it left some cells earlier, which falls past the
+/// apex. A leg that starts at the apex then reaches back before its own
+/// walk's pass, and the walk it was cut from does not count it. The leg
+/// starts where that pass starts when the apex would not be counted.
+fn one_leg_of_pass(
+    track: &[GpsPoint],
+    (rs, re): (usize, usize),
+    config: &SectionConfig,
+) -> Option<(usize, usize)> {
+    let seg = &track[rs..re];
+    let (ls, le) = single_leg(seg);
+    if (ls, le) == (0, seg.len()) {
+        return None;
+    }
+    let (ls, le) = (rs + ls, rs + le);
+    let ls = counted_leg_start(track, (ls, le), config);
+    (crate::matching::calculate_route_distance(&track[ls..le]) >= config.min_section_length)
+        .then_some((ls, le))
+}
+
+/// Where `leg` of `track` starts, as the first index at or after `leg.0`
+/// that the walk counts the leg from: `leg.0` when the walk's own pass over
+/// the leg is counted, else the start of the simple pass that holds the
+/// leg's last point, when the leg from there is counted.
+fn counted_leg_start(track: &[GpsPoint], leg: (usize, usize), config: &SectionConfig) -> usize {
+    let counted = |from: usize| {
+        LineMatcher::new(&track[from..leg.1], config)
+            .passes(track)
+            .iter()
+            .any(|&(s, e)| s < leg.1 && e > from)
+    };
+    if counted(leg.0) {
+        return leg.0;
+    }
+    let matcher = LineMatcher::new(&track[leg.0..leg.1], config);
+    let last = leg.1 - 1;
+    for (run_s, run_e, _) in runs_in_cells(track, &matcher.dilated, &matcher.grid) {
+        if !(run_s..run_e).contains(&last) {
+            continue;
+        }
+        let passes =
+            simple_pass_ranges(&track[run_s..run_e], &matcher.pass_grid, &Tunables::DEFAULT);
+        if let Some(from) = passes
+            .iter()
+            .map(|&(s, e)| (run_s + s, run_s + e))
+            .find(|&(s, e)| (s..e).contains(&last))
+            .map(|(s, _)| s)
+            && from > leg.0
+            && counted(from)
+        {
+            return from;
+        }
+    }
+    leg.0
 }
 
 /// A polyline's segments in local metres, indexed on a grid whose cell is
@@ -3390,7 +3685,7 @@ impl<'a> ContributorReach<'a> {
             let mut occasions: HashSet<(bool, i64)> = HashSet::new();
             for &(b, t) in &reach {
                 occasions.insert(occasion(t));
-                let len = cum[stations[b]] - cum[stations[a]];
+                let len = (cum[stations[b]] - cum[stations[a]]).abs();
                 if len < config.min_section_length {
                     break;
                 }
@@ -4215,6 +4510,99 @@ fn unrepresented_runs(mask: &[bool], cum: &[f64], bridge_m: f64) -> Vec<(usize, 
     runs
 }
 
+/// Every qualifying pass any track makes over `polyline`, as the detector
+/// counts a section's population: the one cut both the draw step and the
+/// chain alignment take after a line is settled. Each track's passes are pure
+/// per track and kept under the render's key, so a newcomer pays for its own
+/// cut and every earlier entry stands.
+fn drawn_population(
+    polyline: &[GpsPoint],
+    render: (u32, usize, usize),
+    track_map: &HashMap<&str, &[GpsPoint]>,
+    bounds_of: &HashMap<&str, (f64, f64, f64, f64)>,
+    config: &SectionConfig,
+    cell_size: f64,
+    leaves: &mut LeafMemos,
+) -> Vec<SectionPortion> {
+    let candidates =
+        super::portions::portion_candidates_bounded(polyline, track_map, bounds_of, config);
+    let dkey = DrawnKey {
+        render,
+        proximity_bits: config.proximity_threshold.to_bits(),
+        cell_size_bits: cell_size.to_bits(),
+    };
+    let per_track = leaves.drawn.entry(dkey).or_default();
+    let missing: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|id| !per_track.contains_key(*id))
+        .collect();
+    if !missing.is_empty() {
+        let fresh = super::portions::portions_per_track(polyline, track_map, &missing, config);
+        for (id, ports) in missing.iter().zip(fresh) {
+            per_track.insert((*id).to_string(), ports);
+        }
+    }
+    candidates
+        .iter()
+        .flat_map(|id| per_track[*id].iter().cloned())
+        .collect()
+}
+
+/// The record of a section whose drawn population sits under the floor that
+/// created it, or `None` when it holds. One judge for the redraw in the
+/// draw step and the recount after the chain alignment, so a line re-cut
+/// later cannot ship with fewer members than the floor it was drawn to.
+fn under_creating_floor(
+    section: &FrequentSection,
+    creating_required: usize,
+    track_index: &HashMap<&str, usize>,
+    config: &SectionConfig,
+    epochs: &[Option<i64>],
+    span_s: i64,
+) -> Option<BoundaryRecord> {
+    let drawn: Vec<Portion> = section
+        .activity_portions
+        .iter()
+        .filter_map(|p| {
+            track_index.get(p.activity_id.as_str()).map(|&t| {
+                (
+                    t,
+                    p.start_index as usize,
+                    p.end_index as usize,
+                    p.distance_meters,
+                )
+            })
+        })
+        .collect();
+    if has_support_at(&drawn, creating_required, config, epochs, span_s) {
+        return None;
+    }
+    let mid = section.polyline[section.polyline.len() / 2];
+    Some(BoundaryRecord {
+        latitude: mid.latitude,
+        longitude: mid.longitude,
+        section_ids: Vec::new(),
+        reason: BoundaryReason::DrawnPopulation {
+            kept: occasion_support(&drawn, epochs).0 as u32,
+            floor: creating_required.max(config.min_activities as usize) as u32,
+            representative: section.representative_activity_id.clone(),
+            range: section.representative_range.unwrap_or_default(),
+        },
+    })
+}
+
+/// What a section's line was before the chain alignment re-cut it, so a
+/// recount that finds nothing on the new line can put the old one back.
+struct Realigned {
+    section: usize,
+    render_track: usize,
+    polyline: Vec<GpsPoint>,
+    distance_meters: f64,
+    representative_activity_id: String,
+    representative_range: Option<(u32, u32)>,
+}
+
 /// Rule 5 corollary: sections that tile one physical line prefer
 /// geometry cut from ONE covering activity, so a chain renders as
 /// consecutive ranges of a single real trace and its joints meet on a
@@ -4238,10 +4626,10 @@ fn unify_chain_references(
     divergence: f64,
     tun: &Tunables,
     leaves: &mut LeafMemos,
-) {
+) -> Vec<Realigned> {
     let n = sections.len();
     if n < 2 {
-        return;
+        return Vec::new();
     }
     let t_u = web_time::Instant::now();
     let line_digests: Vec<u64> = sections
@@ -4278,7 +4666,7 @@ fn unify_chain_references(
     }
     phase!("u_links", t_u);
     if links.is_empty() {
-        return;
+        return Vec::new();
     }
     let mut components: Vec<Vec<usize>> = uf.groups().into_values().collect();
     components.sort();
@@ -4461,7 +4849,7 @@ fn unify_chain_references(
         }
     }
     if chosen.is_empty() {
-        return;
+        return Vec::new();
     }
 
     // Joint snap: linked pairs now cut from the same trace meet at a
@@ -4525,6 +4913,7 @@ fn unify_chain_references(
     }
 
     // Each iteration writes one section, keyed by the member it came from.
+    let mut realigned = Vec::new();
     #[allow(clippy::iter_over_hash_type)]
     for (&m, &(t, s, e)) in &chosen {
         let pts = sport_tracks[t].1;
@@ -4532,11 +4921,21 @@ fn unify_chain_references(
         if e < s + 2 {
             continue;
         }
+        realigned.push(Realigned {
+            section: m,
+            render_track: t,
+            polyline: std::mem::take(&mut sections[m].polyline),
+            distance_meters: sections[m].distance_meters,
+            representative_activity_id: std::mem::take(&mut sections[m].representative_activity_id),
+            representative_range: sections[m].representative_range,
+        });
         sections[m].polyline = pts[s..e].to_vec();
         sections[m].distance_meters = crate::matching::calculate_route_distance(&pts[s..e]);
         sections[m].representative_activity_id = sport_tracks[t].0.to_string();
         sections[m].representative_range = Some((s as u32, e as u32));
     }
+    realigned.sort_by_key(|r| r.section);
+    realigned
 }
 
 /// Detect sections for one sport's tracks via the unified pipeline.
@@ -4748,8 +5147,8 @@ fn keep_pens(leaves: &mut LeafMemos, rows: &[(String, usize, usize, f64, f64)], 
 struct RenderLeaf {
     rows: Vec<(String, usize, usize, f64, f64)>,
     support: PassSupport,
-    /// Read only by the synthetic lane's work counter.
-    #[cfg_attr(not(feature = "synthetic"), allow(dead_code))]
+    /// Read only by the work counters.
+    #[cfg_attr(not(feature = "counters"), allow(dead_code))]
     tests: usize,
 }
 
@@ -4860,7 +5259,7 @@ fn render_leaf(
 /// per-sample support, and count its point-distance tests.
 fn keep_render(leaves: &mut LeafMemos, rkey: RenderKey, leaf: RenderLeaf, cell_size: f64) {
     keep_pens(leaves, &leaf.rows, cell_size);
-    #[cfg(feature = "synthetic")]
+    #[cfg(feature = "counters")]
     {
         leaves.render_tests += leaf.tests;
     }
@@ -5171,6 +5570,9 @@ fn detect_for_cluster_with_grid(
     // The cells each emitted section was selected on, beside `sections`:
     // what a cut's two sides are matched against once selection is done.
     let mut emitted_cells: Vec<HashSet<Cell>> = Vec::new();
+    // The visit floor each emitted section was created under, indexed like
+    // `sections`.
+    let mut creating_floors: Vec<usize> = Vec::new();
     let mut pooled_ever: HashSet<Cell> = HashSet::new();
     loop {
         lap!(4);
@@ -6162,11 +6564,47 @@ fn detect_for_cluster_with_grid(
                             latitude: mid.latitude,
                             longitude: mid.longitude,
                             section_ids: Vec::new(),
-                            reason: BoundaryReason::DrawnPopulation { kept, floor },
+                            reason: BoundaryReason::DrawnPopulation {
+                                kept,
+                                floor,
+                                representative: sport_tracks[t_idx].0.to_string(),
+                                range: (rs as u32, re as u32),
+                            },
                         });
                         orphaned.extend(node.cells.iter().copied());
                         continue;
                     }
+                }
+            };
+            // A line drawn over both legs of an out-and-back is drawn over
+            // one: the return leg re-covers the outbound within the ground
+            // tolerance, so it is a pass of the same section of its own and
+            // the population counts it as one. The leg's own length must
+            // still clear the section floor.
+            let (t_idx, rs, re) = {
+                let track = sport_tracks[t_idx].1;
+                match one_leg_of_pass(track, (rs, re), config) {
+                    Some((ls, le)) => {
+                        let seg = &track[rs..re];
+                        let kept_m = crate::matching::calculate_route_distance(&track[ls..le]);
+                        let full_m = crate::matching::calculate_route_distance(seg);
+                        for cut in [(ls > rs).then_some(ls), (le < re).then_some(le - 1)]
+                            .into_iter()
+                            .flatten()
+                        {
+                            records.push(BoundaryRecord {
+                                latitude: track[cut].latitude,
+                                longitude: track[cut].longitude,
+                                section_ids: Vec::new(),
+                                reason: BoundaryReason::Trim {
+                                    kept_metres: kept_m,
+                                    dropped_metres: full_m - kept_m,
+                                },
+                            });
+                        }
+                        (t_idx, ls, le)
+                    }
+                    None => (t_idx, rs, re),
                 }
             };
             // Backoff binds on the RENDER, not only on the probe: the
@@ -6194,13 +6632,22 @@ fn detect_for_cluster_with_grid(
                 &backoff_grid,
                 cell_size,
             );
+            let render_m: f64 = render
+                .windows(2)
+                .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
+                .sum();
             let fresh_m: f64 = render
                 .windows(2)
                 .enumerate()
                 .filter(|(k, _)| !render_mask[*k] && !render_mask[k + 1])
                 .map(|(_, w)| crate::geo_utils::haversine_distance(&w[0], &w[1]))
                 .sum();
-            if render_mask.iter().any(|&m| m) && fresh_m < config.min_section_length {
+            if render_is_duplicate(
+                render_mask.iter().any(|&m| m),
+                fresh_m,
+                render_m,
+                config.min_section_length,
+            ) {
                 let mid = render[render.len() / 2];
                 records.push(BoundaryRecord {
                     latitude: mid.latitude,
@@ -6239,40 +6686,15 @@ fn detect_for_cluster_with_grid(
             // the line drawn here. So this is where the population is
             // decided, and nothing below re-decides it.
             lap!(2);
-            let drawn_candidates = super::portions::portion_candidates_bounded(
+            let drawn_portions = drawn_population(
                 &section.polyline,
+                (track_nums[t_idx], rs, re),
                 &track_map,
                 &bounds_of,
                 config,
+                cell_size,
+                leaves,
             );
-            let dkey = DrawnKey {
-                render: (track_nums[t_idx], rs, re),
-                proximity_bits: config.proximity_threshold.to_bits(),
-                cell_size_bits: cell_size.to_bits(),
-            };
-            // Each track's passes over this line are pure per track, so a
-            // newcomer pays for its own cut and every earlier entry stands.
-            let per_track = leaves.drawn.entry(dkey).or_default();
-            let missing: Vec<&str> = drawn_candidates
-                .iter()
-                .copied()
-                .filter(|id| !per_track.contains_key(*id))
-                .collect();
-            if !missing.is_empty() {
-                let fresh = super::portions::portions_per_track(
-                    &section.polyline,
-                    &track_map,
-                    &missing,
-                    config,
-                );
-                for (id, ports) in missing.iter().zip(fresh) {
-                    per_track.insert((*id).to_string(), ports);
-                }
-            }
-            let drawn_portions: Vec<SectionPortion> = drawn_candidates
-                .iter()
-                .flat_map(|id| per_track[*id].iter().cloned())
-                .collect();
             lap!(3);
             if !drawn_portions.is_empty() {
                 section.visit_count = drawn_portions.len() as u32;
@@ -6314,31 +6736,15 @@ fn detect_for_cluster_with_grid(
             // to that floor, in the days it counted, before the section
             // claims its ground, or a section nobody will see still
             // pushes its neighbours off.
-            let drawn: Vec<Portion> = section
-                .activity_portions
-                .iter()
-                .filter_map(|p| {
-                    track_index.get(p.activity_id.as_str()).map(|&t| {
-                        (
-                            t,
-                            p.start_index as usize,
-                            p.end_index as usize,
-                            p.distance_meters,
-                        )
-                    })
-                })
-                .collect();
-            if !has_support_at(&drawn, creating_required, config, &epochs, span_s) {
-                let mid = section.polyline[section.polyline.len() / 2];
-                records.push(BoundaryRecord {
-                    latitude: mid.latitude,
-                    longitude: mid.longitude,
-                    section_ids: Vec::new(),
-                    reason: BoundaryReason::DrawnPopulation {
-                        kept: occasion_support(&drawn, &epochs).0 as u32,
-                        floor: creating_required.max(config.min_activities as usize) as u32,
-                    },
-                });
+            if let Some(record) = under_creating_floor(
+                &section,
+                creating_required,
+                &track_index,
+                config,
+                &epochs,
+                span_s,
+            ) {
+                records.push(record);
                 orphaned.extend(node.cells.iter().copied());
                 continue;
             }
@@ -6505,6 +6911,7 @@ fn detect_for_cluster_with_grid(
                 }
             }
             emitted_cells.push(node.cells.iter().copied().collect());
+            creating_floors.push(creating_required);
             sections.push(section);
             emitted_portions.push(portions);
         }
@@ -6532,7 +6939,7 @@ fn detect_for_cluster_with_grid(
         }
     }
     let t_chains = web_time::Instant::now();
-    unify_chain_references(
+    let realigned = unify_chain_references(
         &mut sections,
         &emitted_portions,
         sport_tracks,
@@ -6541,6 +6948,74 @@ fn detect_for_cluster_with_grid(
         tun,
         leaves,
     );
+    // The alignment re-cut these lines after their members were counted, so
+    // the population is decided again on the line now shown: members, rows
+    // and visits belong to the line the athlete sees. A line nothing runs
+    // keeps the one it was counted on.
+    let mut dropped: Vec<usize> = Vec::new();
+    for r in realigned {
+        let s = &mut sections[r.section];
+        let (rs, re) = s
+            .representative_range
+            .map_or((0, 0), |(a, b)| (a as usize, b as usize));
+        let portions = drawn_population(
+            &s.polyline,
+            (track_nums[r.render_track], rs, re),
+            &track_map,
+            &bounds_of,
+            config,
+            cell_size,
+            leaves,
+        );
+        if portions.is_empty() {
+            s.polyline = r.polyline;
+            s.distance_meters = r.distance_meters;
+            s.representative_activity_id = r.representative_activity_id;
+            s.representative_range = r.representative_range;
+            continue;
+        }
+        let mut ids: Vec<String> = portions
+            .iter()
+            .map(|p| p.activity_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        ids.sort();
+        s.visit_count = portions.len() as u32;
+        s.activity_ids = ids;
+        s.activity_portions = portions;
+        // The recount can leave fewer members than the floor the section
+        // was created under, as the draw step's does. Its cells cannot
+        // rejoin the orphan pool this late, so the record is the trace and
+        // the line is not emitted.
+        if let Some(record) = under_creating_floor(
+            s,
+            creating_floors[r.section],
+            &track_index,
+            config,
+            &epochs,
+            span_s,
+        ) {
+            records.push(record);
+            dropped.push(r.section);
+        }
+    }
+    if !dropped.is_empty() {
+        let gone: HashSet<String> = dropped.iter().map(|&i| sections[i].id.clone()).collect();
+        for r in &mut records[cluster_first_record..] {
+            r.section_ids.retain(|id| !gone.contains(id));
+        }
+        let mut at = 0;
+        sections.retain(|_| {
+            at += 1;
+            !dropped.contains(&(at - 1))
+        });
+        at = 0;
+        emitted_cells.retain(|_| {
+            at += 1;
+            !dropped.contains(&(at - 1))
+        });
+    }
     phase!("unify", t_chains);
     let t_seam = web_time::Instant::now();
     reconcile_seam_overruns(
@@ -6587,7 +7062,7 @@ fn detect_for_cluster_with_grid(
         .iter()
         .map(|&(id, pts)| (id, (pts, &[][..])))
         .collect();
-    reorient_portion_flags(&mut sections, &track_map);
+    reorient_portion_flags(&mut sections, &track_map, config, &mut leaves.passes);
     orient_to_majority(&mut sections);
 
     sections
@@ -7102,7 +7577,10 @@ pub fn detect_sections_incremental(
         &SectionUpdatePolicy::default(),
         config,
         &lookup,
-        &mut HashMap::new(),
+        ResolveMemos {
+            coverage: &mut HashMap::new(),
+            passes: &mut PassMemo::default(),
+        },
     )
 }
 
@@ -7177,71 +7655,6 @@ fn pair_leftovers(
     rescued
 }
 
-/// Turn a freshly detected catalogue plus the caller's prior one into the
-/// fold outcome, honouring `policy`.
-///
-/// Pairing is delegated to the identity layer's [`super::identity::plan_identity`]: one
-/// notion of "same section" across the crate, permutation-stable, split
-/// and merge aware. From the plan: a carried candidate is the prior's
-/// successor (a `changed` entry when the geometry moved by more than one
-/// evidence cell), a minted candidate is `added`, a retired prior is
-/// `dissolved` or `merged` by its retirement reason.
-///
-/// Policy applies AFTER pairing, on emission only. A frozen prior
-/// (pinned, or everything under `freeze_all_geometry`) keeps its
-/// geometry: its fresh partner is withheld into `held` and its evidence
-/// grafted append-only. A withheld corridor is spoken for, any other
-/// candidate sharing ground with a frozen emission backs off: a minted
-/// one is dropped into `held`; a carried one hands back its prior
-/// verbatim (frozen by adjacency, one pass, no cascade). Only an
-/// explicit pin also freezes existence; under `freeze_all_geometry` an
-/// unpaired prior still dissolves.
-///
-/// With the default policy nothing is frozen, so the emitted catalogue
-/// is exactly the fresh one in its original order and ids. The
-/// batch-parity gates depend on that: the policy is an addition to this
-/// layer, never a detour around it.
-/// How far along `line` each of its points sits, in metres from the start.
-fn cumulative_metres(line: &[GpsPoint]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(line.len());
-    let mut run = 0.0;
-    out.push(0.0);
-    for w in line.windows(2) {
-        run += crate::geo_utils::haversine_distance(&w[0], &w[1]);
-        out.push(run);
-    }
-    out
-}
-
-/// Where `point` falls along `line`, as a fraction of the line's length.
-fn progress_along(
-    cumulative: &[f64],
-    tree: &super::rtree::PointIndex,
-    point: &GpsPoint,
-) -> Option<f64> {
-    let total = *cumulative.last()?;
-    if total <= 0.0 {
-        return None;
-    }
-    let (nearest, _) = tree.nearest(&[point.latitude, point.longitude])?;
-    Some(cumulative[nearest] / total)
-}
-
-/// The share of a section a portion must cross before its travel says anything
-/// about direction. Below it the two ends sit on the same stretch of line and
-/// the sign is noise.
-/// Derived: a tenth of the section, where the nearest-point projection error
-/// at each end is as large as the travel being measured.
-const DIRECTION_SPAN_FLOOR: f64 = 0.1;
-
-/// Measure every portion's direction against the line its section emits.
-///
-/// A carried or frozen section keeps its prior polyline while its portions were
-/// cut on the candidate's, and the two can run opposite ways. The flag is what
-/// the laps, the bests, `has_reverse_runs` and the athlete's direction toggle
-/// all read, so it is measured last, as progress along the line the app draws.
-/// A portion that does not cross enough of the section keeps the flag its cut
-/// gave it.
 /// Which activity tracks the resolve step actually reads.
 ///
 /// `reorient_portion_flags` and `graft_frozen` both take the caller's whole
@@ -7263,17 +7676,32 @@ pub(crate) fn tracks_the_resolve_reads<'a>(
     wanted
 }
 
+/// Measure every portion's direction against the line its section emits.
+///
+/// A carried or frozen section keeps its prior polyline while its portions were
+/// cut on the candidate's, and the two can run opposite ways. The flag is what
+/// the laps, the bests, `has_reverse_runs` and the athlete's direction toggle
+/// all read, so it is measured last, against the line the app draws, and by the
+/// method a fresh count over that line uses: the direction of the pass the row
+/// holds, as [`PreparedLine::portions`](super::portions::PreparedLine::portions)
+/// gives it. A row no pass overlaps is read with the same direction rule over
+/// its own range.
 pub(crate) fn reorient_portion_flags(
     sections: &mut [FrequentSection],
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
+    config: &SectionConfig,
+    memo: &mut PassMemo,
 ) {
     for section in sections.iter_mut() {
         if section.polyline.len() < 3 || section.activity_portions.is_empty() {
             continue;
         }
-        let cumulative = cumulative_metres(&section.polyline);
-        let tree = super::rtree::build_rtree(&section.polyline);
-        for portion in section.activity_portions.iter_mut() {
+        let mut prepared: Option<Option<super::portions::PreparedLine>> = None;
+        let mut tree = None;
+        let key = PassKey::of(&section.polyline, config);
+        let mut counted = 0usize;
+        let per_track = memo.line(key);
+        for portion in &mut section.activity_portions {
             let Some((track, _)) = tracks.get(portion.activity_id.as_str()) else {
                 continue;
             };
@@ -7282,22 +7710,91 @@ pub(crate) fn reorient_portion_flags(
             if end < start + 3 {
                 continue;
             }
-            let slice = &track[start..end];
-            let (Some(first), Some(last)) = (
-                progress_along(&cumulative, &tree, &slice[0]),
-                progress_along(&cumulative, &tree, &slice[slice.len() - 1]),
-            ) else {
-                continue;
+            let fresh = per_track
+                .entry(portion.activity_id.clone())
+                .or_insert_with(|| {
+                    counted += 1;
+                    prepared
+                        .get_or_insert_with(|| {
+                            super::portions::PreparedLine::new(&section.polyline, config)
+                        })
+                        .as_ref()
+                        .map(|line| line.portions(&portion.activity_id, track))
+                        .unwrap_or_default()
+                });
+            let overlap = |p: &crate::SectionPortion| {
+                (end.min(p.end_index as usize)).saturating_sub(start.max(p.start_index as usize))
             };
-            if (last - first).abs() < DIRECTION_SPAN_FLOOR {
-                continue;
-            }
-            portion.direction = if last > first {
-                crate::Direction::Same
-            } else {
-                crate::Direction::Reverse
+            portion.direction = match fresh.iter().max_by_key(|p| overlap(p)) {
+                Some(pass) if overlap(pass) > 0 => pass.direction,
+                _ => super::portions::detect_direction_robust(
+                    &track[start..end],
+                    &section.polyline,
+                    tree.get_or_insert_with(|| super::rtree::build_rtree(&section.polyline)),
+                ),
             };
         }
+        memo.count(counted);
+    }
+}
+
+/// What the resolve step keeps between folds: the coverage verdicts the
+/// identity plan reads and the passes the direction read counts.
+struct ResolveMemos<'a> {
+    coverage: &'a mut HashMap<(u64, u64), (f64, f64)>,
+    passes: &'a mut PassMemo,
+}
+
+/// A section line's exact points and the matcher setting its passes were
+/// counted under: the identity a pass count over that line is pure in.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PassKey {
+    proximity_bits: u64,
+    points: Vec<(u64, u64)>,
+}
+
+impl PassKey {
+    fn of(line: &[GpsPoint], config: &SectionConfig) -> Self {
+        Self {
+            proximity_bits: config.proximity_threshold.to_bits(),
+            points: line
+                .iter()
+                .map(|p| (p.latitude.to_bits(), p.longitude.to_bits()))
+                .collect(),
+        }
+    }
+}
+
+/// Every qualifying pass a track makes over a section line, held per line and
+/// track so a fold that leaves a line where it was does not count the same
+/// tracks over it again. A pass count is pure in the line and the track, and a
+/// track's points are immutable per id, so a hit is exact. Held for two folds,
+/// as [`SupportMemo`] is, so its size follows the lines the last two folds
+/// emitted. Per process: a restart counts each line once more.
+#[derive(Clone, Default)]
+pub(crate) struct PassMemo {
+    this_fold: HashMap<PassKey, HashMap<String, Vec<SectionPortion>>>,
+    last_fold: HashMap<PassKey, HashMap<String, Vec<SectionPortion>>>,
+    /// Tracks counted over a line, read only by the work counters.
+    #[cfg_attr(not(feature = "counters"), allow(dead_code))]
+    counted: usize,
+}
+
+impl PassMemo {
+    fn line(&mut self, key: PassKey) -> &mut HashMap<String, Vec<SectionPortion>> {
+        if !self.this_fold.contains_key(&key) {
+            let carried = self.last_fold.remove(&key).unwrap_or_default();
+            self.this_fold.insert(key.clone(), carried);
+        }
+        self.this_fold.get_mut(&key).expect("inserted above")
+    }
+
+    fn count(&mut self, tracks: usize) {
+        self.counted += tracks;
+    }
+
+    fn next_fold(&mut self) {
+        self.last_fold = std::mem::take(&mut self.this_fold);
     }
 }
 
@@ -7386,6 +7883,30 @@ fn orient_to_majority(sections: &mut [FrequentSection]) {
     }
 }
 
+/// Turn a freshly detected catalogue plus the caller's prior one into the
+/// fold outcome, honouring `policy`.
+///
+/// Pairing is delegated to the identity layer's [`super::identity::plan_identity`]: one
+/// notion of "same section" across the crate, permutation-stable, split
+/// and merge aware. From the plan: a carried candidate is the prior's
+/// successor (a `changed` entry when the geometry moved by more than one
+/// evidence cell), a minted candidate is `added`, a retired prior is
+/// `dissolved` or `merged` by its retirement reason.
+///
+/// Policy applies AFTER pairing, on emission only. A frozen prior
+/// (pinned, or everything under `freeze_all_geometry`) keeps its
+/// geometry: its fresh partner is withheld into `held` and its evidence
+/// grafted append-only. A withheld corridor is spoken for, any other
+/// candidate sharing ground with a frozen emission backs off: a minted
+/// one is dropped into `held`; a carried one hands back its prior
+/// verbatim (frozen by adjacency, one pass, no cascade). Only an
+/// explicit pin also freezes existence; under `freeze_all_geometry` an
+/// unpaired prior still dissolves.
+///
+/// With the default policy nothing is frozen, so the emitted catalogue
+/// is exactly the fresh one in its original order and ids. The
+/// batch-parity gates depend on that: the policy is an addition to this
+/// layer, never a detour around it.
 fn resolve_fold(
     fresh: Vec<FrequentSection>,
     mut boundaries: Vec<BoundaryRecord>,
@@ -7393,7 +7914,7 @@ fn resolve_fold(
     policy: &SectionUpdatePolicy,
     config: &SectionConfig,
     tracks: &HashMap<&str, (&[GpsPoint], &[f64])>,
-    coverage_memo: &mut HashMap<(u64, u64), (f64, f64)>,
+    memos: ResolveMemos<'_>,
 ) -> IncrementalResult {
     use super::identity::{CandidateSection, IdentityParams, PriorSection, plan_identity_memo};
 
@@ -7416,7 +7937,7 @@ fn resolve_fold(
         &priors,
         &candidates,
         &IdentityParams::default(),
-        coverage_memo,
+        memos.coverage,
     );
     phase!("r_plan", t_plan);
 
@@ -7568,7 +8089,7 @@ fn resolve_fold(
     }
     // A frozen line holds its geometry, its direction included, so its flags
     // are measured against it and it is never turned.
-    reorient_portion_flags(&mut frozen_out, tracks);
+    reorient_portion_flags(&mut frozen_out, tracks, config, memos.passes);
     catalogue.extend(frozen_out);
     for r in &mut boundaries {
         let mut ids: Vec<String> = r
@@ -7673,6 +8194,24 @@ fn disambiguate_id(id: &str, reserved: &HashSet<String>, emitted: &[FrequentSect
 // written before that can hold entries filed under a number that now names
 // another set.
 const EVIDENCE_CACHE_VERSION: u32 = 5;
+
+/// The work a cache's folds have done, counted rather than timed.
+#[cfg(feature = "counters")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FoldWork {
+    /// Clusters recomputed.
+    pub recomputes: usize,
+    /// Member tracks fed to those recomputes.
+    pub members: usize,
+    /// Matcher calls the descent rescue made.
+    pub rescue_matches: usize,
+    /// Point-distance tests the render's minority runs made.
+    pub render_tests: usize,
+    /// Member tracks whose passes were counted over an emitted line to read
+    /// their rows' direction.
+    pub direction_tracks: usize,
+}
 
 /// Persisted per-(sport, geo-cluster) evidence backing
 /// [`detect_sections_incremental_cached_with_policy`]. The engine holds one across
@@ -7808,6 +8347,10 @@ struct LeafMemos {
     /// only falls back to the full scan.
     #[serde(skip)]
     supports: SupportMemo,
+    /// Passes of each member track over a section's emitted line, the count
+    /// [`reorient_portion_flags`] reads each row's direction from. Per process.
+    #[serde(skip)]
+    passes: PassMemo,
     /// Drawn-line recounts ([`super::portions::compute_portions_over`]) with the intersecting
     /// track ids they were computed over. Replayed while that population is
     /// unchanged: a track outside the line's padded bounds contributes
@@ -7820,19 +8363,19 @@ struct LeafMemos {
     track_bounds: BoundsMemo,
     /// Clusters recomputed and member tracks fed to them over the cache's
     /// life, so a test can assert the scaling claim by work done rather than
-    /// by wall-clock time. Built only for the synthetic test lane.
-    #[cfg(feature = "synthetic")]
+    /// by wall-clock time. Built only with the `counters` feature.
+    #[cfg(feature = "counters")]
     #[serde(skip)]
     recompute_work: (usize, usize),
     /// Matcher calls the descent rescue has made over the cache's life, the
-    /// work counter for its memo. Built only for the synthetic test lane.
-    #[cfg(feature = "synthetic")]
+    /// work counter for its memo. Built only with the `counters` feature.
+    #[cfg(feature = "counters")]
     #[serde(skip)]
     rescue_matches: usize,
     /// Point-distance tests the render's minority runs have made over the
     /// cache's life, the work counter for [`LeafMemos::supports`]. Built
-    /// only for the synthetic test lane.
-    #[cfg(feature = "synthetic")]
+    /// only with the `counters` feature.
+    #[cfg(feature = "counters")]
     #[serde(skip)]
     render_tests: usize,
 }
@@ -8112,20 +8655,36 @@ impl SectionEvidenceCache {
         }
     }
 
+    /// Every work counter the folds into this cache have advanced, read
+    /// together so a gate compares counts rather than clocks.
+    #[cfg(feature = "counters")]
+    #[doc(hidden)]
+    pub fn fold_work(&self) -> FoldWork {
+        let l = &self.leaves;
+        FoldWork {
+            recomputes: l.recompute_work.0,
+            members: l.recompute_work.1,
+            rescue_matches: l.rescue_matches,
+            render_tests: l.render_tests,
+            direction_tracks: l.passes.counted,
+        }
+    }
+
     /// `(clusters recomputed, member tracks they held)` summed over every fold
     /// into this cache, for the cost gates.
-    #[cfg(feature = "synthetic")]
+    #[cfg(feature = "counters")]
     #[doc(hidden)]
     pub fn recompute_work(&self) -> (usize, usize) {
-        self.leaves.recompute_work
+        let w = self.fold_work();
+        (w.recomputes, w.members)
     }
 
     /// Point-distance tests the render's minority runs made over every fold
     /// into this cache, for the cost gates.
-    #[cfg(feature = "synthetic")]
+    #[cfg(feature = "counters")]
     #[doc(hidden)]
     pub fn render_tests(&self) -> usize {
-        self.leaves.render_tests
+        self.fold_work().render_tests
     }
 
     /// Entry count of each leaf memo a persist could carry, by field name,
@@ -8523,6 +9082,7 @@ fn fold_by_sport(
         leaves.drawn.clear();
     }
     leaves.supports.next_fold();
+    leaves.passes.next_fold();
     let routed: HashSet<&str> = new_activity_ids.iter().copied().collect();
     if leaves
         .rescues
@@ -8634,7 +9194,10 @@ fn fold_by_sport(
         policy,
         config,
         &resolve_tracks,
-        &mut cache.leaves.coverage,
+        ResolveMemos {
+            coverage: &mut cache.leaves.coverage,
+            passes: &mut cache.leaves.passes,
+        },
     );
     phase!("resolve", t_resolve);
     // Clearing a flag on every cluster does not depend on the order they are visited in.
@@ -8880,7 +9443,7 @@ fn recompute_cluster(
     starts: &HashMap<String, i64>,
     routed: &HashSet<&str>,
 ) -> Vec<BoundaryRecord> {
-    #[cfg(feature = "synthetic")]
+    #[cfg(feature = "counters")]
     {
         leaves.recompute_work.0 += 1;
         leaves.recompute_work.1 += cluster.member_ids.len();
@@ -9238,7 +9801,12 @@ mod resolve_track_requirement {
             }],
         )];
 
-        reorient_portion_flags(&mut sections, &HashMap::new());
+        reorient_portion_flags(
+            &mut sections,
+            &HashMap::new(),
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(
             sections[0].activity_portions[0].direction,
@@ -9250,6 +9818,28 @@ mod resolve_track_requirement {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_short_line_mostly_its_own_ground_is_not_a_backoff_duplicate() {
+        // 184 m line, 40 m of it on accepted ground, 144 m fresh.
+        assert!(!render_is_duplicate(true, 144.0, 184.0, 150.0));
+    }
+
+    #[test]
+    fn a_short_line_mostly_represented_is_a_backoff_duplicate() {
+        assert!(render_is_duplicate(true, 60.0, 184.0, 150.0));
+    }
+
+    #[test]
+    fn a_long_line_is_held_to_the_fixed_minimum() {
+        assert!(render_is_duplicate(true, 149.0, 900.0, 150.0));
+        assert!(!render_is_duplicate(true, 150.0, 900.0, 150.0));
+    }
+
+    #[test]
+    fn a_line_touching_nothing_is_never_a_duplicate() {
+        assert!(!render_is_duplicate(false, 0.0, 184.0, 150.0));
+    }
+
     use super::*;
 
     /// Folds one track over its whole length on the default grids at
@@ -9359,6 +9949,392 @@ mod tests {
             assert_eq!(matcher.passes(r).len(), 1, "a rider did not count");
         }
         assert_eq!(reach_of(&riders), Ok((0, line.len() - 1)));
+    }
+
+    /// Scenario: a 700 m line, and a track that runs it end to end, turns
+    /// 20 m past the end and runs it back 8 m to one side, once or five
+    /// times over.
+    /// Expected behaviour: each leg is a pass of its own, the outbound
+    /// `Same` and the return reverse, so n reps count 2n passes.
+    #[test]
+    fn an_out_and_back_counts_each_leg_as_a_pass() {
+        let line = sampled(&[(0.0, 0.0), (700.0, 0.0)]);
+        let matcher = LineMatcher::new(&line, &SectionConfig::default());
+        let reps = |n: usize| {
+            let mut corners = vec![(-30.0, 0.0)];
+            for _ in 0..n {
+                corners.extend([(720.0, 0.0), (720.0, 40.0), (-20.0, 40.0), (-20.0, 0.0)]);
+            }
+            sampled(&corners)
+        };
+        let one = reps(1);
+        let passes = matcher.passes(&one);
+        assert_eq!(passes.len(), 2, "passes {passes:?}");
+        assert!(passes[0].1 <= passes[1].0 + 1, "legs overlap {passes:?}");
+        assert_eq!(matcher.passes(&reps(5)).len(), 10);
+    }
+
+    /// Scenario: a 198 m line, and a track that rides it end to end, comes
+    /// back 30 m to one side of it, and rides it end to end again, the
+    /// return and the second ride held in one range by the splitter.
+    /// Expected behaviour: three passes, the middle one the return leg, so
+    /// the ride after a return does not swallow it.
+    #[test]
+    fn a_return_leg_held_with_the_ride_after_it_is_a_pass() {
+        let line = sampled(&[(0.0, 0.0), (198.0, 0.0)]);
+        let matcher = LineMatcher::new(&line, &SectionConfig::default());
+        let track = sampled(&[
+            (-20.0, 0.0),
+            (220.0, 0.0),
+            (220.0, 30.0),
+            (-20.0, 30.0),
+            (-20.0, 0.0),
+            (220.0, 0.0),
+        ]);
+        let cuts = simple_pass_ranges(&track, &matcher.pass_grid, &Tunables::DEFAULT);
+        let passes = matcher.passes(&track);
+        assert_eq!(cuts.len(), 2, "the splitter left {cuts:?}");
+        assert_eq!(passes.len(), 3, "passes {passes:?} of cuts {cuts:?}");
+        assert!(
+            passes.windows(2).all(|w| w[0].1 <= w[1].0 + 1),
+            "passes overlap {passes:?}"
+        );
+    }
+
+    /// Scenario: a 540 m line, and a track that rides the corridor for
+    /// 300 m, leaves it by 60 m for 100 m, rejoins at the start and runs
+    /// the whole line to the far end.
+    /// Expected behaviour: the run that covers the line whole is one pass,
+    /// whether or not the approach before it was.
+    #[test]
+    fn a_whole_run_after_a_partial_approach_is_a_pass() {
+        let line = sampled(&[(0.0, 0.0), (540.0, 0.0)]);
+        let matcher = LineMatcher::new(&line, &SectionConfig::default());
+        let track = sampled(&[
+            (0.0, 0.0),
+            (300.0, 0.0),
+            (300.0, 60.0),
+            (200.0, 60.0),
+            (0.0, 0.0),
+            (540.0, 0.0),
+        ]);
+        let passes = matcher.passes(&track);
+        assert_eq!(passes.len(), 1, "passes {passes:?}");
+        let (s, e) = passes[0];
+        assert!(
+            track[s..e]
+                .iter()
+                .any(|p| crate::geo_utils::haversine_distance(p, &line[line.len() - 1]) < 10.0),
+            "the pass {passes:?} does not reach the far end"
+        );
+    }
+
+    /// Scenario: a 540 m line, and walks that run it end to end but turn
+    /// back inside it: one 60 m before the line's end, retracing 200 m and
+    /// going on to the end; one 140 m before it, retracing 300 m. The pass
+    /// splitter cuts each at its turns, so no range of either runs the
+    /// line whole.
+    /// Expected behaviour: each walk is one pass, and it reaches the line's
+    /// far end.
+    #[test]
+    fn a_walk_cut_inside_the_line_is_a_pass_where_it_runs_the_line_whole() {
+        let line = sampled(&[(0.0, 0.0), (540.0, 0.0)]);
+        let matcher = LineMatcher::new(&line, &SectionConfig::default());
+        let far_end = |track: &[GpsPoint], (s, e): (usize, usize)| {
+            track[s..e]
+                .iter()
+                .any(|p| crate::geo_utils::haversine_distance(p, &line[line.len() - 1]) < 25.0)
+        };
+        let walks = [
+            (
+                "turns short of the end",
+                vec![
+                    (-30.0, 0.0),
+                    (480.0, 0.0),
+                    (480.0, 8.0),
+                    (280.0, 8.0),
+                    (280.0, 0.0),
+                    (570.0, 0.0),
+                ],
+            ),
+            (
+                "turns back twice over",
+                vec![
+                    (-30.0, 0.0),
+                    (400.0, 0.0),
+                    (400.0, 8.0),
+                    (100.0, 8.0),
+                    (100.0, 0.0),
+                    (570.0, 0.0),
+                ],
+            ),
+        ];
+        for (name, corners) in walks {
+            let track = sampled(&corners);
+            let cuts = simple_pass_ranges(&track, &matcher.pass_grid, &Tunables::DEFAULT);
+            let passes = matcher.passes(&track);
+            assert!(cuts.len() > 1, "{name}: the splitter left {cuts:?} whole");
+            assert_eq!(
+                passes.len(),
+                1,
+                "{name}: passes {passes:?} of cuts {cuts:?}"
+            );
+            assert!(
+                far_end(&track, passes[0]),
+                "{name}: pass {passes:?} stops short"
+            );
+        }
+    }
+
+    /// Scenario: a 200 m line, and a track that runs it Reverse, turns
+    /// within 20 m of the end without leaving the corridor, and runs it
+    /// Same.
+    /// Expected behaviour: two passes.
+    #[test]
+    fn a_turn_inside_the_corridor_yields_both_legs() {
+        let line = sampled(&[(0.0, 0.0), (200.0, 0.0)]);
+        let matcher = LineMatcher::new(&line, &SectionConfig::default());
+        let track = sampled(&[(220.0, 0.0), (-15.0, 0.0), (220.0, 0.0)]);
+        let passes = matcher.passes(&track);
+        assert_eq!(passes.len(), 2, "passes {passes:?}");
+    }
+
+    /// Scenario: five walks, each 200 m out along a path, a turn, and 200 m
+    /// back 20 m to one side of it.
+    /// Expected behaviour: the detector draws one leg of the hairpin, not
+    /// both, so each walk passes the section twice, the outbound leg `Same`
+    /// and the return `Reverse`, and the line is about one leg long.
+    #[test]
+    fn a_section_over_an_out_and_back_is_drawn_over_one_leg() {
+        let walk = sampled(&[(0.0, 0.0), (200.0, 0.0), (200.0, 20.0), (0.0, 20.0)]);
+        let tracks: Vec<(String, Vec<GpsPoint>)> =
+            (0..5).map(|k| (format!("walk{k}"), walk.clone())).collect();
+        let sections = detect_sections(&tracks, &[], &HashMap::new(), &SectionConfig::default());
+
+        assert_eq!(
+            sections.len(),
+            1,
+            "sections {:?}",
+            sections
+                .iter()
+                .map(|s| s.distance_meters)
+                .collect::<Vec<_>>()
+        );
+        let section = &sections[0];
+        assert!(
+            (150.0..=260.0).contains(&section.distance_meters),
+            "the line is {:.0} m, a leg is 200 m and the hairpin 420 m",
+            section.distance_meters
+        );
+        let same = section
+            .activity_portions
+            .iter()
+            .filter(|p| p.direction == crate::Direction::Same)
+            .count();
+        let reverse = section
+            .activity_portions
+            .iter()
+            .filter(|p| p.direction == crate::Direction::Reverse)
+            .count();
+        assert_eq!((same, reverse), (5, 5));
+        assert_eq!(section.visit_count, 10);
+    }
+
+    /// Scenario: a hairpin line, 200 m out and 200 m back 20 m aside, the
+    /// same line turned end for end, a corner, a lap and a straight line.
+    /// Expected behaviour: only the hairpin turns back, at its apex, and the
+    /// leg kept is the same ground whichever way the line is stored.
+    #[test]
+    fn a_line_turns_back_only_over_ground_it_has_travelled() {
+        let hairpin = sampled(&[(0.0, 0.0), (200.0, 0.0), (200.0, 20.0), (-20.0, 20.0)]);
+        let apex = hairpin_turn(&hairpin).expect("the hairpin turns back");
+        let x = (hairpin[apex].longitude - 6.6) * 111_320.0 * 46.5_f64.to_radians().cos();
+        assert!((150.0..=250.0).contains(&x), "the turn is at {x:.0} m east");
+
+        let (s, e) = single_leg(&hairpin);
+        let kept = crate::matching::calculate_route_distance(&hairpin[s..e]);
+        assert!((200.0..=240.0).contains(&kept), "kept {kept:.0} m");
+
+        let mut turned = hairpin.clone();
+        turned.reverse();
+        let (ts, te) = single_leg(&turned);
+        let mut a: Vec<_> = hairpin[s..e]
+            .iter()
+            .map(|p| (p.latitude, p.longitude))
+            .collect();
+        let mut b: Vec<_> = turned[ts..te]
+            .iter()
+            .map(|p| (p.latitude, p.longitude))
+            .collect();
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_eq!(a, b, "the same leg whichever way the line is stored");
+
+        let corner = sampled(&[(0.0, 0.0), (200.0, 0.0), (200.0, 200.0)]);
+        let lap = sampled(&[
+            (0.0, 0.0),
+            (150.0, 0.0),
+            (150.0, 150.0),
+            (0.0, 150.0),
+            (0.0, 0.0),
+        ]);
+        let straight = sampled(&[(0.0, 0.0), (400.0, 0.0)]);
+        for (name, line) in [("corner", &corner), ("lap", &lap), ("line", &straight)] {
+            assert_eq!(hairpin_turn(line), None, "{name} does not turn back");
+            assert_eq!(single_leg(line), (0, line.len()), "{name} is kept whole");
+        }
+    }
+
+    /// `corners` sampled every 10 m, with an elevation that climbs
+    /// `rise_per_m` for every metre of path walked, as a climb does.
+    fn sampled_climbing(corners: &[(f64, f64)], rise_per_m: f64) -> Vec<GpsPoint> {
+        let flat = sampled(corners);
+        let mut walked = 0.0;
+        let mut out = Vec::with_capacity(flat.len());
+        for (i, p) in flat.iter().enumerate() {
+            if i > 0 {
+                walked += crate::geo_utils::haversine_distance(&flat[i - 1], p);
+            }
+            out.push(GpsPoint::with_elevation(
+                p.latitude,
+                p.longitude,
+                rise_per_m * walked,
+            ));
+        }
+        out
+    }
+
+    /// Eight 150 m legs, 30 m apart, joined at their ends.
+    fn switchback_corners() -> Vec<(f64, f64)> {
+        let mut corners = vec![(0.0, 0.0)];
+        for leg in 0..8 {
+            let y = 30.0 * leg as f64;
+            let x_far = if leg % 2 == 0 { 150.0 } else { 0.0 };
+            corners.push((x_far, y));
+            corners.push((x_far, y + 30.0));
+        }
+        corners
+    }
+
+    /// Scenario: a climb of eight 150 m legs 30 m apart in plan, rising
+    /// 0.14 m for every metre walked, so a leg sits 25 m above the leg
+    /// beside it, past the elevation level tolerance.
+    /// Expected behaviour: the legs are stacked ground, not a return over
+    /// ground already travelled, so the climb is kept whole, walked up or
+    /// down.
+    #[test]
+    fn a_switchback_climb_is_kept_whole() {
+        let climb = sampled_climbing(&switchback_corners(), 0.14);
+        assert_eq!(single_leg(&climb), (0, climb.len()));
+        let mut down = climb.clone();
+        down.reverse();
+        assert_eq!(single_leg(&down), (0, down.len()), "the climb walked down");
+    }
+
+    /// Scenario: the same climb, then a descent that runs back east along
+    /// the road 30 m above its last leg for 150 m and on for 450 m more.
+    /// Expected behaviour: the road rejoins a tenth of the climb's ground,
+    /// so the walk is no out-and-back and neither part is dropped.
+    #[test]
+    fn a_descent_over_the_last_leg_of_a_climb_drops_neither() {
+        let mut corners = switchback_corners();
+        let top = *corners.last().unwrap();
+        corners.extend([(600.0, top.1), (600.0, -150.0), (0.0, -150.0)]);
+        let walk = sampled_climbing(&corners, 0.14);
+        let down: Vec<GpsPoint> = {
+            let mut line = walk.clone();
+            let ascent = sampled(&switchback_corners()).len();
+            let top_ele = line[ascent - 1].elevation.unwrap();
+            let n = (line.len() - ascent) as f64;
+            for (i, p) in line[ascent..].iter_mut().enumerate() {
+                p.elevation = Some(top_ele * (1.0 - (i + 1) as f64 / n));
+            }
+            line
+        };
+        assert_eq!(single_leg(&down), (0, down.len()));
+    }
+
+    /// Scenario: the same eight legs with every point at one elevation, and
+    /// with none.
+    /// Expected behaviour: there is no level to tell the legs apart by, so
+    /// the line turns back over its own ground and is cut to one leg.
+    #[test]
+    fn a_climb_with_one_level_or_none_is_cut_to_one_leg() {
+        let corners = switchback_corners();
+        for (name, line) in [
+            ("one level", sampled_climbing(&corners, 0.0)),
+            ("no elevation", sampled(&corners)),
+        ] {
+            assert_ne!(single_leg(&line), (0, line.len()), "{name}");
+        }
+    }
+
+    /// Scenario: 200 m out up a hill, a turn, and 200 m back down it 20 m
+    /// aside, so the walk back reads the elevations the walk out did.
+    /// Expected behaviour: the return is at the level of the outbound
+    /// ground, so the line is cut to one leg.
+    #[test]
+    fn an_out_and_back_over_one_hill_still_turns_back() {
+        let mut line = sampled_climbing(&[(0.0, 0.0), (200.0, 0.0)], 0.14);
+        let top = line.last().unwrap().elevation.unwrap();
+        let back = sampled(&[(200.0, 20.0), (0.0, 20.0)]);
+        let n = back.len() as f64;
+        line.extend(back.iter().enumerate().map(|(i, p)| {
+            GpsPoint::with_elevation(p.latitude, p.longitude, top * (1.0 - i as f64 / (n - 1.0)))
+        }));
+        assert_ne!(single_leg(&line), (0, line.len()));
+    }
+
+    /// Scenario: walks that approach a turn along 60 to 600 m of path, turn
+    /// back, and walk 1.5 km away along a path 5 to 45 m aside, so the
+    /// approach lies within the ground tolerance of the start of the walk
+    /// away, sampled every 3, 6 and 10 m.
+    /// Expected behaviour: the walk away is drawn as the section's line and
+    /// the walk it was cut from counts it whole: the leg begins where the
+    /// pass counter begins the pass, not at the turn's apex, which the
+    /// counter places up to a few cells past the turn.
+    #[test]
+    fn a_line_cut_to_one_leg_is_a_pass_of_the_walk_it_was_cut_from() {
+        let config = SectionConfig::default();
+        for approach in [60.0, 100.0, 200.0, 300.0, 600.0] {
+            for aside in [5.0, 20.0, 45.0] {
+                for step in [3.0, 6.0, 10.0] {
+                    let corners = [(-approach, 0.0), (0.0, 0.0), (0.0, aside), (-1500.0, aside)];
+                    let mut walk = vec![at_m(corners[0].0, corners[0].1)];
+                    for w in corners.windows(2) {
+                        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+                        let n = (f64::hypot(x1 - x0, y1 - y0) / step).ceil().max(1.0) as usize;
+                        for k in 1..=n {
+                            let f = k as f64 / n as f64;
+                            walk.push(at_m(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f));
+                        }
+                    }
+                    let leg =
+                        one_leg_of_pass(&walk, (0, walk.len()), &config).unwrap_or_else(|| {
+                            panic!("{approach} m approach, {aside} m aside: no leg")
+                        });
+                    let passes = LineMatcher::new(&walk[leg.0..leg.1], &config).passes(&walk);
+                    assert!(
+                        passes.iter().any(|&(s, e)| s < leg.1 && e > leg.0),
+                        "{approach} m approach, {aside} m aside, {step} m step: the leg {leg:?} of {} points is no pass of its own walk, passes {passes:?}",
+                        walk.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Scenario: a 300 m hairpin-shaped track against a 200 m one-leg line.
+    /// Expected behaviour: the track passes the line twice, the outbound leg
+    /// and the return, which is what the section drawn over one leg counts.
+    #[test]
+    fn a_hairpin_track_passes_a_one_leg_line_twice() {
+        let line = sampled(&[(0.0, 0.0), (200.0, 0.0)]);
+        let track = sampled(&[(0.0, 0.0), (200.0, 0.0), (200.0, 20.0), (0.0, 20.0)]);
+        let prepared = super::super::portions::PreparedLine::new(&line, &SectionConfig::default())
+            .expect("a line long enough to match");
+        let passes = prepared.portions("walk", &track);
+        assert_eq!(passes.len(), 2, "passes {passes:?}");
     }
 
     #[test]
@@ -10652,6 +11628,25 @@ mod tests {
             "a switchback climbs away; its hairpins are not a retrace"
         );
     }
+
+    /// Scenario: a straight line 287 m long, its points 7 m apart, stored
+    /// from its south end and then turned end for end.
+    /// Expected behaviour: both stored orders keep the same points as
+    /// stations, since the station walk starts from the same end either way.
+    #[test]
+    fn line_stations_keep_the_same_points_whichever_way_a_line_is_stored() {
+        let line: Vec<GpsPoint> = (0..=41)
+            .map(|i| GpsPoint::new(46.0 + i as f64 * 7.0 / 111_320.0, 7.0))
+            .collect();
+        let turned: Vec<GpsPoint> = line.iter().rev().copied().collect();
+        let kept = |l: &[GpsPoint]| -> Vec<GpsPoint> {
+            let (_, stations) = line_stations(l);
+            let mut points: Vec<GpsPoint> = stations.iter().map(|&k| l[k]).collect();
+            points.sort_by(|a, b| a.latitude.total_cmp(&b.latitude));
+            points
+        };
+        assert_eq!(kept(&line), kept(&turned));
+    }
 }
 
 #[cfg(test)]
@@ -10983,13 +11978,65 @@ mod portion_flag_tests {
             section_with(against, vec![portion(0, 12, Direction::Same)]),
             section_with(line_north(12), vec![portion(0, 12, Direction::Reverse)]),
         ];
-        reorient_portion_flags(&mut sections, &tracks);
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(
             sections[0].activity_portions[0].direction,
             Direction::Reverse
         );
         assert_eq!(sections[1].activity_portions[0].direction, Direction::Same);
+    }
+
+    /// Scenario: a row's range runs the line and carries on past its end, then
+    /// comes back to the line's start along a street clear of the line, so its
+    /// two ends project onto the same end of the line.
+    ///
+    /// Expected behaviour: the flag is the direction of the pass the row
+    /// holds over the line, whatever flag the cut gave it.
+    #[test]
+    fn a_row_that_leaves_the_line_and_returns_reads_its_pass() {
+        let up = line_north(12);
+        let top = up[11];
+        let back: Vec<GpsPoint> = (0..12)
+            .map(|i| GpsPoint {
+                latitude: top.latitude - i as f64 * 0.0005,
+                longitude: 8.0 + 0.002,
+                elevation: None,
+            })
+            .collect();
+        let track: Vec<GpsPoint> = up
+            .iter()
+            .copied()
+            .chain([GpsPoint {
+                latitude: top.latitude,
+                longitude: 8.001,
+                elevation: None,
+            }])
+            .chain(back)
+            .collect();
+        let seconds: Vec<f64> = (0..track.len()).map(|i| i as f64).collect();
+        let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
+            [("a", (track.as_slice(), seconds.as_slice()))]
+                .into_iter()
+                .collect();
+
+        let mut sections = vec![section_with(
+            line_north(12),
+            vec![portion(0, track.len() as u32, Direction::Reverse)],
+        )];
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
+
+        assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
     }
 
     #[test]
@@ -10999,7 +12046,12 @@ mod portion_flag_tests {
             line_north(12),
             vec![portion(0, 12, Direction::Reverse)],
         )];
-        reorient_portion_flags(&mut sections, &tracks);
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(
             sections[0].activity_portions[0].direction,
@@ -11019,7 +12071,12 @@ mod portion_flag_tests {
         against.reverse();
 
         let mut sections = vec![section_with(against, vec![portion(0, 2, Direction::Same)])];
-        reorient_portion_flags(&mut sections, &tracks);
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
     }
@@ -11041,7 +12098,12 @@ mod portion_flag_tests {
             against,
             vec![portion(0, 400, Direction::Same)],
         )];
-        reorient_portion_flags(&mut sections, &tracks);
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(
             sections[0].activity_portions[0].direction,
@@ -11062,7 +12124,12 @@ mod portion_flag_tests {
             line_north(2),
             vec![portion(0, 12, Direction::Same)],
         )];
-        reorient_portion_flags(&mut sections, &tracks);
+        reorient_portion_flags(
+            &mut sections,
+            &tracks,
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
 
         assert_eq!(sections[0].activity_portions[0].direction, Direction::Same);
     }
@@ -11153,14 +12220,24 @@ mod majority_direction_tests {
             rank: None,
         };
         enrich_section(&mut s, false);
-        reorient_portion_flags(std::slice::from_mut(&mut s), &lookup(laps));
+        reorient_portion_flags(
+            std::slice::from_mut(&mut s),
+            &lookup(laps),
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
         s
     }
 
     /// The cold path's direction step: flags measured against the line, then
     /// the line turned to face the majority.
     fn orient(sections: &mut [FrequentSection], laps: &[(String, Vec<GpsPoint>)]) {
-        reorient_portion_flags(sections, &lookup(laps));
+        reorient_portion_flags(
+            sections,
+            &lookup(laps),
+            &SectionConfig::default(),
+            &mut PassMemo::default(),
+        );
         orient_to_majority(sections);
     }
 
@@ -11188,7 +12265,10 @@ mod majority_direction_tests {
             &SectionUpdatePolicy::default(),
             &SectionConfig::default(),
             &lookup(laps),
-            &mut HashMap::new(),
+            ResolveMemos {
+                coverage: &mut HashMap::new(),
+                passes: &mut PassMemo::default(),
+            },
         );
         assert_eq!(out.catalogue.len(), 1, "the fold kept one section");
         assert_eq!(out.carried.len(), 1, "the fold carried the prior");
@@ -11339,7 +12419,10 @@ mod majority_direction_tests {
             },
             &SectionConfig::default(),
             &lookup(&laps),
-            &mut HashMap::new(),
+            ResolveMemos {
+                coverage: &mut HashMap::new(),
+                passes: &mut PassMemo::default(),
+            },
         );
 
         let pinned = out

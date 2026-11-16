@@ -10,9 +10,12 @@
 //! bit of either, or the emitted order, fails. Run-to-run determinism is asserted in-process, so a
 //! parallelism regression surfaces without a baseline.
 //!
-//! What each scenario cost is recorded in the same golden and bounded by a
-//! band, so a cold-path slowdown fails the same gate the output does. See
-//! `baseline`.
+//! What the cold fold cost in heap and in work is recorded in the same golden
+//! and bounded by a band, so a cold-path regression fails the same gate the
+//! output does. The clocks of the three scenarios are printed for the log and
+//! never recorded: a wall clock moves with the machine's load. See `baseline`.
+//! The wall-clock time of each scenario is timed in `benches/corpus_cost.rs`,
+//! over the same shape `FULL_CORPUS_SHAPE` names.
 //!
 //! The golden is a tripwire, not a correctness record. An agent whose change
 //! moves it attaches the before-and-after report to the item and stops there:
@@ -52,6 +55,32 @@ pub struct Shape {
     pub warm_adds: usize,
     /// Activities folded cold before the bulk backfill of everything else.
     pub bulk_base: usize,
+}
+
+/// The shape the private corpus gate folds and the cost bench times. One owner
+/// here, so the two cannot disagree about which scenarios a clock measured.
+pub const FULL_CORPUS_SHAPE: Shape = Shape {
+    warm_adds: 50,
+    bulk_base: 100,
+};
+
+/// A corpus whose every track is one sport, `All`, carrying the start epochs
+/// and per-point seconds the loader read.
+pub fn single_sport(
+    tracks: Vec<(String, Vec<GpsPoint>)>,
+    starts: HashMap<String, i64>,
+    seconds: HashMap<String, Vec<f64>>,
+) -> Corpus {
+    let sports = tracks
+        .iter()
+        .map(|(id, _)| (id.clone(), "All".to_string()))
+        .collect();
+    Corpus {
+        tracks,
+        sports,
+        starts,
+        seconds,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +256,24 @@ pub fn lift_reach(c: &Corpus) -> (usize, usize) {
     )
 }
 
+/// The cold fold's work counters as cost lines, or none in a build without
+/// the counters.
+#[cfg(feature = "counters")]
+fn cold_work_lines(cache: &SectionEvidenceCache) -> Vec<(&'static str, u64)> {
+    let w = cache.fold_work();
+    vec![
+        ("perf_cold_recomputes_work", w.recomputes as u64),
+        ("perf_cold_members_work", w.members as u64),
+        ("perf_cold_rescue_matches_work", w.rescue_matches as u64),
+        ("perf_cold_render_tests_work", w.render_tests as u64),
+    ]
+}
+
+#[cfg(not(feature = "counters"))]
+fn cold_work_lines(_: &SectionEvidenceCache) -> Vec<(&'static str, u64)> {
+    Vec::new()
+}
+
 pub fn fold(
     cache: &mut SectionEvidenceCache,
     existing: &[FrequentSection],
@@ -281,27 +328,19 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
     // show up as the fold's own memory.
     let all_ids: Vec<&str> = c.tracks.iter().map(|(id, _)| id.as_str()).collect();
     let t = Instant::now();
-    let cold = fold(
-        &mut SectionEvidenceCache::new(),
-        &[],
-        &c.tracks,
-        &all_ids,
-        c,
-        &config,
-    );
+    let mut cold_cache = SectionEvidenceCache::new();
+    let cold = fold(&mut cold_cache, &[], &c.tracks, &all_ids, c, &config);
     let cold_ms = t.elapsed().as_millis() as u64;
     let cold_digest = catalogue_digest(&cold);
     let cold_enrich = enrichment_digest(&cold);
     let cold_len = cold.len();
+    let cold_work = cold_work_lines(&cold_cache);
     drop(cold);
-    let again = fold(
-        &mut SectionEvidenceCache::new(),
-        &[],
-        &c.tracks,
-        &all_ids,
-        c,
-        &config,
-    );
+    drop(cold_cache);
+    let mut again_cache = SectionEvidenceCache::new();
+    let again = fold(&mut again_cache, &[], &c.tracks, &all_ids, c, &config);
+    let again_work = cold_work_lines(&again_cache);
+    drop(again_cache);
     assert_eq!(
         cold_digest,
         catalogue_digest(&again),
@@ -314,6 +353,11 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
         "two identical cold folds diverged in enrichment within one process"
     );
     drop(again);
+    assert_eq!(
+        cold_work, again_work,
+        "two identical cold folds counted different work within one process: \
+         a counter that moves between them measures scheduling, not work"
+    );
     println!("A cold {n} activities: {cold_len} sections, {cold_ms} ms");
     lines.push(format!("A {cold_digest:016x}"));
     lines.push(format!("E_A {cold_enrich:016x}"));
@@ -382,13 +426,8 @@ pub fn run(c: &Corpus, shape: Shape, band: Band, golden_path: &Path) {
     lines.push(format!("C {:016x}", catalogue_digest(&bulk)));
     lines.push(format!("E_C {:016x}", enrichment_digest(&bulk)));
 
-    let measured = [
-        ("perf_cold_ms", cold_ms),
-        ("perf_add_median_ms", add_median_ms),
-        ("perf_add_p95_ms", add_p95_ms),
-        ("perf_bulk_ms", bulk_ms),
-        ("perf_peak_bytes", peak.rise_bytes()),
-    ];
+    let mut measured = cold_work;
+    measured.push(("perf_peak_bytes", peak.rise_bytes()));
     baseline::check(golden_path, &lines, &measured, &band);
 }
 

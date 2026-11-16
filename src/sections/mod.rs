@@ -67,6 +67,9 @@ pub use naming::{
     split_direction, trim_core,
 };
 
+#[cfg(feature = "counters")]
+#[doc(hidden)]
+pub use unified::FoldWork;
 pub use unified::{
     BoundaryReason, BoundaryRecord, CLUSTER_GAP_M, ClusterFootprint, Detection, FoldStopped,
     IncrementalResult, POOLED_SPORT, SectionEvidenceCache, SectionGeometryChange,

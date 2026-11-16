@@ -14,33 +14,26 @@
 mod bitwise;
 mod corpus;
 
-use bitwise::{Corpus, Shape, baseline::Band};
+use bitwise::{Corpus, FULL_CORPUS_SHAPE, baseline::Band};
 use tracematch::GpsPoint;
 
 const CORPUS: &str = "fullcorpus";
 const GOLDEN: &str = "_bitwise_golden.txt";
 
-/// One machine holds this corpus, so the clock only has to absorb run-to-run
-/// scheduling noise. The heap is the code's own and gets a tighter band.
+/// The heap and the work counters are the code's own, so the gate bounds them
+/// and no clock. A time belongs in the bench.
 const BAND: Band = Band {
     time_factor: 1.35,
     time_floor_ms: 50,
     bytes_factor: 1.20,
     bytes_floor: 16 * 1024 * 1024,
+    work_factor: 1.10,
+    work_floor: 1_000,
 };
 
 fn load_corpus() -> Corpus {
     let (tracks, starts, seconds) = corpus::load_tracks(CORPUS, 1000);
-    let sports = tracks
-        .iter()
-        .map(|(id, _)| (id.clone(), "All".to_string()))
-        .collect();
-    Corpus {
-        tracks,
-        sports,
-        starts,
-        seconds,
-    }
+    bitwise::single_sport(tracks, starts, seconds)
 }
 
 #[test]
@@ -48,10 +41,7 @@ fn full_corpus_output_is_bitwise_stable() {
     let c = load_corpus();
     bitwise::run(
         &c,
-        Shape {
-            warm_adds: 50,
-            bulk_base: 100,
-        },
+        FULL_CORPUS_SHAPE,
         BAND,
         &corpus::dir(CORPUS).join(GOLDEN),
     );

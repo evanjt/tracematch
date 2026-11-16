@@ -626,7 +626,7 @@ fn write_sections_table(
 fn write_dropped_table(path: &Path, boundaries: &[BoundaryRecord]) {
     let mut out = String::from("lat\tlon\tkept\tfloor\n");
     for r in boundaries {
-        if let BoundaryReason::DrawnPopulation { kept, floor } = r.reason {
+        if let BoundaryReason::DrawnPopulation { kept, floor, .. } = r.reason {
             out.push_str(&format!(
                 "{:.6}\t{:.6}\t{kept}\t{floor}\n",
                 r.latitude, r.longitude

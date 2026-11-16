@@ -1090,3 +1090,36 @@ pub fn late_starters(through: usize, late: usize) -> Vec<(String, Vec<GpsPoint>)
     });
     whole.chain(joined).collect()
 }
+
+/// Two sections end to end along one road. `crowd` riders run the first
+/// 1000 m and turn north. `pair` riders run the next 1000 m whole, and one
+/// longer ride covers both stretches and `overrun` metres past the second's
+/// end, which the second section's line is re-cut from while the pair turn
+/// off at its old end.
+pub fn chain_with_an_overrunning_cover(
+    crowd: usize,
+    pair: usize,
+    overrun: f64,
+) -> Vec<(String, Vec<GpsPoint>)> {
+    let mut out: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    for i in 0..crowd {
+        let path = densify(&[(0.0, 0.0), (1000.0, 0.0), (1000.0, 600.0)]);
+        out.push((
+            format!("crowd_{i}"),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(i))),
+        ));
+    }
+    for i in 0..pair {
+        let path = densify(&[(1000.0, 0.0), (2000.0, 0.0), (2000.0, -600.0)]);
+        out.push((
+            format!("pair_{i}"),
+            track(&wobble(&path, HUMAN_WOBBLE_M, phase(crowd + i))),
+        ));
+    }
+    let path = densify(&[(0.0, 0.0), (2000.0 + overrun, 0.0)]);
+    out.push((
+        "cover".to_string(),
+        track(&wobble(&path, HUMAN_WOBBLE_M, phase(crowd + pair))),
+    ));
+    out
+}

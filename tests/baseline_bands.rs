@@ -26,6 +26,8 @@ fn band() -> Band {
         time_floor_ms: 20,
         bytes_factor: 1.5,
         bytes_floor: 8 * 1024 * 1024,
+        work_factor: 1.10,
+        work_floor: 1_000,
     }
 }
 
@@ -93,6 +95,8 @@ fn a_tight_byte_band_rejects_what_a_loose_time_band_would_accept() {
         time_floor_ms: 250,
         bytes_factor: 1.2,
         bytes_floor: 8 * 1024 * 1024,
+        work_factor: 1.10,
+        work_floor: 1_000,
     };
     let measured = [
         ("perf_cold_ms", 6000u64),
@@ -405,4 +409,81 @@ fn a_first_recording_through_the_switch_carries_its_reason() {
         "{written}"
     );
     std::fs::remove_file(&path).ok();
+}
+
+const WORK_GOLDEN: &str = "\
+A 0123456789abcdef
+perf_cold_render_tests_work 100000
+perf_cold_ms 1000
+perf_peak_bytes 100000000
+";
+
+#[test]
+fn a_work_line_twelve_per_cent_over_is_a_regression_where_bytes_are_not() {
+    let work = [
+        ("perf_cold_render_tests_work", 112_000u64),
+        ("perf_cold_ms", 1000),
+        ("perf_peak_bytes", 100_000_000),
+    ];
+    let over = regressions(WORK_GOLDEN, &work, &band());
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(
+        over[0].starts_with("perf_cold_render_tests_work 112000"),
+        "{}",
+        over[0]
+    );
+
+    // The same rise on a byte line sits inside the byte band and its floor.
+    let bytes = [
+        ("perf_cold_render_tests_work", 100_000u64),
+        ("perf_cold_ms", 1000),
+        ("perf_peak_bytes", 112_000_000),
+    ];
+    assert!(regressions(WORK_GOLDEN, &bytes, &band()).is_empty());
+}
+
+#[test]
+fn a_work_line_is_never_judged_by_the_time_band() {
+    // A time band of 10x would pass 5x the work, and a work band must not.
+    let loose_time = Band {
+        time_factor: 10.0,
+        time_floor_ms: 250,
+        ..band()
+    };
+    let measured = [
+        ("perf_cold_render_tests_work", 500_000u64),
+        ("perf_cold_ms", 1000),
+        ("perf_peak_bytes", 100_000_000),
+    ];
+    let over = regressions(WORK_GOLDEN, &measured, &loose_time);
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(
+        over[0].starts_with("perf_cold_render_tests_work"),
+        "{}",
+        over[0]
+    );
+}
+
+#[test]
+fn the_work_floor_absorbs_a_rise_on_a_small_count() {
+    let golden = "A 0123456789abcdef\nperf_cold_rescue_matches_work 40\n";
+    let measured = [("perf_cold_rescue_matches_work", 900u64)];
+    assert!(regressions(golden, &measured, &band()).is_empty());
+    let measured = [("perf_cold_rescue_matches_work", 1_100u64)];
+    assert_eq!(regressions(golden, &measured, &band()).len(), 1);
+}
+
+#[test]
+fn a_recorded_clock_the_harness_no_longer_measures_is_a_line_to_clear() {
+    let measured = [
+        ("perf_cold_render_tests_work", 100_000u64),
+        ("perf_peak_bytes", 100_000_000),
+    ];
+    let over = regressions(WORK_GOLDEN, &measured, &band());
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(
+        over[0].starts_with("perf_cold_ms is in the baseline but nothing measures it"),
+        "{}",
+        over[0]
+    );
 }

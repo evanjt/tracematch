@@ -487,3 +487,135 @@ fn gate_cached_cold_cache_cost_is_linear() {
         );
     }
 }
+
+/// DETERMINISM gate for the work counters. Two cold folds of the same seeded
+/// corpus from fresh caches, on the default parallel pool, must read the same
+/// work in every field, and every field must be above zero. A counter that
+/// moves between identical in-process folds measures scheduling, not work,
+/// and could not stand in for a clock.
+#[test]
+fn gate_fold_work_is_the_same_on_every_cold_fold() {
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
+    };
+
+    let cfg = SectionConfig::default();
+    let corpus = corpus_with_bucket_a(39);
+    let mut tracks = corpus.tracks_through_e();
+    let mut sports = corpus.sport_map_through_e();
+    // Climbs no ride ever descends leave lift spans for the descent rescue to
+    // test, which the lifecycle corpus has none of.
+    for k in 0..6 {
+        let id = format!("climb{k}");
+        let pts = (0..80)
+            .map(|i| {
+                GpsPoint::with_elevation(
+                    10.0 + 9.0e-5 * i as f64,
+                    20.0 + 1.0e-5 * k as f64,
+                    5.0 * i as f64,
+                )
+            })
+            .collect();
+        sports.insert(id.clone(), "Ride".to_string());
+        tracks.push((id, pts));
+    }
+    let new_ids: Vec<&str> = tracks.iter().map(|(id, _)| id.as_str()).collect();
+
+    let cold_work = || {
+        let mut cache = SectionEvidenceCache::new();
+        let _ = detect_sections_incremental_cached_with_policy(
+            &mut cache,
+            &[],
+            &tracks,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
+            &SectionUpdatePolicy::default(),
+        );
+        cache.fold_work()
+    };
+
+    let first = cold_work();
+    let second = cold_work();
+    assert_eq!(
+        first, second,
+        "two identical cold folds read different work"
+    );
+    assert!(first.recomputes > 0, "no cluster recompute was counted");
+    assert!(first.members > 0, "no member track was counted");
+    assert!(
+        first.rescue_matches > 0,
+        "no rescue matcher call was counted"
+    );
+    assert!(first.render_tests > 0, "no render point test was counted");
+}
+
+/// COST gate, the direction read. A row's direction is read from the pass the
+/// member's track makes over the line the section emits. A warm add that
+/// leaves a section's line where it was has already counted every earlier
+/// member over it, so it may count only the tracks the line has not seen:
+/// the newcomer, and every member of a line that moved or is new.
+#[test]
+fn gate_warm_add_counts_only_tracks_a_line_has_not_seen() {
+    use tracematch::{
+        SectionEvidenceCache, SectionUpdatePolicy, detect_sections_incremental_cached_with_policy,
+    };
+
+    let cfg = SectionConfig::default();
+    let corpus = corpus_with_bucket_a(39);
+    let tracks = corpus.tracks_through_e();
+    let sports = corpus.sport_map_through_e();
+
+    let mut pool: Vec<(String, Vec<GpsPoint>)> = Vec::new();
+    let mut cache = SectionEvidenceCache::new();
+    let mut catalogue: Vec<FrequentSection> = Vec::new();
+    let mut compared = 0;
+    for (id, pts) in &tracks {
+        pool.push((id.clone(), pts.clone()));
+        let new_ids = [id.as_str()];
+        let before = cache.fold_work().direction_tracks;
+        let res = detect_sections_incremental_cached_with_policy(
+            &mut cache,
+            &catalogue,
+            &pool,
+            &new_ids,
+            &[],
+            &sports,
+            &cfg,
+            &SectionUpdatePolicy::default(),
+        );
+        let counted = cache.fold_work().direction_tracks - before;
+        let allowed: usize = res
+            .catalogue
+            .iter()
+            .map(|s| {
+                let members = s
+                    .activity_portions
+                    .iter()
+                    .map(|p| p.activity_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                if catalogue.iter().any(|old| old.polyline == s.polyline) {
+                    members.min(1)
+                } else {
+                    members
+                }
+            })
+            .sum();
+        assert!(
+            counted <= allowed,
+            "add of {id} at pool {} counted {counted} tracks over emitted lines; \
+             only {allowed} had not been counted over their line",
+            pool.len(),
+        );
+        if allowed < res.catalogue.iter().map(|s| s.activity_ids.len()).sum() {
+            compared += 1;
+        }
+        catalogue = res.catalogue;
+    }
+    assert!(
+        compared > 0,
+        "no add left a line in place with a member already counted, so the gate read nothing"
+    );
+}

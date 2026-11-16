@@ -126,7 +126,13 @@ export type BoundaryReason =
   | { kind: 'low_support'; floor: number; dropped_cells: number }
   | { kind: 'traffic_cliff'; thin: number; thick: number }
   | { kind: 'pass_end'; requeued_cells: number }
-  | { kind: 'drawn_population'; kept: number; floor: number }
+  | {
+      kind: 'drawn_population';
+      kept: number;
+      floor: number;
+      representative: string;
+      range: [number, number];
+    }
   | { kind: 'seam_clip'; clipped_metres: number; kept_metres: number }
   | { kind: 'drawn_empty'; contributors: number };
 

@@ -996,7 +996,9 @@ struct HeldSection {
 struct Pending {
     /// Retiring plans since the last decisive continuation.
     dissolve_streak: u8,
-    /// Frozen carries since the last decisive continuation.
+    /// Frozen carries since the last decisive continuation. A target that
+    /// neither agrees with the one before it nor shares ground with the held
+    /// line starts the streak again.
     recut_streak: u8,
     /// The batch geometry a re-cut will snap to at `k`: refreshed on every
     /// frozen carry, kept through retiring steps (the id keeps competing on
@@ -1689,8 +1691,22 @@ impl HysteresisState {
         // Material re-cut: debounce, folding visits but freezing geometry. The
         // dissolve streak rides along untouched, so a marginal capture cannot
         // erase the absence evidence a rotation accumulated.
+        //
+        // The streak counts detects proposing a re-cut of this held ground.
+        // A target that moves within the agreement tolerance is the same
+        // re-cut, and one that still shares ground with the held line is
+        // still a re-cut of it. A target that does neither was reached only
+        // through the target before it, so it is a fresh proposal and starts
+        // from this step: carrying the streak over would let a line the batch
+        // drew once fire on its first detect, onto ground the held line
+        // shares nothing with.
         let ledger = self.pending.get(id);
+        let same_recut = ledger.and_then(|p| p.target.as_ref()).is_none_or(|t| {
+            mutual_overlap(&t.polyline, &cand.polyline) >= self.params.recut_agreement
+                || shares_ground(&held.polyline, &cand.polyline)
+        });
         let streak = ledger
+            .filter(|_| same_recut)
             .map_or(0, |p| p.recut_streak)
             .saturating_add(confirmations(credit()));
         if streak >= k {
@@ -3187,6 +3203,89 @@ mod tests {
         assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
         assert_eq!(out.recut_applied, 0);
         assert!(state.pending_ids().is_empty());
+    }
+
+    /// Scenario: a held line is mid re-cut toward a longer target, and the
+    /// batch then draws a third line that shares ground with that target but
+    /// none with the held line.
+    /// Expected behaviour: the streak toward the old target does not carry
+    /// onto the new line, so one detect cannot move the id onto ground it
+    /// never held; the new line fires once the batch sustains it for `k`.
+    #[test]
+    fn a_re_cut_that_changes_its_target_starts_its_streak_again() {
+        let held = line(46.0, 7.0, 100);
+        let target = line(46.0, 7.0, 200);
+        let moved = line(46.011, 7.0, 89);
+        assert!(shares_ground(&held, &target));
+        assert!(shares_ground(&target, &moved));
+        assert!(!shares_ground(&held, &moved));
+        assert!(mutual_overlap(&target, &moved) < RECUT_AGREEMENT);
+
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(held.clone(), 10)]);
+        let id = r[0].id.clone();
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, r) = state.step_assign(&[cand(target.clone(), 10)]);
+            assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+            assert_eq!(out.recut_applied, 0);
+        }
+
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, r) = state.step_assign(&[cand(moved.clone(), 10)]);
+            assert_eq!(r[0].id, id, "the id rides the re-cut chain");
+            assert_eq!(r[0].fate, CandidateFate::CarriedFrozen);
+            assert_eq!(out.recut_applied, 0, "a new target restarts the streak");
+            assert_eq!(state.ground_of(&id), Some(held.as_slice()));
+        }
+        let (out, r) = state.step_assign(&[cand(moved.clone(), 10)]);
+        assert_eq!(r[0].id, id);
+        assert_eq!(r[0].fate, CandidateFate::CarriedAdopted);
+        assert_eq!(out.recut_ids, vec![id.clone()]);
+        assert_eq!(state.ground_of(&id), Some(moved.as_slice()));
+    }
+
+    /// A target that moves within the agreement tolerance is the same re-cut,
+    /// so the streak runs on and the line it fires onto is the latest one.
+    #[test]
+    fn a_re_cut_whose_target_jitters_within_agreement_keeps_its_streak() {
+        let held = line(46.0, 7.0, 100);
+        let target = line(46.0, 7.0, 200);
+        let jittered = line(46.0, 7.0, 204);
+        assert!(mutual_overlap(&target, &jittered) >= RECUT_AGREEMENT);
+
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(held, 10)]);
+        let id = r[0].id.clone();
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, _) = state.step_assign(&[cand(target.clone(), 10)]);
+            assert_eq!(out.recut_applied, 0);
+        }
+        let (out, _) = state.step_assign(&[cand(jittered.clone(), 10)]);
+        assert_eq!(out.recut_ids, vec![id.clone()]);
+        assert_eq!(state.ground_of(&id), Some(jittered.as_slice()));
+    }
+
+    /// A target that changes its cut but still shares ground with the held
+    /// line is still a re-cut of it, so the streak runs on and a batch that
+    /// keeps re-drawing the same ground converges.
+    #[test]
+    fn a_re_cut_whose_target_changes_over_the_held_ground_keeps_its_streak() {
+        let held = line(46.0, 7.0, 100);
+        let longer = line(46.0, 7.0, 200);
+        let shorter = line(46.0, 7.0, 40);
+        assert!(mutual_overlap(&longer, &shorter) < RECUT_AGREEMENT);
+        assert!(shares_ground(&held, &shorter));
+
+        let mut state = HysteresisState::default();
+        let (_, r) = state.step_assign(&[cand(held, 10)]);
+        let id = r[0].id.clone();
+        for _ in 0..(DEFAULT_K - 1) {
+            let (out, _) = state.step_assign(&[cand(longer.clone(), 10)]);
+            assert_eq!(out.recut_applied, 0);
+        }
+        let (out, _) = state.step_assign(&[cand(shorter.clone(), 10)]);
+        assert_eq!(out.recut_ids, vec![id.clone()]);
+        assert_eq!(state.ground_of(&id), Some(shorter.as_slice()));
     }
 
     /// A step credited with several confirmations counts them all toward the

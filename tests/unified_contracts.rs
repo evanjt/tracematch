@@ -1861,6 +1861,52 @@ fn activity_ids_are_the_drawn_line_population() {
     }
 }
 
+/// Scenario: a chain neighbour is re-drawn from another activity's trace
+/// after its members were counted.
+/// Expected behaviour: every member's stored rows are exactly the passes a
+/// fresh cut of the emitted line finds, and every track with a pass over
+/// the emitted line is a member.
+#[test]
+fn stored_rows_are_the_fresh_cut_of_the_emitted_line() {
+    let corpora: Vec<(&str, Tracks)> = vec![
+        ("deviation_straight", shapes::deviation_straight(8)),
+        ("grid_city", shapes::grid_city()),
+        ("parallel_street", shapes::parallel_street(16, 5, 3)),
+        ("oval_stem", shapes::oval_stem(6)),
+        ("lollipop", shapes::lollipop(6)),
+    ];
+    let cfg = config();
+    for (name, tracks) in corpora {
+        for s in detect(&tracks) {
+            for (id, track) in &tracks {
+                let fresh: Vec<(u32, u32)> =
+                    tracematch::track_portions(id, track, &s.polyline, &cfg)
+                        .iter()
+                        .map(|p| (p.start_index, p.end_index))
+                        .collect();
+                let mut stored: Vec<(u32, u32)> = s
+                    .activity_portions
+                    .iter()
+                    .filter(|p| &p.activity_id == id)
+                    .map(|p| (p.start_index, p.end_index))
+                    .collect();
+                stored.sort();
+                assert_eq!(
+                    stored, fresh,
+                    "{name}/{}: rows of {id} differ from a fresh cut of the emitted line",
+                    s.id
+                );
+                assert_eq!(
+                    s.activity_ids.contains(id),
+                    !fresh.is_empty(),
+                    "{name}/{}: membership of {id} differs from the emitted line's passes",
+                    s.id
+                );
+            }
+        }
+    }
+}
+
 /// The over-claim direction of the population seam, concrete: stub walkers
 /// covering ~20% of the corridor join the cluster (their portion clears the
 /// candidate's length floor) but have no qualifying pass over the drawn
@@ -1919,20 +1965,33 @@ fn stub_contributors_are_not_claimed_by_the_drawn_line() {
 /// than the floors the candidate cleared, so the survivors can sit under
 /// the floor that created the section. A section below `min_activities`
 /// is not a section: it is dropped, and its ground goes back to the
-/// orphan pool.
+/// orphan pool. The recount after the chain alignment is held to the same
+/// floor: a line re-cut from a covering ride that only one member runs whole
+/// is not emitted.
 #[test]
 fn the_drawn_population_keeps_the_activity_floor() {
-    let tracks = shapes::split_population_corridor(1);
     let config = config();
+    let corpora = [
+        (
+            "split_population_corridor",
+            shapes::split_population_corridor(1),
+        ),
+        (
+            "chain_with_an_overrunning_cover",
+            shapes::chain_with_an_overrunning_cover(2, 2, 100.0),
+        ),
+    ];
 
-    for s in detect(&tracks) {
-        assert!(
-            s.activity_ids.len() >= config.min_activities as usize,
-            "{} shows {} activities, under the floor of {}",
-            s.id,
-            s.activity_ids.len(),
-            config.min_activities
-        );
+    for (name, tracks) in corpora {
+        for s in detect(&tracks) {
+            assert!(
+                s.activity_ids.len() >= config.min_activities as usize,
+                "{name}/{} shows {} activities, under the floor of {}",
+                s.id,
+                s.activity_ids.len(),
+                config.min_activities
+            );
+        }
     }
 }
 

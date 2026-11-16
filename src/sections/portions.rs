@@ -1018,6 +1018,43 @@ mod tests {
         }
     }
 
+    /// Scenario: a line of 20 m points up a 190 m leg, then one 170 m run
+    /// bending east to its far end. A ride runs about 50 m beside
+    /// the leg and cuts the corner. The station 10 m short of the bend lies
+    /// 50.2 m from the ride and the bend itself 49.9 m, so whether the line
+    /// keeps the first depends on which end it is read from.
+    /// Expected behaviour: the same passes whichever way the line is stored.
+    #[test]
+    fn a_bent_line_counts_the_same_passes_turned_end_for_end() {
+        let config = SectionConfig::default();
+        let (lat0, lng0) = (46.2_f64, 7.3_f64);
+        let m_lat = 111_320.0;
+        let m_lng = m_lat * lat0.to_radians().cos();
+        let from_metres = |pts: &[(f64, f64)]| -> Vec<GpsPoint> {
+            pts.iter()
+                .map(|&(n, e)| GpsPoint::new(lat0 + n / m_lat, lng0 + e / m_lng))
+                .collect()
+        };
+        let mut line: Vec<(f64, f64)> = (0..=9).map(|k| (k as f64 * 20.0, 0.0)).collect();
+        line.push((190.0, 0.0));
+        line.push((297.0, 130.0));
+        let line = from_metres(&line);
+        let turned: Vec<GpsPoint> = line.iter().rev().copied().collect();
+        let ride = from_metres(&[
+            (40.0, -26.0),
+            (158.0, 51.0),
+            (217.0, 49.0),
+            (307.0, 39.0),
+            (297.0, 128.0),
+        ]);
+        let drawn = track_portions("drawn", &ride, &line, &config).len();
+        let back = track_portions("turned", &ride, &turned, &config).len();
+        assert_eq!(
+            drawn, back,
+            "stored as drawn {drawn}, turned end for end {back}"
+        );
+    }
+
     /// Scenario: a ride runs a 1.2 km line end to end and carries on along
     /// the same road for another 80% of its length, half before and half
     /// after.

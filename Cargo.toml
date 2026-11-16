@@ -19,13 +19,16 @@ crate-type = ["rlib"]
 [features]
 default = ["parallel"]
 parallel = ["rayon"]
-synthetic = ["rand"]
+# The fold's work counters, which a gate reads in place of a clock. Every
+# lane that runs a gate implies it.
+counters = []
+synthetic = ["rand", "counters"]
 # Tests that read the local personal GPX corpora. Those files exist on one
 # machine and are never committed, so this is never enabled in CI.
-real-corpus = []
+real-corpus = ["counters"]
 # Tests that read a public dataset any machine can fetch. CI fetches it into
 # the gitignored geolife/ directory and runs them on every push.
-public-corpus = []
+public-corpus = ["counters"]
 # Phase timers on stderr for the lab and the drip gate. Never on by default.
 profile = []
 
@@ -112,6 +115,14 @@ required-features = ["synthetic"]
 name = "fold_cost"
 harness = false
 required-features = ["synthetic"]
+
+# Wall-clock cost of the cold, warm-add and bulk scenarios over the private
+# corpus. A timing ratio is not judged in the test lane under load, so the
+# clocks are read here, with the load average they were taken under.
+[[bench]]
+name = "corpus_cost"
+harness = false
+required-features = ["real-corpus"]
 
 # Asserts heap rises to the byte, so it runs on one thread with no harness:
 # the harness's own threads free memory inside an open measurement.
