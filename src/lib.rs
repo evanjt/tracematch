@@ -303,23 +303,31 @@ impl RouteSignature {
             return None;
         }
 
-        // Filter invalid points; the kept ones are the source for every vertex below,
-        // so a vertex keeps its elevation.
-        let valid: Vec<GpsPoint> = points.iter().filter(|p| p.is_valid()).copied().collect();
+        // Filter invalid points. The line holds the coordinates Douglas-Peucker needs.
+        let coords: Vec<Coord> = points
+            .iter()
+            .filter(|p| p.is_valid())
+            .map(|p| Coord {
+                x: p.longitude,
+                y: p.latitude,
+            })
+            .collect();
 
-        if valid.len() < 2 {
+        if coords.len() < 2 {
             return None;
         }
 
-        let line = LineString::new(
-            valid
-                .iter()
-                .map(|p| Coord {
-                    x: p.longitude,
-                    y: p.latitude,
-                })
-                .collect(),
-        );
+        // The kept indices count valid points only. When none was dropped they are
+        // positions in `points`; otherwise `source` maps them back, so a vertex keeps
+        // its elevation.
+        let source: Option<Vec<usize>> = (coords.len() != points.len()).then(|| {
+            (0..points.len())
+                .filter(|&i| points[i].is_valid())
+                .collect()
+        });
+        let position = |i: usize| source.as_ref().map_or(i, |s| s[i]);
+
+        let line = LineString::new(coords);
 
         // Douglas-Peucker simplification, as the indices it keeps
         let kept = line.simplify_idx(&config.simplification_tolerance);
@@ -341,7 +349,8 @@ impl RouteSignature {
             return None;
         }
 
-        let simplified_points: Vec<GpsPoint> = final_indices.iter().map(|&i| valid[i]).collect();
+        let simplified_points: Vec<GpsPoint> =
+            final_indices.iter().map(|&i| points[position(i)]).collect();
 
         let total_distance = calculate_route_distance(&simplified_points);
 

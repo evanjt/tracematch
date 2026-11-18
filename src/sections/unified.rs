@@ -328,6 +328,13 @@ pub enum BoundaryReason {
     /// track, so the record ties to the candidate it judged. Distinct from
     /// [`BoundaryReason::LowSupport`], which cuts a thin stretch and
     /// keeps the section on the remnant.
+    ///
+    /// The same record names a pass left undrawn at the end of the fold:
+    /// a section's riders ran a pass a section's length beyond its drawn
+    /// line, enough of them to stand on their own, and a section's worth
+    /// of that pass lies on the section's ground that no accepted line
+    /// represents. Then `kept` meets `floor`, the pass is named by
+    /// `representative` and `range`, and no section carries the record.
     DrawnPopulation {
         kept: u32,
         floor: u32,
@@ -2776,7 +2783,9 @@ impl LineMatcher {
                         // as a return held in one range with the ride after
                         // it, runs the line on its own.
                         for (ls, le) in self.ground_runs(track, s, pass.0) {
-                            if self.covers_line(&track[ls..le]) {
+                            if self.covers_line(&track[ls..le])
+                                && self.reaches_both_ends(track, ls, le)
+                            {
                                 out.push(self.trim_to_ends(track, ls, le));
                             }
                         }
@@ -2808,6 +2817,26 @@ impl LineMatcher {
     fn covers_line(&self, run: &[GpsPoint]) -> bool {
         let reach = RunReach::new(run, self.ref_lat, self.tol_m);
         self.stations.iter().all(|p| reach.near(p))
+    }
+
+    /// Whether `track[s..e]` comes nearest the line's two ends at two
+    /// different points, so it runs from one to the other. A stretch that
+    /// only approaches the line's first end lies within a wide tolerance of
+    /// a short line's far end too and covers it, yet is nearest both ends at
+    /// its last point. A closed line's ends are one place, so any run
+    /// qualifies.
+    fn reaches_both_ends(&self, track: &[GpsPoint], s: usize, e: usize) -> bool {
+        if crate::geo_utils::haversine_distance(&self.first, &self.last) <= GROUND_TOL_M {
+            return true;
+        }
+        let nearest = |target: &GpsPoint| {
+            (s..e).min_by(|&a, &b| {
+                let da = crate::geo_utils::haversine_distance(&track[a], target);
+                let db = crate::geo_utils::haversine_distance(&track[b], target);
+                da.total_cmp(&db)
+            })
+        };
+        nearest(&self.first) != nearest(&self.last)
     }
 
     /// `track[s..e]` trimmed to its points nearest the line's first and
@@ -4486,6 +4515,83 @@ fn probe_mask(
         .collect()
 }
 
+impl AcceptedGround<'_> {
+    /// Whether ground at `centre`, ridden by `traffic`, is already
+    /// drawn: an accepted point sharing that traffic lies within
+    /// `cell_size` of it. This is the distance and traffic test
+    /// `probe_mask` applies to a probe point, so the render, the
+    /// re-queue of a node's leftover cells and the orphan pool all
+    /// answer "is this ground represented" alike.
+    fn represents(&self, centre: &GpsPoint, traffic: &HashSet<u32>) -> bool {
+        let c = self.grid.cell_of(centre.latitude, centre.longitude);
+        (-1..=1i32).any(|dy| {
+            (-1..=1i32).any(|dx| {
+                self.points.get(&(c.0 + dy, c.1 + dx)).is_some_and(|v| {
+                    v.iter().any(|(q, ai)| {
+                        crate::geo_utils::haversine_distance(centre, q) < self.cell_size
+                            && shares_traffic(
+                                traffic,
+                                &self.tracks[*ai as usize],
+                                self.same_traffic,
+                            )
+                    })
+                })
+            })
+        })
+    }
+
+    /// Whether a coverage cell's ground is already drawn, tested at the
+    /// cell's centre against the traffic recorded on it.
+    fn represents_cell(
+        &self,
+        cell: Cell,
+        cell_grid: &CellGrid,
+        cell_tracks: &HashMap<Cell, HashSet<u32>>,
+    ) -> bool {
+        let (latitude, longitude) = cell_grid.centre_of(cell);
+        let centre = GpsPoint {
+            latitude,
+            longitude,
+            elevation: None,
+        };
+        let no_traffic = HashSet::new();
+        self.represents(&centre, cell_tracks.get(&cell).unwrap_or(&no_traffic))
+    }
+}
+
+/// The cells of a drawn node whose ground no accepted line represents:
+/// the ground that re-enters the queue as a remainder, in cell order.
+/// The cells under the drawn line and their eight neighbours leave
+/// whoever rode them, so at least the node's own cells under the line
+/// always go and every re-queue shrinks. Any other cell leaves only
+/// when an accepted line sharing its traffic lies within a cell size of
+/// its centre.
+fn leftover_cells(
+    cells: &[Cell],
+    polyline: &[GpsPoint],
+    cell_grid: &CellGrid,
+    cell_tracks: &HashMap<Cell, HashSet<u32>>,
+    ground: &AcceptedGround,
+) -> Vec<Cell> {
+    let mut beside_line: HashSet<Cell> = HashSet::new();
+    for p in polyline {
+        let c = cell_grid.cell_of(p.latitude, p.longitude);
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                beside_line.insert((c.0 + dy, c.1 + dx));
+            }
+        }
+    }
+    let mut free: Vec<Cell> = cells
+        .iter()
+        .copied()
+        .filter(|c| !beside_line.contains(c))
+        .filter(|c| !ground.represents_cell(*c, cell_grid, cell_tracks))
+        .collect();
+    free.sort_unstable();
+    free
+}
+
 /// Maximal unrepresented runs of a probe, as half-open index ranges.
 /// Represented islands shorter than `bridge_m` of travel are absorbed
 /// into the surrounding run: crossing the accepted line is incidental
@@ -4589,6 +4695,109 @@ fn under_creating_floor(
             representative: section.representative_activity_id.clone(),
             range: section.representative_range.unwrap_or_default(),
         },
+    })
+}
+
+/// The lines accepted so far, as the backoff probe reads them: their
+/// points indexed by backoff cell, each with its line's index into
+/// `tracks`, and the traffic share and reach `probe_mask` applies.
+struct AcceptedGround<'a> {
+    points: &'a HashMap<Cell, Vec<(GpsPoint, u32)>>,
+    tracks: &'a [HashSet<u32>],
+    grid: &'a CellGrid,
+    same_traffic: f64,
+    cell_size: f64,
+}
+
+/// What an emitted section's node held: the drawn line's length, the node's
+/// portions and cells, the tracks that ran it and the opportunity it was
+/// judged on.
+struct EmittedNode<'a> {
+    line_m: f64,
+    portions: &'a [Portion],
+    cells: &'a HashSet<Cell>,
+    tracks: &'a HashSet<u32>,
+    opportunity: usize,
+}
+
+/// A pass the detector left undrawn, named so a reader can tie it to the
+/// record: the pass, a point on it, and the population that ran it whole.
+struct UndrawnPass {
+    pass: Portion,
+    at: GpsPoint,
+    kept: u32,
+    floor: u32,
+}
+
+/// The longest pass a section's riders ran beyond its drawn line, when
+/// those riders alone would stand as a section and a section's worth of
+/// the pass lies on the node's ground that no accepted line represents.
+/// The node drew one real pass, so ground its riders ran further than that
+/// line is a section candidate of its own; when it is neither drawn nor
+/// recorded the athlete sees a ridden-whole line vanish with no trace.
+/// `None` when the drawn line is the longest pass or the further ground is
+/// drawn.
+fn undrawn_long_pass(
+    node: &EmittedNode,
+    accepted: &AcceptedGround,
+    cell_grid: &CellGrid,
+    sport_tracks: &[(&str, &[GpsPoint])],
+    config: &SectionConfig,
+    epochs: &[Option<i64>],
+    span_s: i64,
+) -> Option<UndrawnPass> {
+    let min_len = config.min_section_length;
+    let EmittedNode {
+        line_m,
+        portions,
+        cells,
+        tracks: node_tracks,
+        opportunity,
+    } = *node;
+    let mut riders: Vec<Portion> = portions
+        .iter()
+        .copied()
+        .filter(|p| p.3 >= line_m + min_len)
+        .collect();
+    if riders.is_empty() || !has_support(&riders, line_m, config, opportunity, epochs, span_s) {
+        return None;
+    }
+    riders.sort_by(|a, b| {
+        b.3.partial_cmp(&a.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+            .then(a.1.cmp(&b.1))
+    });
+    let floor =
+        required_for_portions(&riders, line_m, opportunity).max(config.min_activities as usize);
+    let kept = occasion_support(&riders, epochs).0;
+    let not_lapped = |_: &GpsPoint| false;
+    riders.into_iter().find_map(|pass| {
+        let (t, s, e, _) = pass;
+        let line = &sport_tracks[t].1[s..e];
+        let mask = probe_mask(
+            line,
+            accepted.points,
+            accepted.tracks,
+            node_tracks,
+            &not_lapped,
+            accepted.same_traffic,
+            accepted.grid,
+            accepted.cell_size,
+        );
+        let on_node = |p: &GpsPoint| cells.contains(&cell_grid.cell_of(p.latitude, p.longitude));
+        let fresh_m: f64 = line
+            .windows(2)
+            .enumerate()
+            .filter(|(k, w)| !mask[*k] && !mask[k + 1] && on_node(&w[0]) && on_node(&w[1]))
+            .map(|(_, w)| crate::geo_utils::haversine_distance(&w[0], &w[1]))
+            .sum();
+        (fresh_m >= min_len).then(|| UndrawnPass {
+            pass,
+            at: line[line.len() / 2],
+            kept: u32::try_from(kept).unwrap_or(u32::MAX),
+            floor: u32::try_from(floor).unwrap_or(u32::MAX),
+        })
     })
 }
 
@@ -5573,6 +5782,9 @@ fn detect_for_cluster_with_grid(
     // The visit floor each emitted section was created under, indexed like
     // `sections`.
     let mut creating_floors: Vec<usize> = Vec::new();
+    // The opportunity each emitted section's node was judged on, indexed
+    // like `sections`.
+    let mut emitted_opportunity: Vec<usize> = Vec::new();
     let mut pooled_ever: HashSet<Cell> = HashSet::new();
     loop {
         lap!(4);
@@ -5586,16 +5798,14 @@ fn detect_for_cluster_with_grid(
                 .copied()
                 .filter(|c| !pooled_ever.contains(c))
                 .filter(|c| {
-                    let (la, ln) = coverage.grid.centre_of(*c);
-                    let empty = HashSet::new();
-                    let cell_cand = coverage.cell_tracks.get(c).unwrap_or(&empty);
-                    !accepted_pts
-                        .get(&backoff_grid.cell_of(la, ln))
-                        .is_some_and(|v| {
-                            v.iter().any(|(_, ai)| {
-                                shares_traffic(cell_cand, &acc_tracks[*ai as usize], same_traffic)
-                            })
-                        })
+                    !AcceptedGround {
+                        points: &accepted_pts,
+                        tracks: &acc_tracks,
+                        grid: &backoff_grid,
+                        same_traffic,
+                        cell_size,
+                    }
+                    .represents_cell(*c, &coverage.grid, &coverage.cell_tracks)
                 })
                 .collect();
             orphaned.clear();
@@ -6797,44 +7007,23 @@ fn detect_for_cluster_with_grid(
             // (a displaced default, or a valley whose longest pass
             // spans a third of it). That ground re-enters the queue on
             // its own merits: same floors, backoff against everything
-            // accepted. Cells near any accepted geometry are dropped
-            // rather than re-queued (they would only back off), so
-            // every re-queue shrinks and the loop terminates.
-            let mut represented: HashSet<Cell> = HashSet::new();
-            for p in &section.polyline {
-                let c = coverage.grid.cell_of(p.latitude, p.longitude);
-                for dy in -1..=1i32 {
-                    for dx in -1..=1i32 {
-                        represented.insert((c.0 + dy, c.1 + dx));
-                    }
-                }
-            }
-            let mut free: Vec<Cell> = node
-                .cells
-                .iter()
-                .copied()
-                .filter(|c| !represented.contains(c))
-                .filter(|c| {
-                    let (la, ln) = coverage.grid.centre_of(*c);
-                    let bc = backoff_grid.cell_of(la, ln);
-                    let empty = HashSet::new();
-                    let cell_cand = coverage.cell_tracks.get(c).unwrap_or(&empty);
-                    !(-1..=1i32).any(|dy| {
-                        (-1..=1i32).any(|dx| {
-                            accepted_pts.get(&(bc.0 + dy, bc.1 + dx)).is_some_and(|v| {
-                                v.iter().any(|(_, ai)| {
-                                    shares_traffic(
-                                        cell_cand,
-                                        &acc_tracks[*ai as usize],
-                                        same_traffic,
-                                    )
-                                })
-                            })
-                        })
-                    })
-                })
-                .collect();
-            free.sort_unstable();
+            // accepted. Cells beside the drawn line, or whose centre lies
+            // within a cell of accepted geometry sharing their traffic,
+            // are dropped rather than re-queued (they would only back
+            // off), so every re-queue shrinks and the loop terminates.
+            let free = leftover_cells(
+                &node.cells,
+                &section.polyline,
+                &coverage.grid,
+                &coverage.cell_tracks,
+                &AcceptedGround {
+                    points: &accepted_pts,
+                    tracks: &acc_tracks,
+                    grid: &backoff_grid,
+                    same_traffic,
+                    cell_size,
+                },
+            );
             if (free.len() as f64) * cell_size >= config.min_section_length {
                 // The freed ground is re-partitioned the same way all
                 // ground is, same-traffic supernodes, never by bare
@@ -6912,9 +7101,56 @@ fn detect_for_cluster_with_grid(
             }
             emitted_cells.push(node.cells.iter().copied().collect());
             creating_floors.push(creating_required);
+            emitted_opportunity.push(opportunity(leaves, &node, coverage));
             sections.push(section);
             emitted_portions.push(portions);
         }
+    }
+
+    let accepted = AcceptedGround {
+        points: &accepted_pts,
+        tracks: &acc_tracks,
+        grid: &backoff_grid,
+        same_traffic,
+        cell_size,
+    };
+    let mut named: HashSet<(usize, usize, usize)> = HashSet::new();
+    for (i, section) in sections.iter().enumerate() {
+        let node = EmittedNode {
+            line_m: section.distance_meters,
+            portions: &emitted_portions[i],
+            cells: &emitted_cells[i],
+            tracks: &acc_tracks[i],
+            opportunity: emitted_opportunity[i],
+        };
+        let Some(drop) = undrawn_long_pass(
+            &node,
+            &accepted,
+            &coverage.grid,
+            sport_tracks,
+            config,
+            &epochs,
+            span_s,
+        ) else {
+            continue;
+        };
+        if !named.insert((drop.pass.0, drop.pass.1, drop.pass.2)) {
+            continue;
+        }
+        records.push(BoundaryRecord {
+            latitude: drop.at.latitude,
+            longitude: drop.at.longitude,
+            section_ids: Vec::new(),
+            reason: BoundaryReason::DrawnPopulation {
+                kept: drop.kept,
+                floor: drop.floor,
+                representative: sport_tracks[drop.pass.0].0.to_string(),
+                range: (
+                    u32::try_from(drop.pass.1).unwrap_or(u32::MAX),
+                    u32::try_from(drop.pass.2).unwrap_or(u32::MAX),
+                ),
+            },
+        });
     }
 
     phase!("select", t_portions);
@@ -11328,6 +11564,159 @@ mod tests {
     }
 
     #[test]
+    fn cell_ground_is_represented_only_within_a_cell_size_of_shared_traffic() {
+        let grid = CellGrid::new(100.0, 46.0);
+        let accepted = accept(&row(0.0, 100), &grid);
+        let shared: Vec<HashSet<u32>> = vec![[1u32, 2, 3].into_iter().collect()];
+        let foreign: Vec<HashSet<u32>> = vec![[7u32, 8, 9].into_iter().collect()];
+        let riders: HashSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let at = |east_m: f64| GpsPoint::new(46.0 + 9.0e-5 * 50.0, 7.0 + east_m / 77_000.0);
+        let represents = |east_m: f64, traffic: &HashSet<u32>, tracks: &[HashSet<u32>]| {
+            AcceptedGround {
+                points: &accepted,
+                tracks,
+                grid: &grid,
+                same_traffic: 0.5,
+                cell_size: 100.0,
+            }
+            .represents(&at(east_m), traffic)
+        };
+        let line_cell = grid.cell_of(at(0.0).latitude, at(0.0).longitude);
+        let far_cell = grid.cell_of(at(150.0).latitude, at(150.0).longitude);
+        assert_eq!(
+            (far_cell.1 - line_cell.1).abs(),
+            1,
+            "the 150 m case sits in the line's neighbouring backoff cell"
+        );
+        assert!(
+            represents(60.0, &riders, &shared),
+            "60 m from a shared line is drawn"
+        );
+        assert!(
+            !represents(150.0, &riders, &shared),
+            "150 m away is free, though the line is in the neighbouring backoff cell"
+        );
+        assert!(
+            !represents(60.0, &riders, &foreign),
+            "a line sharing none of the cell's traffic does not draw it"
+        );
+        assert!(
+            represents(60.0, &HashSet::new(), &foreign),
+            "a cell with no recorded traffic is drawn by any line within reach"
+        );
+    }
+
+    #[test]
+    fn leftover_ground_is_what_no_line_within_a_cell_size_draws() {
+        // A node of cells along an 800 m east-west strip, drawn over its
+        // first 200 m. An accepted line of the cells' own riders runs 150
+        // m north of the strip, in the neighbouring backoff row.
+        let grid = CellGrid::new(100.0, 46.0);
+        let at = |x: f64, y: f64| GpsPoint::new(46.0 + y / 111_320.0, 7.0 + x / 77_000.0);
+        let along =
+            |y: f64| -> Vec<GpsPoint> { (0..=80).map(|i| at(10.0 * f64::from(i), y)).collect() };
+        let strip = along(0.0);
+        let mut cells: Vec<Cell> = strip
+            .iter()
+            .map(|p| grid.cell_of(p.latitude, p.longitude))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        cells.sort_unstable();
+        let riders: HashSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let foreign: HashSet<u32> = [7u32, 8, 9].into_iter().collect();
+        let cell_tracks: HashMap<Cell, HashSet<u32>> =
+            cells.iter().map(|c| (*c, riders.clone())).collect();
+        let drawn = &strip[..=20];
+        let index = |lines: &[&[GpsPoint]]| {
+            let mut accepted: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
+            for (ai, line) in lines.iter().enumerate() {
+                for p in line.iter().step_by(3) {
+                    accepted
+                        .entry(grid.cell_of(p.latitude, p.longitude))
+                        .or_default()
+                        .push((*p, ai as u32));
+                }
+            }
+            accepted
+        };
+        let leftover = |accepted: &HashMap<Cell, Vec<(GpsPoint, u32)>>, tracks: &[HashSet<u32>]| {
+            leftover_cells(
+                &cells,
+                drawn,
+                &grid,
+                &cell_tracks,
+                &AcceptedGround {
+                    points: accepted,
+                    tracks,
+                    grid: &grid,
+                    same_traffic: 0.5,
+                    cell_size: 100.0,
+                },
+            )
+        };
+        let beside_line = |c: &Cell| {
+            drawn.iter().any(|p| {
+                let pc = grid.cell_of(p.latitude, p.longitude);
+                (pc.0 - c.0).abs() <= 1 && (pc.1 - c.1).abs() <= 1
+            })
+        };
+        let reach = |c: &Cell, lines: &[&[GpsPoint]]| {
+            let (la, ln) = grid.centre_of(*c);
+            let centre = GpsPoint::new(la, ln);
+            lines.iter().any(|line| {
+                line.iter()
+                    .step_by(3)
+                    .any(|p| crate::geo_utils::haversine_distance(&centre, p) < 100.0)
+            })
+        };
+
+        // A sharing line 150 m away draws nothing of the strip: the cells
+        // beyond the drawn line's own neighbourhood and a cell size from
+        // it are a remainder, though the line sits in the next backoff row.
+        let north = along(150.0);
+        let lines: [&[GpsPoint]; 2] = [drawn, &north];
+        let accepted = index(&lines);
+        let free = leftover(&accepted, &[riders.clone(), riders.clone()]);
+        let expected: Vec<Cell> = cells
+            .iter()
+            .copied()
+            .filter(|c| !beside_line(c) && !reach(c, &lines))
+            .collect();
+        assert!(
+            expected.len() >= 3,
+            "the strip has ground beyond the drawn line"
+        );
+        assert_eq!(free, expected);
+
+        // The drawn line frees the cells beside it even when the riders it
+        // was drawn for share nothing with them, which is what makes every
+        // re-queue smaller than the node it came from.
+        let free = leftover(&accepted, &[foreign.clone(), foreign.clone()]);
+        assert!(free.len() < cells.len());
+        assert!(free.iter().all(|c| !beside_line(c)));
+
+        // A line that shares the cells' traffic and runs within a cell size
+        // of them represents their ground, so nothing is left over.
+        let close = along(60.0);
+        let accepted = index(&[drawn, &close]);
+        let free = leftover(&accepted, &[riders.clone(), riders.clone()]);
+        assert!(free.is_empty(), "a sharing line 60 m away draws the strip");
+
+        // The same line ridden by others draws none of it.
+        let free = leftover(&accepted, &[riders.clone(), foreign.clone()]);
+        assert_eq!(
+            free,
+            cells
+                .iter()
+                .copied()
+                .filter(|c| !beside_line(c))
+                .collect::<Vec<_>>(),
+            "a line 60 m away that shares no traffic leaves the ground free"
+        );
+    }
+
+    #[test]
     fn a_foreign_populations_line_represents_nothing() {
         // The other bank of a river sits a braid width away in plan,
         // but its users never run this side: the candidate keeps its
@@ -13126,5 +13515,146 @@ mod a_grown_render {
             "one ride's render made {one_ride} tests against a cold render's {}",
             cold.render_tests()
         );
+    }
+}
+
+#[cfg(test)]
+mod undrawn_pass_tests {
+    use super::*;
+
+    const CELL_M: f64 = 100.0;
+
+    /// A line due east of `steps` ten-metre steps.
+    fn east_line(steps: u16) -> Vec<GpsPoint> {
+        let m_lng = 111_320.0 * 46.0f64.to_radians().cos();
+        (0..=steps)
+            .map(|k| GpsPoint::new(46.0, 7.0 + 10.0 * f64::from(k) / m_lng))
+            .collect()
+    }
+
+    /// Two riders run an 820 m line whole on two days, four more run the
+    /// first 200 m of it, and a section is drawn over those 200 m. The
+    /// riders are tracks 0 and 1 (long) and 2 to 5 (short).
+    struct Ground {
+        tracks: Vec<Vec<GpsPoint>>,
+        epochs: Vec<Option<i64>>,
+    }
+
+    impl Ground {
+        fn new() -> Self {
+            let mut tracks = vec![east_line(82), east_line(82)];
+            tracks.extend((0..4).map(|_| east_line(20)));
+            let epochs = [0, 40, 10, 20, 30, 50]
+                .iter()
+                .map(|d| Some(d * 86_400))
+                .collect();
+            Ground { tracks, epochs }
+        }
+
+        fn portions(&self, long_riders: usize) -> Vec<Portion> {
+            self.tracks
+                .iter()
+                .enumerate()
+                .filter(|(t, _)| *t >= 2 || *t < long_riders)
+                .map(|(t, line)| {
+                    (
+                        t,
+                        0,
+                        line.len(),
+                        crate::matching::calculate_route_distance(line),
+                    )
+                })
+                .collect()
+        }
+
+        /// The drawn line's points as the fold stores them, every third one.
+        fn accepted(grid: &CellGrid, drawn: &[GpsPoint]) -> HashMap<Cell, Vec<(GpsPoint, u32)>> {
+            let mut by_cell: HashMap<Cell, Vec<(GpsPoint, u32)>> = HashMap::new();
+            for p in drawn.iter().step_by(3) {
+                by_cell
+                    .entry(grid.cell_of(p.latitude, p.longitude))
+                    .or_default()
+                    .push((*p, 0));
+            }
+            by_cell
+        }
+
+        fn verdict(
+            &self,
+            long_riders: usize,
+            drawn_m: f64,
+            covered_steps: u16,
+        ) -> Option<UndrawnPass> {
+            let grid = CellGrid::new(CELL_M, 46.0);
+            let cells: HashSet<Cell> = self.tracks[0]
+                .iter()
+                .map(|p| grid.cell_of(p.latitude, p.longitude))
+                .collect();
+            let accepted_points = Self::accepted(&grid, &east_line(covered_steps));
+            let accepted_tracks = vec![(0..6u32).collect::<HashSet<u32>>()];
+            let accepted = AcceptedGround {
+                points: &accepted_points,
+                tracks: &accepted_tracks,
+                grid: &grid,
+                same_traffic: 0.8,
+                cell_size: CELL_M,
+            };
+            let ids: Vec<String> = (0..6).map(|t| format!("t{t}")).collect();
+            let sport_tracks: Vec<(&str, &[GpsPoint])> = self
+                .tracks
+                .iter()
+                .zip(&ids)
+                .map(|(line, id)| (id.as_str(), line.as_slice()))
+                .collect();
+            let portions = self.portions(long_riders);
+            let node = EmittedNode {
+                line_m: drawn_m,
+                portions: &portions,
+                cells: &cells,
+                tracks: &accepted_tracks[0],
+                opportunity: 0,
+            };
+            undrawn_long_pass(
+                &node,
+                &accepted,
+                &grid,
+                &sport_tracks,
+                &SectionConfig::default(),
+                &self.epochs,
+                168 * 3600,
+            )
+        }
+    }
+
+    #[test]
+    fn a_pass_two_riders_ran_whole_beyond_the_drawn_line_is_named() {
+        let ground = Ground::new();
+        let found = ground.verdict(2, 200.0, 20).expect("the pass is named");
+        assert_eq!((found.pass.0, found.pass.1, found.pass.2), (0, 0, 83));
+        assert_eq!((found.kept, found.floor), (2, 2));
+        assert!(
+            found.at.longitude > east_line(30)[30].longitude,
+            "the record sits on the undrawn ground"
+        );
+    }
+
+    #[test]
+    fn one_rider_alone_does_not_make_a_section_to_name() {
+        assert!(Ground::new().verdict(1, 200.0, 20).is_none());
+    }
+
+    #[test]
+    fn a_line_drawn_over_the_whole_pass_leaves_nothing_to_name() {
+        assert!(Ground::new().verdict(2, 820.0, 82).is_none());
+    }
+
+    #[test]
+    fn ground_another_line_represents_is_not_named() {
+        assert!(Ground::new().verdict(2, 200.0, 82).is_none());
+    }
+
+    #[test]
+    fn a_pass_longer_by_less_than_a_section_is_not_named() {
+        assert!(Ground::new().verdict(2, 700.0, 70).is_none());
     }
 }
