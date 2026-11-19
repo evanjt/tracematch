@@ -10,10 +10,12 @@ mod shapes;
 
 use std::collections::HashMap;
 use tracematch::geo_utils::haversine_distance;
+use tracematch::sections::GROUND_TOL_M;
 use tracematch::{
-    BoundaryReason, Direction, FrequentSection, GpsPoint, SectionConfig, SectionEvidenceCache,
-    SectionUpdatePolicy, Tunables, detect_sections, detect_sections_dated,
-    detect_sections_explained, detect_sections_incremental_dated, shares_ground,
+    BoundaryReason, Direction, FrequentSection, GpsPoint, PreparedLine, SectionConfig,
+    SectionEvidenceCache, SectionPortion, SectionUpdatePolicy, Tunables, detect_sections,
+    detect_sections_dated, detect_sections_explained, detect_sections_incremental_dated,
+    shares_ground,
 };
 
 type Tracks = Vec<(String, Vec<GpsPoint>)>;
@@ -2571,4 +2573,84 @@ fn a_cliff_is_recorded_as_a_cliff_not_a_terminus() {
             .iter()
             .any(|r| matches!(r.reason, BoundaryReason::Terminus { .. }))
     );
+}
+
+// ------------------------------------------------------ forced rides
+
+/// The relaxed bar a ride the athlete attaches by hand gets. Mirrors
+/// `FORCED_PROXIMITY_FACTOR` in veloqrs, which sets the same lateral
+/// tolerance on [`PreparedLine`].
+const FORCED_PROXIMITY_FACTOR: f64 = 2.5;
+
+/// `points` points `spacing_m` apart going north, `east_m` east, from
+/// `start` points up the line.
+fn northbound(points: usize, spacing_m: f64, east_m: f64, start: f64) -> Vec<GpsPoint> {
+    let lat0 = 46.5_f64;
+    let lng0 = 6.6_f64;
+    let m_per_deg_lat = 111_320.0;
+    let m_per_deg_lng = m_per_deg_lat * lat0.to_radians().cos();
+    (0..points)
+        .map(|i| {
+            GpsPoint::new(
+                lat0 + (start + i as f64) * spacing_m / m_per_deg_lat,
+                lng0 + east_m / m_per_deg_lng,
+            )
+        })
+        .collect()
+}
+
+/// Every traversal of `line` by a ride attached by hand, as its rows.
+fn forced_rows(line: &[GpsPoint], ride: &[GpsPoint]) -> Vec<SectionPortion> {
+    let config = config();
+    let lateral_m = config.proximity_threshold * FORCED_PROXIMITY_FACTOR - GROUND_TOL_M;
+    PreparedLine::with_lateral_tolerance(line, &config, lateral_m)
+        .expect("a line of two points or more")
+        .portions("ride", ride)
+}
+
+/// Scenario: a 150 m line, and a forced ride that runs 100 points of
+/// approach, the line, and 100 points of run-out, all on the line's axis.
+/// Expected behaviour: one pass whose ends sit within one point of the
+/// line's, so the section gets one row and not two.
+#[test]
+fn a_forced_ride_with_approach_and_run_out_is_one_pass() {
+    let spacing = 11.1_f64;
+    let lead = 100;
+    let points = (150.0 / spacing).round() as usize + 1;
+    let line = northbound(points, spacing, 0.0, lead as f64);
+    let ride = northbound(points + 2 * lead, spacing, 0.0, 0.0);
+
+    let rows = forced_rows(&line, &ride);
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert!((row.start_index as usize).abs_diff(lead) <= 1, "{row:?}");
+    assert!(
+        (row.end_index as usize).abs_diff(lead + points) <= 1,
+        "{row:?}"
+    );
+}
+
+/// Scenario: a forced ride starts on a 150 m line and runs it to its far
+/// end, turns, runs back 10 m to one side, then runs it again. The return
+/// sits in one range with the ride after it, so the pass before the ride
+/// is only found by the leg-ahead step.
+/// Expected behaviour: three passes, one per traversal.
+#[test]
+fn a_forced_return_held_with_the_ride_after_it_is_a_pass() {
+    let spacing = 11.1_f64;
+    let points = (150.0 / spacing).round() as usize + 1;
+    let line = northbound(points, spacing, 0.0, 0.0);
+    let out = northbound(points, spacing, 0.0, 0.0);
+    let back: Vec<GpsPoint> = northbound(points, spacing, 10.0, 0.0)
+        .into_iter()
+        .rev()
+        .collect();
+    let mut ride = out.clone();
+    ride.extend(back);
+    ride.extend(out);
+
+    let rows = forced_rows(&line, &ride);
+
+    assert_eq!(rows.len(), 3, "{rows:?}");
 }
