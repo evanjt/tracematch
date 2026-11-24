@@ -2654,3 +2654,28 @@ fn a_forced_return_held_with_the_ride_after_it_is_a_pass() {
 
     assert_eq!(rows.len(), 3, "{rows:?}");
 }
+
+/// Scenario: a 166 m line in the middle of a 115-point leg out and the
+/// same leg back, both on the line's axis, so the turn is 544 m past the
+/// line's end and the run-out after the first pass leaves the forced
+/// tolerance before the turn.
+/// Expected behaviour: two passes, one per traversal, and no row for the
+/// run-out after the first.
+#[test]
+fn a_forced_run_out_that_leaves_the_tolerance_before_the_turn_is_not_a_pass() {
+    let spacing = 11.1_f64;
+    let leg = 115;
+    let out = northbound(leg, spacing, 0.0, 0.0);
+    let mut ride = out.clone();
+    ride.extend(out.iter().rev().copied());
+    let line = northbound(16, spacing, 0.0, 50.0);
+
+    let rows = forced_rows(&line, &ride);
+
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let near = |row: &SectionPortion, s: usize, e: usize| {
+        (row.start_index as usize).abs_diff(s) <= 1 && (row.end_index as usize).abs_diff(e) <= 1
+    };
+    assert!(near(&rows[0], 50, 66), "{rows:?}");
+    assert!(near(&rows[1], 164, 180), "{rows:?}");
+}

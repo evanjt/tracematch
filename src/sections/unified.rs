@@ -2777,7 +2777,7 @@ impl LineMatcher {
                 counted_to = None;
                 let mut counted = false;
                 for (s, e) in self.ground_runs(track, from, end) {
-                    if self.covers_line(&track[s..e]) {
+                    if self.covers_line(&track[s..e]) && self.reaches_both_ends(track, s, e) {
                         let pass = self.trim_to_ends(track, s, e);
                         // A leg the trim set aside ahead of the pass, such
                         // as a return held in one range with the ride after
@@ -2813,7 +2813,9 @@ impl LineMatcher {
     }
 
     /// Whether every station of the line lies within the tolerance of the
-    /// run, so the run reaches both ends and runs between them.
+    /// run, so the run reaches both ends and runs between them. A tolerance
+    /// wider than the line makes this vacuous, since one point near the
+    /// line then covers it: [`Self::reaches_both_ends`] is the guard.
     fn covers_line(&self, run: &[GpsPoint]) -> bool {
         let reach = RunReach::new(run, self.ref_lat, self.tol_m);
         self.stations.iter().all(|p| reach.near(p))
@@ -3465,10 +3467,23 @@ fn single_leg(line: &[GpsPoint]) -> (usize, usize) {
     (s, e)
 }
 
+/// What a section is drawn over for a pass, by [`one_leg_of_pass`].
+#[derive(Debug, PartialEq)]
+enum PassLeg {
+    /// The pass never turns back on itself and is drawn whole.
+    Whole,
+    /// The absolute half-open range of one leg of each hairpin.
+    Leg(usize, usize),
+    /// The pass turns back and its leg is under `min_section_length`, so
+    /// nothing of it is drawn: the whole pass would be a folded line.
+    UnderFloor,
+}
+
 /// The part of `track[range]` a section is drawn over when that pass turns
 /// back on itself: one leg of each hairpin ([`single_leg`]), as an absolute
-/// half-open range of `track`, or `None` when the pass is drawn whole or the
-/// leg is under `min_section_length`.
+/// half-open range of `track`, [`PassLeg::Whole`] when the pass never turns
+/// back, or [`PassLeg::UnderFloor`] when the leg is under
+/// `min_section_length`.
 ///
 /// The turn's apex is where the leg begins on the ground, but the pass
 /// counter ([`LineMatcher`]) begins the pass that leaves a turn where the
@@ -3480,16 +3495,19 @@ fn one_leg_of_pass(
     track: &[GpsPoint],
     (rs, re): (usize, usize),
     config: &SectionConfig,
-) -> Option<(usize, usize)> {
+) -> PassLeg {
     let seg = &track[rs..re];
     let (ls, le) = single_leg(seg);
     if (ls, le) == (0, seg.len()) {
-        return None;
+        return PassLeg::Whole;
     }
     let (ls, le) = (rs + ls, rs + le);
     let ls = counted_leg_start(track, (ls, le), config);
-    (crate::matching::calculate_route_distance(&track[ls..le]) >= config.min_section_length)
-        .then_some((ls, le))
+    if crate::matching::calculate_route_distance(&track[ls..le]) >= config.min_section_length {
+        PassLeg::Leg(ls, le)
+    } else {
+        PassLeg::UnderFloor
+    }
 }
 
 /// Where `leg` of `track` starts, as the first index at or after `leg.0`
@@ -6794,7 +6812,23 @@ fn detect_for_cluster_with_grid(
             let (t_idx, rs, re) = {
                 let track = sport_tracks[t_idx].1;
                 match one_leg_of_pass(track, (rs, re), config) {
-                    Some((ls, le)) => {
+                    PassLeg::UnderFloor => {
+                        let mid = track[rs..re][(re - rs) / 2];
+                        records.push(BoundaryRecord {
+                            latitude: mid.latitude,
+                            longitude: mid.longitude,
+                            section_ids: Vec::new(),
+                            reason: BoundaryReason::DrawnPopulation {
+                                kept: 0,
+                                floor: config.min_activities,
+                                representative: sport_tracks[t_idx].0.to_string(),
+                                range: (rs as u32, re as u32),
+                            },
+                        });
+                        orphaned.extend(node.cells.iter().copied());
+                        continue;
+                    }
+                    PassLeg::Leg(ls, le) => {
                         let seg = &track[rs..re];
                         let kept_m = crate::matching::calculate_route_distance(&track[ls..le]);
                         let full_m = crate::matching::calculate_route_distance(seg);
@@ -6814,7 +6848,7 @@ fn detect_for_cluster_with_grid(
                         }
                         (t_idx, ls, le)
                     }
-                    None => (t_idx, rs, re),
+                    PassLeg::Whole => (t_idx, rs, re),
                 }
             };
             // Backoff binds on the RENDER, not only on the probe: the
@@ -10376,6 +10410,31 @@ mod tests {
         assert_eq!(section.visit_count, 10);
     }
 
+    /// Scenario: five walks, each 100 to 140 m out along a path, a turn, and
+    /// the same back 20 m to one side of it, so each leg is under the section
+    /// floor and the whole walk is over it.
+    /// Expected behaviour: no section is drawn over the folded walk, so none
+    /// of the sections turns back on itself.
+    #[test]
+    fn an_out_and_back_with_legs_under_the_floor_draws_no_folded_section() {
+        for leg in [100.0, 120.0, 140.0] {
+            let walk = sampled(&[(0.0, 0.0), (leg, 0.0), (leg, 20.0), (0.0, 20.0)]);
+            let tracks: Vec<(String, Vec<GpsPoint>)> =
+                (0..5).map(|k| (format!("walk{k}"), walk.clone())).collect();
+            let sections =
+                detect_sections(&tracks, &[], &HashMap::new(), &SectionConfig::default());
+            let folded: Vec<_> = sections
+                .iter()
+                .filter(|s| hairpin_turn(&s.polyline).is_some())
+                .map(|s| (s.distance_meters, s.visit_count))
+                .collect();
+            assert!(
+                folded.is_empty(),
+                "{leg} m legs: folded sections {folded:?}"
+            );
+        }
+    }
+
     /// Scenario: a hairpin line, 200 m out and 200 m back 20 m aside, the
     /// same line turned end for end, a corner, a lap and a straight line.
     /// Expected behaviour: only the hairpin turns back, at its apex, and the
@@ -10545,10 +10604,11 @@ mod tests {
                             walk.push(at_m(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f));
                         }
                     }
-                    let leg =
-                        one_leg_of_pass(&walk, (0, walk.len()), &config).unwrap_or_else(|| {
-                            panic!("{approach} m approach, {aside} m aside: no leg")
-                        });
+                    let PassLeg::Leg(ls, le) = one_leg_of_pass(&walk, (0, walk.len()), &config)
+                    else {
+                        panic!("{approach} m approach, {aside} m aside: no leg");
+                    };
+                    let leg = (ls, le);
                     let passes = LineMatcher::new(&walk[leg.0..leg.1], &config).passes(&walk);
                     assert!(
                         passes.iter().any(|&(s, e)| s < leg.1 && e > leg.0),
