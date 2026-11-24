@@ -114,9 +114,11 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 /// Metres to a degree of latitude on the flat plane the detector measures in.
+/// Derived as the mean WGS84 meridional degree length, 111132.954 m, rounded down.
 const M_PER_DEG_LAT: f64 = 111_132.0;
 
 /// Metres to a degree of longitude at the equator, scaled by the cosine of the latitude.
+/// Derived as the WGS84 equatorial circumference, 40075017 m, over 360 (111319.49 m), rounded to the nearest ten.
 const M_PER_DEG_LNG_EQUATOR: f64 = 111_320.0;
 
 type Cell = (i32, i32);
@@ -6822,9 +6824,32 @@ fn detect_for_cluster_with_grid(
             // tolerance, so it is a pass of the same section of its own and
             // the population counts it as one. The leg's own length must
             // still clear the section floor.
+            //
+            // A pass whose leg is under the floor hands the line to the next
+            // pass of the node whose own leg, or whole length, clears it: the
+            // ground its other riders share is drawn rather than orphaned
+            // with the one folded pass.
+            let (t_idx, rs, re, leg) = {
+                let mut chosen = (t_idx, rs, re);
+                let mut leg = one_leg_of_pass(sport_tracks[t_idx].1, (rs, re), config);
+                if leg == PassLeg::UnderFloor {
+                    for (j, &(tj, sj, ej, _)) in portions.iter().enumerate() {
+                        if !legal(j) {
+                            continue;
+                        }
+                        let other = one_leg_of_pass(sport_tracks[tj].1, (sj, ej), config);
+                        if other != PassLeg::UnderFloor {
+                            chosen = (tj, sj, ej);
+                            leg = other;
+                            break;
+                        }
+                    }
+                }
+                (chosen.0, chosen.1, chosen.2, leg)
+            };
             let (t_idx, rs, re) = {
                 let track = sport_tracks[t_idx].1;
-                match one_leg_of_pass(track, (rs, re), config) {
+                match leg {
                     PassLeg::UnderFloor => {
                         let mid = track[rs..re][(re - rs) / 2];
                         records.push(BoundaryRecord {
@@ -10430,6 +10455,35 @@ mod tests {
         }
     }
 
+    /// Scenario: eight walks out 140 m and back 20 m to one side, whose legs
+    /// are under the section floor, and four straight rides over the same
+    /// ground that are over it.
+    /// Expected behaviour: the ground is drawn from a straight ride rather than
+    /// orphaned with the folded walks, and no drawn section turns back on itself.
+    #[test]
+    fn straight_rides_keep_ground_shared_with_folded_walks() {
+        let walk = sampled(&[(0.0, 0.0), (140.0, 0.0), (140.0, 20.0), (0.0, 20.0)]);
+        let ride = sampled(&[(0.0, 10.0), (300.0, 10.0)]);
+        let mut tracks: Vec<(String, Vec<GpsPoint>)> =
+            (0..8).map(|k| (format!("walk{k}"), walk.clone())).collect();
+        tracks.extend((0..4).map(|k| (format!("ride{k}"), ride.clone())));
+        let sections = detect_sections(&tracks, &[], &HashMap::new(), &SectionConfig::default());
+        let folded: Vec<_> = sections
+            .iter()
+            .filter(|s| hairpin_turn(&s.polyline).is_some())
+            .map(|s| s.distance_meters)
+            .collect();
+        assert!(folded.is_empty(), "folded sections {folded:?}");
+        assert!(
+            sections.iter().any(|s| s.distance_meters >= 150.0),
+            "no section drawn over the shared ground: {:?}",
+            sections
+                .iter()
+                .map(|s| s.distance_meters)
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Scenario: a hairpin line, 200 m out and 200 m back 20 m aside, the
     /// same line turned end for end, a corner, a lap and a straight line.
     /// Expected behaviour: only the hairpin turns back, at its apex, and the
@@ -12412,7 +12466,7 @@ mod portion_flag_tests {
         let track = line_north(12);
         let mut against = line_north(12);
         against.reverse();
-        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let seconds: Vec<f64> = (0..8).map(|i| i as f64).collect();
         let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
             [("a", (track.as_slice(), seconds.as_slice()))]
                 .into_iter()
@@ -12506,7 +12560,7 @@ mod portion_flag_tests {
     #[test]
     fn a_portion_too_short_to_measure_keeps_its_flag() {
         let track = line_north(12);
-        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let seconds: Vec<f64> = (0..8).map(|i| i as f64).collect();
         let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
             [("a", (track.as_slice(), seconds.as_slice()))]
                 .into_iter()
@@ -12530,7 +12584,7 @@ mod portion_flag_tests {
     #[test]
     fn an_end_past_the_track_is_clamped() {
         let track = line_north(12);
-        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let seconds: Vec<f64> = (0..8).map(|i| i as f64).collect();
         let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
             [("a", (track.as_slice(), seconds.as_slice()))]
                 .into_iter()
@@ -12558,7 +12612,7 @@ mod portion_flag_tests {
     #[test]
     fn a_section_with_no_line_is_left_alone() {
         let track = line_north(12);
-        let seconds: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let seconds: Vec<f64> = (0..8).map(|i| i as f64).collect();
         let tracks: HashMap<&str, (&[GpsPoint], &[f64])> =
             [("a", (track.as_slice(), seconds.as_slice()))]
                 .into_iter()

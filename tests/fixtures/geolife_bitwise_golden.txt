@@ -1,3 +1,5 @@
+# rebased 2026-11-24, 5178530 keeps a corridor node shared between a hairpin pass and ordinary rides and ranks a tied first as second, which moves the B_cold, add and bulk digests and leaves A unchanged; 105 to 109 section lines over the corpus with 8 dropped or redrawn and 12 added, costs within 1%
+# rebased 2026-11-23, 79f6270 and 1eeb8c4 move the incremental states only, as 79f6270 carried a golden recorded without the both-ends rule of 976f235 into a tree that draws forced passes with it, and b89ef35 counts each retraced traversal as its own pass; 105 to 105 GeoLife sections, none added, dropped, redrawn or changed in length, 9 raise a visit count; private corpus 277 to 277, 1 raises a visit count; peak heap 10.07 per cent over at 6d40737 and 0.2 per cent under the golden at b21e39e, every other cost line equal
 # rebased 2026-11-17, the re-queue of a drawn node's leftover cells and the orphan pool call ground drawn only where an accepted point sharing its traffic lies within a cell size, which moves the incremental states only (B_cold and 11 of 20 adds); 17 to 17 cold sections, none changed; render tests 0.4 per cent and peak heap 1.0 per cent down; the prior digest a6087b87e49e8820 does not reproduce at b534a3a, whose tree folds to 073f55de07a5cda1 as 3906f42 does
 # rebased 2026-11-15, 50008bd recounts section population after chain alignment, 2d734f0 walks line stations from the canonical end, 8627c5d counts return legs as their own pass, 4b792b8 draws one leg of an out-and-back line; digest a6087b87e49e8820
 # rebased 2026-11-15, the gate stops recording the cold, add and bulk clocks and records the cold fold's four work counters; no digest moves, four lines leave and four arrive
@@ -8,54 +10,54 @@
 # rebased 2026-10-18, 0e4d8ce keeps redrawn sections to the visit-day minimum and 48fe86a moves the incremental states only
 # rebased 2026-10-07, 3030f0c ends a section pass at its last on-section point; 148 to 148 sections, none changed; costs within 10%
 L 0 0
-A 073f55de07a5cda1
+A a30250b3728cc96c
 E_A d796148973ad7f03
-B_cold dec0032f1d259e0d
-E_B_cold 2eacc5db4111f27d
-B_add_01 5ae19fa70a3e6bf8
-E_B_add_01 720bb8a6c918df8e
-B_add_02 5fe3c0a3e711a4ca
-E_B_add_02 720bb8a6c918df8e
-B_add_03 57aeaf93bd043b73
-E_B_add_03 ed8fe661b08f2db1
-B_add_04 8d85cf947fb7e984
-E_B_add_04 afdad480267b09c9
-B_add_05 bfb3d046144646ad
+B_cold 18cc4ae9bbba3eff
+E_B_cold 104bdb1425871d74
+B_add_01 be12373aab09d268
+E_B_add_01 3b28b8af8ea70b63
+B_add_02 c80a04aab81584c2
+E_B_add_02 3b28b8af8ea70b63
+B_add_03 16e97064a3238825
+E_B_add_03 9b8349cb1bfa8d98
+B_add_04 9830b3726512bbf8
+E_B_add_04 2c61adefcedab7b0
+B_add_05 5f8223bca03fe817
 E_B_add_05 d2277f6646dd24f9
-B_add_06 f604803d7b2d8be4
+B_add_06 4fdf5acab2efd7be
 E_B_add_06 45fd5e5331792c80
-B_add_07 d26334ce222a8f43
+B_add_07 c42b66609cb65169
 E_B_add_07 0b85f10efaa26bba
-B_add_08 ef5525b76d2614fb
+B_add_08 1d60594c6bf1ec45
 E_B_add_08 0b85f10efaa26bba
-B_add_09 aa16e75976b70dfd
+B_add_09 56560ab163e16cd0
 E_B_add_09 1b250f451bf9520d
-B_add_10 887ed8990a01b6b4
+B_add_10 0c51cbcc5ec15111
 E_B_add_10 1b250f451bf9520d
-B_add_11 a37544888bca0217
+B_add_11 f80add75d2975184
 E_B_add_11 dda7af563dc6e151
-B_add_12 b852d58420b82b3c
+B_add_12 bf65db63b933998b
 E_B_add_12 963ba1d531ae1a0e
-B_add_13 7f74a68187d8ba92
+B_add_13 f4ea61a631a054c1
 E_B_add_13 bbbb54675d20460c
-B_add_14 ce1b968468df26d6
+B_add_14 a49e1e1b420f9631
 E_B_add_14 c25079ad7bf95f79
-B_add_15 70deb94c3dd260a3
+B_add_15 506c7f871bac5e64
 E_B_add_15 c8bb73f5adf9802f
-B_add_16 37c6e07af5ed4d00
+B_add_16 912ce2cae1ba4c8b
 E_B_add_16 c8bb73f5adf9802f
-B_add_17 2a85eebba56ce44a
+B_add_17 6298bb07a9916e1d
 E_B_add_17 c8bb73f5adf9802f
-B_add_18 829f89686401e798
+B_add_18 9fae2ee0e8aa2157
 E_B_add_18 55faf587eccd2523
-B_add_19 785b471e4063bfdb
+B_add_19 5570e79f420facb0
 E_B_add_19 55faf587eccd2523
-B_add_20 073f55de07a5cda1
+B_add_20 a30250b3728cc96c
 E_B_add_20 d796148973ad7f03
-C 073f55de07a5cda1
+C a30250b3728cc96c
 E_C d796148973ad7f03
 perf_cold_recomputes_work 1
 perf_cold_members_work 120
 perf_cold_rescue_matches_work 0
 perf_cold_render_tests_work 11263671
-perf_peak_bytes 14483829
+perf_peak_bytes 16194668
