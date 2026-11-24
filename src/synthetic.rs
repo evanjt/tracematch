@@ -118,7 +118,7 @@ pub struct SyntheticScenario {
 // ============================================================================
 
 /// Meters per degree of latitude (approximately constant).
-const METERS_PER_DEG_LAT: f64 = 111_320.0;
+pub(crate) const METERS_PER_DEG_LAT: f64 = 111_320.0;
 
 /// Convert meters to degrees of latitude.
 fn meters_to_deg_lat(meters: f64) -> f64 {

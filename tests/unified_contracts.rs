@@ -2679,3 +2679,61 @@ fn a_forced_run_out_that_leaves_the_tolerance_before_the_turn_is_not_a_pass() {
     assert!(near(&rows[0], 50, 66), "{rows:?}");
     assert!(near(&rows[1], 164, 180), "{rows:?}");
 }
+
+/// A ride that goes out along `line`, back along it `back_east_m` east of
+/// the axis (reversed), then out again `third_east_m` east of it.
+fn out_back_out(points: usize, spacing: f64, back_east_m: f64, third_east_m: f64) -> Vec<GpsPoint> {
+    let mut ride = northbound(points, spacing, 0.0, 0.0);
+    ride.extend(
+        northbound(points, spacing, back_east_m, 0.0)
+            .into_iter()
+            .rev(),
+    );
+    ride.extend(northbound(points, spacing, third_east_m, 0.0));
+    ride
+}
+
+/// Every traversal of `line` by a ride held to the detector's bar.
+fn detector_rows(line: &[GpsPoint], ride: &[GpsPoint]) -> Vec<SectionPortion> {
+    PreparedLine::new(line, &config())
+        .expect("a line of two points or more")
+        .portions("ride", ride)
+}
+
+/// Scenario: a 150 m line ridden out, back on the axis, and out again
+/// 30 m east, so the splitter makes one range of the three legs and the
+/// trimmed pass is the first leg.
+/// Expected behaviour: three passes at the detector bar and at the forced
+/// bar.
+#[test]
+fn a_retraced_line_with_the_third_leg_off_axis_is_three_passes() {
+    let spacing = 11.1_f64;
+    let points = (150.0 / spacing).round() as usize + 1;
+    let line = northbound(points, spacing, 0.0, 0.0);
+    let ride = out_back_out(points, spacing, 0.0, 30.0);
+
+    let forced = forced_rows(&line, &ride);
+    let detected = detector_rows(&line, &ride);
+
+    assert_eq!(forced.len(), 3, "forced {forced:?}");
+    assert_eq!(detected.len(), 3, "detector {detected:?}");
+}
+
+/// Scenario: a 150 m line ridden out, back and out again, every leg on the
+/// axis, so the ground run is trimmed to the middle leg and the third is
+/// behind it.
+/// Expected behaviour: three passes at the detector bar and at the forced
+/// bar.
+#[test]
+fn a_retraced_line_on_one_axis_is_three_passes() {
+    let spacing = 11.1_f64;
+    let points = (150.0 / spacing).round() as usize + 1;
+    let line = northbound(points, spacing, 0.0, 0.0);
+    let ride = out_back_out(points, spacing, 0.0, 0.0);
+
+    let forced = forced_rows(&line, &ride);
+    let detected = detector_rows(&line, &ride);
+
+    assert_eq!(forced.len(), 3, "forced {forced:?}");
+    assert_eq!(detected.len(), 3, "detector {detected:?}");
+}

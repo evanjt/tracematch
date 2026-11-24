@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use super::consensus::TraceKey;
 use super::rtree::{PointIndex, build_rtree};
 use crate::GpsPoint;
+use crate::geo_utils::compute_bounds;
 
 /// Distance threshold for considering a point "on" the section (meters)
 const TRACE_PROXIMITY_THRESHOLD: f64 = 50.0;
@@ -36,18 +37,12 @@ pub fn extract_activity_passes(
     // projected distance in metres, so a track point outside this box cannot
     // be near any polyline point: four comparisons answer most points of a
     // long track without touching the R-tree.
-    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in section_polyline {
-        bb.0 = bb.0.min(p.latitude);
-        bb.1 = bb.1.max(p.latitude);
-        bb.2 = bb.2.min(p.longitude);
-        bb.3 = bb.3.max(p.longitude);
-    }
+    let bb = compute_bounds(section_polyline);
     let (lat0, lat1, lng0, lng1) = (
-        bb.0 - latitude_pad,
-        bb.1 + latitude_pad,
-        bb.2 - longitude_pad,
-        bb.3 + longitude_pad,
+        bb.min_lat - latitude_pad,
+        bb.max_lat + latitude_pad,
+        bb.min_lng - longitude_pad,
+        bb.max_lng + longitude_pad,
     );
 
     // Find ALL contiguous sequences of points near the section

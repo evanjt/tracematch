@@ -45,7 +45,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::f64::consts::PI;
 
-const METERS_PER_DEG_LAT: f64 = 111_320.0;
+use crate::synthetic::METERS_PER_DEG_LAT;
 
 fn meters_to_deg_lat(meters: f64) -> f64 {
     meters / METERS_PER_DEG_LAT

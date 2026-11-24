@@ -38,7 +38,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::GpsPoint;
-use crate::geo_utils::haversine_distance;
+use crate::geo_utils::{compute_bounds, haversine_distance};
+use crate::matching::calculate_route_distance;
 use crate::sections::FrequentSection;
 
 // ============================================================================
@@ -243,7 +244,7 @@ pub fn section_heart(polyline: &[GpsPoint]) -> Option<GpsPoint> {
     if polyline.is_empty() {
         return None;
     }
-    let total = crate::matching::calculate_route_distance(polyline);
+    let total = calculate_route_distance(polyline);
     let half = total / 2.0;
     let mut run = 0.0;
     for w in polyline.windows(2) {
@@ -285,21 +286,15 @@ pub fn mutual_overlap(a: &[GpsPoint], b: &[GpsPoint]) -> f64 {
 /// box's own mid-latitude). Two grounds within tolerance of each other must
 /// have overlapping padded boxes, so this gates the pairwise coverage scan.
 fn ground_bbox_padded(pts: &[GpsPoint]) -> (f64, f64, f64, f64) {
-    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in pts {
-        bb.0 = bb.0.min(p.latitude);
-        bb.1 = bb.1.max(p.latitude);
-        bb.2 = bb.2.min(p.longitude);
-        bb.3 = bb.3.max(p.longitude);
-    }
+    let bb = compute_bounds(pts);
     let pad_lat = GROUND_TOL_M / 111_000.0;
-    let mid = ((bb.0 + bb.1) * 0.5).to_radians();
+    let mid = ((bb.min_lat + bb.max_lat) * 0.5).to_radians();
     let pad_lng = GROUND_TOL_M / (111_320.0 * mid.cos().abs().max(0.01));
     (
-        bb.0 - pad_lat,
-        bb.1 + pad_lat,
-        bb.2 - pad_lng,
-        bb.3 + pad_lng,
+        bb.min_lat - pad_lat,
+        bb.max_lat + pad_lat,
+        bb.min_lng - pad_lng,
+        bb.max_lng + pad_lng,
     )
 }
 
@@ -322,24 +317,12 @@ pub fn dissolve_pressure(held: &[GpsPoint], next: &[CandidateSection]) -> f64 {
     1.0 - best
 }
 
-/// Total metres a ground represents (haversine along its polyline). A split
-/// tie-break and a merge tie-break both prefer the ground carrying more support.
-fn polyline_metres(pts: &[GpsPoint]) -> f64 {
-    pts.windows(2)
-        .map(|w| haversine_distance(&w[0], &w[1]))
-        .sum()
-}
-
 /// South-west corner `(min lat, min lng)` of a ground, the final deterministic
 /// tie-break for a split winner (two candidates equal on every prior key still
 /// resolve to one, always the same one).
 fn sw_corner(pts: &[GpsPoint]) -> (f64, f64) {
-    let mut sw = (f64::MAX, f64::MAX);
-    for p in pts {
-        sw.0 = sw.0.min(p.latitude);
-        sw.1 = sw.1.min(p.longitude);
-    }
-    sw
+    let bb = compute_bounds(pts);
+    (bb.min_lat, bb.min_lng)
 }
 
 // ============================================================================
@@ -599,8 +582,16 @@ pub fn plan_identity_forbidding(
     let c_digest: Vec<u64> = next.iter().map(|c| line_digest(&c.polyline)).collect();
     // Read by the size guard and by the agreement tier's tie-break.
     let guarded = params.merge_size_ratio > 0.0;
-    let p_metres: Vec<f64> = prior.iter().map(|p| polyline_metres(&p.polyline)).collect();
-    let c_metres: Vec<f64> = next.iter().map(|c| polyline_metres(&c.polyline)).collect();
+    // Metres each ground represents: the split and merge tie-breaks prefer
+    // the ground carrying more support.
+    let p_metres: Vec<f64> = prior
+        .iter()
+        .map(|p| calculate_route_distance(&p.polyline))
+        .collect();
+    let c_metres: Vec<f64> = next
+        .iter()
+        .map(|c| calculate_route_distance(&c.polyline))
+        .collect();
     // How far a pair's lengths sit apart. Two lines can cover each other
     // whole at the ground tolerance and still be different sections (a
     // short line and a longer one that runs it out and back beside it), so
@@ -873,7 +864,9 @@ fn more_senior(a: &PriorSection, b: &PriorSection) -> bool {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
             std::cmp::Ordering::Equal => {
-                match polyline_metres(&a.polyline).total_cmp(&polyline_metres(&b.polyline)) {
+                match calculate_route_distance(&a.polyline)
+                    .total_cmp(&calculate_route_distance(&b.polyline))
+                {
                     std::cmp::Ordering::Greater => true,
                     std::cmp::Ordering::Less => false,
                     std::cmp::Ordering::Equal => a.id < b.id,
@@ -898,7 +891,9 @@ fn better_candidate(
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
         std::cmp::Ordering::Equal => {
-            match polyline_metres(&a.polyline).total_cmp(&polyline_metres(&b.polyline)) {
+            match calculate_route_distance(&a.polyline)
+                .total_cmp(&calculate_route_distance(&b.polyline))
+            {
                 std::cmp::Ordering::Greater => true,
                 std::cmp::Ordering::Less => false,
                 std::cmp::Ordering::Equal => match a.visit_count.cmp(&b.visit_count) {
@@ -1361,7 +1356,9 @@ impl HysteresisState {
             let Some(held) = self.visible.get(id) else {
                 return false;
             };
-            if polyline_metres(&next[j].polyline) <= polyline_metres(&held.polyline) {
+            if calculate_route_distance(&next[j].polyline)
+                <= calculate_route_distance(&held.polyline)
+            {
                 return false;
             }
             let key = (id.to_string(), j);

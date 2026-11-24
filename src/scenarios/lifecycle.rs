@@ -30,7 +30,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
-const METERS_PER_DEG_LAT: f64 = 111_320.0;
+use crate::synthetic::METERS_PER_DEG_LAT;
 const POINT_SPACING_M: f64 = 10.0;
 
 fn meters_to_deg_lat(meters: f64) -> f64 {

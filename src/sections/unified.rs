@@ -113,6 +113,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
+/// Metres to a degree of latitude on the flat plane the detector measures in.
+const M_PER_DEG_LAT: f64 = 111_132.0;
+
+/// Metres to a degree of longitude at the equator, scaled by the cosine of the latitude.
+const M_PER_DEG_LNG_EQUATOR: f64 = 111_320.0;
+
 type Cell = (i32, i32);
 
 /// Points of a candidate's portions hashed at 25 m, `(track, lat, lng)`
@@ -751,12 +757,8 @@ pub fn lift_spans_tuned(
             )
         })
         .collect();
-    let mut cum = vec![0.0f64; n];
-    let mut cum_raw = vec![0.0f64; n];
-    for i in 1..n {
-        cum[i] = cum[i - 1] + crate::geo_utils::haversine_distance(&sp[i - 1], &sp[i]);
-        cum_raw[i] = cum_raw[i - 1] + crate::geo_utils::haversine_distance(&pts[i - 1], &pts[i]);
-    }
+    let cum = crate::matching::cumulative_distances(&sp);
+    let cum_raw = crate::matching::cumulative_distances(pts);
     // Light smoothing so one elevation spike cannot fake a grade.
     let smooth: Vec<Option<f64>> = (0..n)
         .map(|i| {
@@ -860,8 +862,8 @@ pub fn lift_spans_tuned(
     for (s, e) in runs {
         // Local metre frame on the seed's own bearing, for the distance
         // of a candidate point off the cable's line.
-        let m_lat = 111_132.0;
-        let m_lng = 111_320.0 * sp[s].latitude.to_radians().cos();
+        let m_lat = M_PER_DEG_LAT;
+        let m_lng = M_PER_DEG_LNG_EQUATOR * sp[s].latitude.to_radians().cos();
         let xy = |k: usize| {
             (
                 (sp[k].longitude - sp[s].longitude) * m_lng,
@@ -1132,20 +1134,14 @@ impl<'a> LiftLine<'a> {
     fn new(line: &'a [GpsPoint], tun: &Tunables) -> Option<Self> {
         let top = line.last()?.elevation?;
         let bot = line.first()?.elevation?;
-        let (mut lat0, mut lat1, mut lng0, mut lng1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-        for p in line {
-            lat0 = lat0.min(p.latitude);
-            lat1 = lat1.max(p.latitude);
-            lng0 = lng0.min(p.longitude);
-            lng1 = lng1.max(p.longitude);
-        }
+        let bb = crate::geo_utils::compute_bounds(line);
         let pad_lat = tun.descent_match_m / 111_000.0 * 2.0;
         let pad_lng = pad_lat / line[0].latitude.to_radians().cos().abs().max(0.01);
         Some(Self {
             line,
             rise: top - bot,
-            lat: (lat0, lat1),
-            lng: (lng0, lng1),
+            lat: (bb.min_lat, bb.max_lat),
+            lng: (bb.min_lng, bb.max_lng),
             pad_lat,
             pad_lng,
         })
@@ -1176,10 +1172,7 @@ impl<'a> LiftLine<'a> {
                     return false;
                 }
                 let seg = &op[ps..=pe];
-                let arc: f64 = seg
-                    .windows(2)
-                    .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
-                    .sum();
+                let arc = crate::matching::calculate_route_distance(seg);
                 let chord = crate::geo_utils::haversine_distance(&seg[0], &seg[seg.len() - 1]);
                 arc > 1.0 && chord / arc >= tun.lift_min_straight
             })
@@ -2242,8 +2235,8 @@ fn self_pass_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     if pts.len() < 3 {
         return marks;
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * pts[0].latitude.to_radians().cos();
     let xy: Vec<(f64, f64)> = pts
         .iter()
         .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
@@ -2316,8 +2309,8 @@ fn out_and_back_marks(pts: &[GpsPoint], near: f64, gap: f64) -> Vec<bool> {
     if pts.len() < 5 {
         return marks;
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * pts[0].latitude.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * pts[0].latitude.to_radians().cos();
     let xy: Vec<(f64, f64)> = pts
         .iter()
         .map(|p| (p.latitude * m_lat, p.longitude * m_lng))
@@ -2405,8 +2398,8 @@ fn closing_loop_range(
     if n < 5 {
         return None;
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * track[rs].latitude.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * track[rs].latitude.to_radians().cos();
     // Extend the frame past the cut while the extension stays short.
     let mut ext_re = re;
     let mut ext_m = 0.0;
@@ -2775,25 +2768,12 @@ impl LineMatcher {
                     _ => uncounted_from.unwrap_or(start),
                 };
                 counted_to = None;
-                let mut counted = false;
-                for (s, e) in self.ground_runs(track, from, end) {
-                    if self.covers_line(&track[s..e]) && self.reaches_both_ends(track, s, e) {
-                        let pass = self.trim_to_ends(track, s, e);
-                        // A leg the trim set aside ahead of the pass, such
-                        // as a return held in one range with the ride after
-                        // it, runs the line on its own.
-                        for (ls, le) in self.ground_runs(track, s, pass.0) {
-                            if self.covers_line(&track[ls..le])
-                                && self.reaches_both_ends(track, ls, le)
-                            {
-                                out.push(self.trim_to_ends(track, ls, le));
-                            }
-                        }
-                        out.push(pass);
-                        counted_to = Some((end, pass.1));
-                        counted = true;
-                    }
+                let found = self.passes_within(track, from, end, false);
+                let counted = !found.is_empty();
+                if let Some(&(_, last_end)) = found.last() {
+                    counted_to = Some((end, last_end));
                 }
+                out.extend(found);
                 uncounted_from = if counted {
                     None
                 } else {
@@ -2802,6 +2782,50 @@ impl LineMatcher {
             }
         }
         out
+    }
+
+    /// Every pass of `track[start..end]` over the line, in track order. A
+    /// ground run that covers the line may hold several traversals when
+    /// the splitter made no cut between them: it is trimmed to the pass
+    /// nearest the line's ends, and the stretches ahead of and behind that
+    /// pass are searched the same way until one covers nothing.
+    fn passes_within(
+        &self,
+        track: &[GpsPoint],
+        start: usize,
+        end: usize,
+        remainder: bool,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (s, e) in self.ground_runs(track, start, end) {
+            if self.covers_line(&track[s..e]) && self.reaches_both_ends(track, s, e) {
+                let pass = self.trim_to_ends(track, s, e);
+                // A stretch set aside by a trim counts only when it comes
+                // within the ground tolerance of both of the line's ends: a
+                // wide lateral tolerance lets part of a leg cover the whole
+                // line.
+                if remainder && !self.ends_within_tolerance(track, pass) {
+                    continue;
+                }
+                out.extend(self.passes_within(track, s, pass.0, true));
+                out.push(pass);
+                out.extend(self.passes_within(track, pass.1, e, true));
+            }
+        }
+        out
+    }
+
+    /// Whether the points of `track[pass.0..pass.1]` nearest the line's
+    /// first and last points each lie within [`GROUND_TOL_M`] of them.
+    fn ends_within_tolerance(&self, track: &[GpsPoint], pass: (usize, usize)) -> bool {
+        let reach = |target: &GpsPoint| {
+            track[pass.0..pass.1]
+                .iter()
+                .map(|p| crate::geo_utils::haversine_distance(p, target))
+                .fold(f64::INFINITY, f64::min)
+                <= GROUND_TOL_M
+        };
+        reach(&self.first) && reach(&self.last)
     }
 
     /// The runs of `track[start..end]` within the tolerance of the line.
@@ -3210,17 +3234,13 @@ struct RunReach {
 
 impl RunReach {
     fn new(run: &[GpsPoint], ref_lat: f64, tol_m: f64) -> Self {
-        let d_lat = tol_m / 111_132.0;
-        let d_lng = tol_m / (111_320.0 * ref_lat.to_radians().cos()).max(1.0);
-        let (mut lat, mut lng) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
-        for p in run {
-            lat = (lat.0.min(p.latitude), lat.1.max(p.latitude));
-            lng = (lng.0.min(p.longitude), lng.1.max(p.longitude));
-        }
+        let d_lat = tol_m / M_PER_DEG_LAT;
+        let d_lng = tol_m / (M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos()).max(1.0);
+        let bb = crate::geo_utils::compute_bounds(run);
         RunReach {
             index: SegmentIndex::new(run, ref_lat, tol_m),
-            lat: (lat.0 - d_lat, lat.1 + d_lat),
-            lng: (lng.0 - d_lng, lng.1 + d_lng),
+            lat: (bb.min_lat - d_lat, bb.max_lat + d_lat),
+            lng: (bb.min_lng - d_lng, bb.max_lng + d_lng),
         }
     }
 
@@ -3324,8 +3344,8 @@ fn hairpin_turn(line: &[GpsPoint]) -> Option<usize> {
     if walks_from_last(line) {
         stations.reverse();
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * line[0].latitude.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * line[0].latitude.to_radians().cos();
     let xy = |k: usize| (line[k].latitude * m_lat, line[k].longitude * m_lng);
     let heading = |p: usize| {
         let a = xy(stations[p.saturating_sub(HEADING_SPAN)]);
@@ -3392,8 +3412,8 @@ fn runs_back_over(short: &[GpsPoint], long: &[GpsPoint]) -> bool {
         return false;
     };
     let tol_m = Tunables::DEFAULT.ele_level_tol_m;
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * first.latitude.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * first.latitude.to_radians().cos();
     let xy = |p: &GpsPoint| (p.latitude * m_lat, p.longitude * m_lng);
     let cell = |(x, y): (f64, f64)| {
         (
@@ -3561,8 +3581,8 @@ impl SegmentIndex {
     fn new(points: &[GpsPoint], ref_lat: f64, cell_m: f64) -> Self {
         let mut index = SegmentIndex {
             cell_m,
-            m_lat: 111_132.0,
-            m_lng: 111_320.0 * ref_lat.to_radians().cos(),
+            m_lat: M_PER_DEG_LAT,
+            m_lng: M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos(),
             segments: Vec::with_capacity(points.len().saturating_sub(1)),
             grid: HashMap::new(),
         };
@@ -3765,12 +3785,12 @@ fn portion_point_index(
     ref_lat: f64,
     cell_m: f64,
 ) -> HashMap<Cell, Vec<(u32, f64, f64)>> {
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let mut idx: HashMap<Cell, Vec<(u32, f64, f64)>> = HashMap::new();
     for &(t, s, e, _) in portions {
         for p in &sport_tracks[t].1[s..e] {
             let c = (
-                (p.latitude * 111_132.0 / cell_m).floor() as i32,
+                (p.latitude * M_PER_DEG_LAT / cell_m).floor() as i32,
                 (p.longitude * m_lng / cell_m).floor() as i32,
             );
             idx.entry(c)
@@ -3824,8 +3844,8 @@ const RUN_STEP_M: f64 = 20.0;
 /// The ~20 m samples of a line [`minority_run_m`] reads: the distance
 /// along the line and the point index of each.
 fn run_samples(line: &[GpsPoint], ref_lat: f64) -> Vec<(f64, usize)> {
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let mut out = Vec::new();
     let mut acc = 0.0;
     let mut last = -RUN_STEP_M;
@@ -3856,8 +3876,8 @@ fn support_at(
     cell_m: f64,
     tests: &mut usize,
 ) -> u32 {
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let reach = (near_m / cell_m).ceil() as i32;
     let (px, py) = (p.latitude * m_lat, p.longitude * m_lng);
     let c = (
@@ -3919,8 +3939,8 @@ fn minority_end_clip(
     if line.len() < 6 {
         return (0, line.len());
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let reach = (near_m / cell_m).ceil() as i32;
     let mut samples: Vec<(usize, u32)> = Vec::new();
     let mut acc = 0.0;
@@ -4024,8 +4044,8 @@ fn support_end_clip(
     if line.len() < 6 {
         return (0, line.len());
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let reach = (near_m / cell_m).ceil() as i32;
     let mut samples: Vec<(usize, u32)> = Vec::new();
     let mut acc = 0.0;
@@ -4262,23 +4282,16 @@ fn geo_clusters(tracks: &[(&str, &[GpsPoint])], gap_m: f64) -> Vec<Vec<usize>> {
             if pts.is_empty() {
                 return None;
             }
-            let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-            for p in pts.iter() {
-                bb.0 = bb.0.min(p.latitude);
-                bb.1 = bb.1.max(p.latitude);
-                bb.2 = bb.2.min(p.longitude);
-                bb.3 = bb.3.max(p.longitude);
-            }
-            Some(bb)
+            Some(super::portions::track_bounds(pts))
         })
         .collect();
-    let pad_lat = gap_m * 0.5 / 111_132.0;
+    let pad_lat = gap_m * 0.5 / M_PER_DEG_LAT;
     let padded: Vec<Option<(f64, f64, f64, f64)>> = boxes
         .iter()
         .map(|b| {
             b.map(|(lat0, lat1, lng0, lng1)| {
                 let mid = ((lat0 + lat1) * 0.5).to_radians();
-                let pad_lng = gap_m * 0.5 / (111_320.0 * mid.cos().abs().max(0.01));
+                let pad_lng = gap_m * 0.5 / (M_PER_DEG_LNG_EQUATOR * mid.cos().abs().max(0.01));
                 (
                     lat0 - pad_lat,
                     lat1 + pad_lat,
@@ -6471,8 +6484,8 @@ fn detect_for_cluster_with_grid(
                 // is one and a half of it, past which a point has no neighbour.
                 const STEP_M: f64 = 20.0;
                 const FAR_M: f64 = 75.0;
-                let m_lat = 111_132.0;
-                let m_lng = 111_320.0 * coverage.ref_lat.to_radians().cos();
+                let m_lat = M_PER_DEG_LAT;
+                let m_lng = M_PER_DEG_LNG_EQUATOR * coverage.ref_lat.to_radians().cos();
                 let pts = &sport_tracks[t].1[ls..le];
                 let mut tot = 0.0;
                 let mut n = 0usize;
@@ -7400,8 +7413,8 @@ fn reconcile_seam_overruns(
     if sections.len() < 2 {
         return;
     }
-    let m_lat = 111_132.0;
-    let m_lng = 111_320.0 * ref_lat.to_radians().cos();
+    let m_lat = M_PER_DEG_LAT;
+    let m_lng = M_PER_DEG_LNG_EQUATOR * ref_lat.to_radians().cos();
     let key = |p: &GpsPoint| {
         (
             (p.latitude * m_lat / SEAM_TOL_M).floor() as i32,
@@ -7854,13 +7867,6 @@ pub fn detect_sections_incremental(
     )
 }
 
-/// Total length of a polyline in metres.
-fn polyline_length_m(pts: &[GpsPoint]) -> f64 {
-    pts.windows(2)
-        .map(|w| crate::geo_utils::haversine_distance(&w[0], &w[1]))
-        .sum()
-}
-
 /// The larger of two sections' endpoint shifts, taking the better of the
 /// two orientations: a section carries a direction, the ground does not.
 fn endpoint_shift_m(a: &FrequentSection, b: &FrequentSection) -> f64 {
@@ -8224,12 +8230,13 @@ fn resolve_fold(
         previous: prev.clone(),
         current: cur.clone(),
         endpoint_shift_m: endpoint_shift_m(prev, cur),
-        length_delta_m: polyline_length_m(&cur.polyline) - polyline_length_m(&prev.polyline),
+        length_delta_m: crate::matching::calculate_route_distance(&cur.polyline)
+            - crate::matching::calculate_route_distance(&prev.polyline),
     };
     let moved = |prev: &FrequentSection, cur: &FrequentSection| {
-        endpoint_shift_m(prev, cur) > move_threshold
-            || (polyline_length_m(&cur.polyline) - polyline_length_m(&prev.polyline)).abs()
-                > move_threshold
+        let length_delta = crate::matching::calculate_route_distance(&cur.polyline)
+            - crate::matching::calculate_route_distance(&prev.polyline);
+        endpoint_shift_m(prev, cur) > move_threshold || length_delta.abs() > move_threshold
     };
 
     // Per-candidate carrier from the plan, then each prior's fate.
@@ -9480,24 +9487,12 @@ fn fold_by_sport(
     Ok(out)
 }
 
-/// Raw lat/lng bounding box of a track: `(lat0, lat1, lng0, lng1)`.
-fn track_bbox(pts: &[GpsPoint]) -> (f64, f64, f64, f64) {
-    let mut bb = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in pts {
-        bb.0 = bb.0.min(p.latitude);
-        bb.1 = bb.1.max(p.latitude);
-        bb.2 = bb.2.min(p.longitude);
-        bb.3 = bb.3.max(p.longitude);
-    }
-    bb
-}
-
 /// Pad a raw bbox by half `gap_m`, exactly as [`geo_clusters`] does (longitude
 /// scaled by the box's own mid-latitude cosine).
 fn pad_bbox(bb: (f64, f64, f64, f64), gap_m: f64) -> (f64, f64, f64, f64) {
-    let pad_lat = gap_m * 0.5 / 111_132.0;
+    let pad_lat = gap_m * 0.5 / M_PER_DEG_LAT;
     let mid = ((bb.0 + bb.1) * 0.5).to_radians();
-    let pad_lng = gap_m * 0.5 / (111_320.0 * mid.cos().abs().max(0.01));
+    let pad_lng = gap_m * 0.5 / (M_PER_DEG_LNG_EQUATOR * mid.cos().abs().max(0.01));
     (
         bb.0 - pad_lat,
         bb.1 + pad_lat,
@@ -9568,7 +9563,7 @@ pub fn clusters_touched_by(
 
 /// The bbox of a track, for a caller planning a route without a cache.
 pub fn bbox_of(points: &[GpsPoint]) -> (f64, f64, f64, f64) {
-    track_bbox(points)
+    super::portions::track_bounds(points)
 }
 
 /// The cluster gap the fold routes with, so a caller planning a pool pads the
@@ -9640,7 +9635,7 @@ fn route_only(
     tun: &Tunables,
 ) {
     let gap = tun.cluster_gap_m;
-    let new_bbox = track_bbox(new_pts);
+    let new_bbox = super::portions::track_bounds(new_pts);
 
     let clusters = cache.sports.entry(sport.to_string()).or_default();
     // The decision is `clusters_touched_by` and nothing else, so a caller that

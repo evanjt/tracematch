@@ -3,8 +3,8 @@
 use super::rtree::{PointIndex, build_rtree};
 use super::unified::LineMatcher;
 use super::{SectionConfig, SectionPortion};
-use crate::geo_utils::haversine_distance;
-use crate::matching::calculate_route_distance;
+use crate::geo_utils::{compute_bounds, haversine_distance};
+use crate::matching::{calculate_route_distance, cumulative_distances};
 use crate::{Direction, GpsPoint};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -30,14 +30,8 @@ pub fn compute_activity_portions(
 
 /// Raw bounding box of a track, `(lat0, lat1, lng0, lng1)`.
 pub(crate) fn track_bounds(track: &[GpsPoint]) -> (f64, f64, f64, f64) {
-    let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in track {
-        b.0 = b.0.min(p.latitude);
-        b.1 = b.1.max(p.latitude);
-        b.2 = b.2.min(p.longitude);
-        b.3 = b.3.max(p.longitude);
-    }
-    b
+    let b = compute_bounds(track);
+    (b.min_lat, b.max_lat, b.min_lng, b.max_lng)
 }
 
 /// [`portion_candidates`] with each track's box known up front: a track
@@ -259,16 +253,15 @@ pub(crate) fn compute_portions_over(
 
 /// Polyline extent grown by `pad` metres, as (min_lat, max_lat, min_lng, max_lng).
 fn polyline_bounds(line: &[GpsPoint], pad: f64) -> (f64, f64, f64, f64) {
-    let mut b = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for p in line {
-        b.0 = b.0.min(p.latitude);
-        b.1 = b.1.max(p.latitude);
-        b.2 = b.2.min(p.longitude);
-        b.3 = b.3.max(p.longitude);
-    }
+    let b = compute_bounds(line);
     let d_lat = pad / 111_132.0;
-    let d_lng = pad / (111_320.0 * b.0.to_radians().cos()).max(1.0);
-    (b.0 - d_lat, b.1 + d_lat, b.2 - d_lng, b.3 + d_lng)
+    let d_lng = pad / (111_320.0 * b.min_lat.to_radians().cos()).max(1.0);
+    (
+        b.min_lat - d_lat,
+        b.max_lat + d_lat,
+        b.min_lng - d_lng,
+        b.max_lng + d_lng,
+    )
 }
 
 /// Whether any point of `track` falls inside `bounds`. Cheap pre-filter so
@@ -616,11 +609,7 @@ fn find_loop_boundaries(smoothed: &[usize], reference: &[GpsPoint], ref_length: 
     }
 
     // Precompute cumulative distances along reference
-    let mut cum_dist = Vec::with_capacity(reference.len());
-    cum_dist.push(0.0);
-    for i in 1..reference.len() {
-        cum_dist.push(cum_dist[i - 1] + haversine_distance(&reference[i - 1], &reference[i]));
-    }
+    let cum_dist = cumulative_distances(reference);
 
     let total_dist = *cum_dist.last().unwrap_or(&0.0);
     if total_dist < 1.0 {
